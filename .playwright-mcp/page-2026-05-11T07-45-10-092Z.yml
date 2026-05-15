@@ -1,0 +1,552 @@
+- generic [active] [ref=e283]:
+  - generic [ref=e285]:
+    - main [ref=e286]:
+      - application "tldraw" [ref=e288]:
+        - generic [ref=e289]:
+          - img
+        - generic:
+          - generic [ref=e4]:
+            - generic [ref=e5] [cursor=pointer]:
+              - img [ref=e7]
+              - img [ref=e10]
+            - generic [ref=e12]:
+              - textbox [ref=e306]: SJ251245NEGVI
+              - generic [ref=e17] [cursor=pointer]:
+                - img [ref=e19]
+                - img [ref=e21]
+            - img [ref=e549]
+          - generic [ref=e33]:
+            - generic [ref=e34]:
+              - generic [ref=e35] [cursor=pointer]:
+                - img [ref=e36]
+                - generic [ref=e38]: "80"
+              - img "周业翔" [ref=e295] [cursor=pointer]
+            - generic:
+              - generic:
+                - button "对话":
+                  - generic:
+                    - img
+                  - generic: 对话
+          - generic [ref=e44]:
+            - button [ref=e47] [cursor=pointer]:
+              - img [ref=e49]
+            - button [ref=e53] [cursor=pointer]:
+              - img [ref=e55]
+            - button [ref=e59] [cursor=pointer]:
+              - img [ref=e61]
+            - button [ref=e65] [cursor=pointer]:
+              - img [ref=e67]
+            - generic [ref=e69]:
+              - button [ref=e72] [cursor=pointer]:
+                - img [ref=e74]
+              - button [ref=e78] [cursor=pointer]:
+                - img [ref=e80]
+              - button [ref=e84] [cursor=pointer]:
+                - img [ref=e86]
+            - button [ref=e91] [cursor=pointer]:
+              - img [ref=e93]
+            - button [ref=e97] [cursor=pointer]:
+              - img [ref=e99]
+            - button [ref=e103] [cursor=pointer]:
+              - img [ref=e105]
+          - generic:
+            - complementary
+          - generic [ref=e108]:
+            - button [ref=e110] [cursor=pointer]:
+              - img [ref=e113]
+            - button [ref=e116] [cursor=pointer]:
+              - img [ref=e118]
+            - button [ref=e123] [cursor=pointer]:
+              - img [ref=e125]
+            - button [ref=e302] [cursor=pointer]:
+              - img [ref=e304]
+            - button "100%" [ref=e296] [cursor=pointer]:
+              - generic [ref=e139]: 100%
+          - generic:
+            - generic:
+              - generic: 输入你的想法开始创作，
+              - generic:
+                - generic: 或按
+                - generic:
+                  - generic: C
+                - generic: 开始对话
+          - generic:
+            - img
+        - generic:
+          - button "将焦点移至画布" [ref=e297] [cursor=pointer]
+          - region "Notifications (F8)":
+            - list
+    - complementary [ref=e143]:
+      - generic [ref=e145]:
+        - generic [ref=e146]:
+          - generic [ref=e147]:
+            - paragraph [ref=e152]: 新对话
+            - generic [ref=e153]:
+              - generic [ref=e154]:
+                - button [disabled] [ref=e155]:
+                  - img [ref=e157]
+                - button "历史对话" [ref=e299]:
+                  - img [ref=e161]
+              - button [disabled] [ref=e166]:
+                - img [ref=e168]
+              - button [ref=e170] [cursor=pointer]:
+                - img [ref=e172]
+          - generic [ref=e177]:
+            - generic [ref=e179]: 试试这些 Lovart Skills
+            - generic [ref=e180]:
+              - button "Seedance 2.0 视频创作 Seedance 2.0 视频创作" [ref=e181] [cursor=pointer]:
+                - img "Seedance 2.0 视频创作" [ref=e183]
+                - generic [ref=e184]: Seedance 2.0 视频创作
+              - button "一镜到底视频 一镜到底视频" [ref=e185] [cursor=pointer]:
+                - img "一镜到底视频" [ref=e187]
+                - generic [ref=e188]: 一镜到底视频
+              - button "Instagram Post Instagram Post" [ref=e189] [cursor=pointer]:
+                - img "Instagram Post" [ref=e191]
+                - generic [ref=e192]: Instagram Post
+              - button "一键跨平台适配 一键跨平台适配" [ref=e193] [cursor=pointer]:
+                - img "一键跨平台适配" [ref=e195]
+                - generic [ref=e196]: 一键跨平台适配
+              - button "Logo 生成 Logo 生成" [ref=e197] [cursor=pointer]:
+                - img "Logo 生成" [ref=e199]
+                - generic [ref=e200]: Logo 生成
+              - button "UGC：生活化上身图 UGC：生活化上身图" [ref=e201] [cursor=pointer]:
+                - img "UGC：生活化上身图" [ref=e203]
+                - generic [ref=e204]: UGC：生活化上身图
+              - button "AI 造型师：高转化模特图 AI 造型师：高转化模特图" [ref=e205] [cursor=pointer]:
+                - img "AI 造型师：高转化模特图" [ref=e207]
+                - generic [ref=e208]: AI 造型师：高转化模特图
+              - button "所有Skills" [ref=e209] [cursor=pointer]:
+                - img [ref=e211]
+                - generic [ref=e213]: 所有Skills
+          - generic [ref=e216]:
+            - generic [ref=e217]:
+              - textbox [ref=e218]:
+                - paragraph [ref=e219]
+              - generic:
+                - generic: Start with an idea, or type "@" to mention
+            - generic [ref=e220]:
+              - generic [ref=e221]:
+                - button [ref=e223] [cursor=pointer]:
+                  - img [ref=e225]
+                - button [ref=e228] [cursor=pointer]:
+                  - img [ref=e231]
+                - button "Agent" [ref=e300] [cursor=pointer]:
+                  - generic [ref=e234]:
+                    - img [ref=e236]
+                    - generic [ref=e238]: Agent
+                  - img [ref=e240]
+              - generic [ref=e242]:
+                - generic [ref=e243]:
+                  - button [ref=e246] [cursor=pointer]:
+                    - img [ref=e542]
+                  - button [ref=e552] [cursor=pointer]:
+                    - img [ref=e554]
+                - button [ref=e255] [cursor=pointer]:
+                  - img [ref=e256]
+        - generic:
+          - generic:
+            - generic:
+              - generic:
+                - generic:
+                  - img
+              - generic: 将文件拖拽至此处添加到对话
+  - listbox "Typeahead menu"
+  - region "Notifications alt+T"
+  - generic:
+    - generic:
+      - generic:
+        - generic:
+          - generic:
+            - generic:
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - img
+                    - textbox "Ask anything..."
+                    - button:
+                      - img
+                - generic:
+                  - generic: Search by
+                  - button "Logo":
+                    - img "Logo"
+          - generic:
+            - generic:
+              - generic:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - generic:
+                              - generic:
+                                - generic: Assistant
+                            - generic:
+                              - button:
+                                - generic:
+                                  - img
+                              - button:
+                                - generic:
+                                  - img
+                              - button:
+                                - generic:
+                                  - img
+                        - generic:
+                          - status:
+                            - img
+                            - generic: Loading...
+                        - generic:
+                          - generic:
+                            - text: Powered by
+                            - button "Logo":
+                              - img "Logo"
+                            - generic:
+                              - img
+  - dialog [ref=e557]:
+    - generic [ref=e559]:
+      - generic [ref=e560]:
+        - generic [ref=e561]: 模型偏好
+        - generic [ref=e562]:
+          - generic [ref=e563]: 自动
+          - switch [checked] [ref=e567]
+      - radiogroup [ref=e572]:
+        - generic [ref=e574]:
+          - radio "Image" [checked]
+          - generic [ref=e575] [cursor=pointer]: Image
+        - generic [ref=e576]:
+          - radio "Video"
+          - generic [ref=e577] [cursor=pointer]: Video
+        - generic [ref=e578]:
+          - radio "3D"
+          - generic [ref=e579] [cursor=pointer]: 3D
+      - generic [ref=e580]:
+        - generic [ref=e581]:
+          - generic [ref=e582]: Image
+          - generic [ref=e583] [cursor=pointer]:
+            - img "GPT Image 2 Auto" [ref=e585]
+            - generic [ref=e586]:
+              - generic [ref=e587]: GPT Image 2 Auto
+              - generic [ref=e588]: Automatically adjusts quality per prompt. Costs may vary.
+              - generic [ref=e590]: 30s
+            - generic [ref=e594]:
+              - checkbox [checked] [ref=e595]
+              - img
+          - generic [ref=e596] [cursor=pointer]:
+            - img "GPT Image 2 Low" [ref=e598]
+            - generic [ref=e599]:
+              - generic [ref=e600]: GPT Image 2 Low
+              - generic [ref=e601]: Fast, affordable, great for most tasks.
+              - generic [ref=e603]: 30s
+            - generic [ref=e607]:
+              - checkbox [checked] [ref=e608]
+              - img
+          - generic [ref=e609] [cursor=pointer]:
+            - img "GPT Image 2 Medium" [ref=e611]
+            - generic [ref=e612]:
+              - generic [ref=e613]: GPT Image 2 Medium
+              - generic [ref=e614]: More detail, moderate cost.
+              - generic [ref=e616]: 30s
+            - generic [ref=e620]:
+              - checkbox [checked] [ref=e621]
+              - img
+          - generic [ref=e622] [cursor=pointer]:
+            - img "GPT Image 2 High" [ref=e624]
+            - generic [ref=e625]:
+              - generic [ref=e626]: GPT Image 2 High
+              - generic [ref=e627]: Highest detail and most expensive.
+              - generic [ref=e629]: 30s
+            - generic [ref=e633]:
+              - checkbox [checked] [ref=e634]
+              - img
+          - generic [ref=e635] [cursor=pointer]:
+            - img "Nano Banana Pro" [ref=e637]
+            - generic [ref=e638]:
+              - generic [ref=e639]:
+                - text: Nano Banana Pro
+                - generic [ref=e642]: 1.4倍积分
+              - generic [ref=e643]: Professional's choice for advanced outputs.
+              - generic [ref=e645]: 20s
+            - generic [ref=e649]:
+              - checkbox [checked] [ref=e650]
+              - img
+          - generic [ref=e651] [cursor=pointer]:
+            - img "Nano Banana 2" [ref=e653]
+            - generic [ref=e654]:
+              - generic [ref=e655]:
+                - text: Nano Banana 2
+                - generic [ref=e658]: 1.4倍积分
+              - generic [ref=e659]: Generalist fast image generation model.
+              - generic [ref=e661]: 15s
+            - generic [ref=e665]:
+              - checkbox [checked] [ref=e666]
+              - img
+          - generic [ref=e667] [cursor=pointer]:
+            - img "GPT Image 1.5" [ref=e669]
+            - generic [ref=e670]:
+              - generic [ref=e671]: GPT Image 1.5
+              - generic [ref=e672]: OpenAI's advanced image model.
+              - generic [ref=e674]: 120s
+            - generic [ref=e678]:
+              - checkbox [checked] [ref=e679]
+              - img
+          - generic [ref=e680] [cursor=pointer]:
+            - img "Seedream 5.0 Lite" [ref=e682]
+            - generic [ref=e683]:
+              - generic [ref=e684]: Seedream 5.0 Lite
+              - generic [ref=e685]: Bytedance's latest image generation model.
+              - generic [ref=e687]: 120s
+            - generic [ref=e691]:
+              - checkbox [checked] [ref=e692]
+              - img
+          - generic [ref=e693] [cursor=pointer]:
+            - img "Luma uni-1" [ref=e695]
+            - generic [ref=e696]:
+              - generic [ref=e697]: Luma uni-1
+              - generic [ref=e698]: A unified model excelling at text, photorealism, and multi-panel scenes.
+              - generic [ref=e700]: 30s
+            - generic [ref=e704]:
+              - checkbox [checked] [ref=e705]
+              - img
+          - generic [ref=e706] [cursor=pointer]:
+            - img "Luma uni-1-max" [ref=e708]
+            - generic [ref=e709]:
+              - generic [ref=e710]: Luma uni-1-max
+              - generic [ref=e711]: A unified model excelling at text, photorealism, and multi-panel scenes.
+              - generic [ref=e713]: 30s
+            - generic [ref=e717]:
+              - checkbox [checked] [ref=e718]
+              - img
+          - generic [ref=e719] [cursor=pointer]:
+            - img "Flux.2 Max" [ref=e721]
+            - generic [ref=e722]:
+              - generic [ref=e723]: Flux.2 Max
+              - generic [ref=e724]: BFL's image generation model
+              - generic [ref=e726]: 10s
+            - generic [ref=e730]:
+              - checkbox [checked] [ref=e731]
+              - img
+          - generic [ref=e732] [cursor=pointer]:
+            - img "Flux.2 Pro" [ref=e734]
+            - generic [ref=e735]:
+              - generic [ref=e736]: Flux.2 Pro
+              - generic [ref=e737]: BFL's image generation model
+              - generic [ref=e739]: 10s
+            - generic [ref=e743]:
+              - checkbox [checked] [ref=e744]
+              - img
+          - generic [ref=e745] [cursor=pointer]:
+            - img "Seedream 4.5" [ref=e747]
+            - generic [ref=e748]:
+              - generic [ref=e749]: Seedream 4.5
+              - generic [ref=e750]: Bytedance's latest image generation model.
+              - generic [ref=e752]: 10s
+            - generic [ref=e756]:
+              - checkbox [checked] [ref=e757]
+              - img
+          - generic [ref=e758] [cursor=pointer]:
+            - img "Nano Banana" [ref=e760]
+            - generic [ref=e761]:
+              - generic [ref=e762]: Nano Banana
+              - generic [ref=e763]: Google’s image generation model.
+              - generic [ref=e765]: 20s
+            - generic [ref=e769]:
+              - checkbox [checked] [ref=e770]
+              - img
+          - generic [ref=e771] [cursor=pointer]:
+            - img "Seedream 4" [ref=e773]
+            - generic [ref=e774]:
+              - generic [ref=e775]: Seedream 4
+              - generic [ref=e776]: Bytedance's image generation model.
+              - generic [ref=e778]: 10s
+            - generic [ref=e782]:
+              - checkbox [checked] [ref=e783]
+              - img
+          - generic [ref=e784] [cursor=pointer]:
+            - img "Gemini Imagen 4" [ref=e786]
+            - generic [ref=e787]:
+              - generic [ref=e788]: Gemini Imagen 4
+              - generic [ref=e789]: Google's most advanced image model.
+              - generic [ref=e791]: 10s
+            - generic [ref=e795]:
+              - checkbox [checked] [ref=e796]
+              - img
+          - generic [ref=e797] [cursor=pointer]:
+            - img "Midjourney" [ref=e799]
+            - generic [ref=e800]:
+              - generic [ref=e801]: Midjourney
+              - generic [ref=e802]: A model that transforms text into artistic visuals.
+              - generic [ref=e804]: 20s
+            - generic [ref=e808]:
+              - checkbox [checked] [ref=e809]
+              - img
+        - generic [ref=e810]:
+          - generic [ref=e811]: Video
+          - generic [ref=e812] [cursor=pointer]:
+            - img "Seedance 2.0" [ref=e814]
+            - generic [ref=e815]:
+              - generic [ref=e816]:
+                - text: Seedance 2.0
+                - generic [ref=e818]: 会员专属
+              - generic [ref=e819]: "ByteDance’s Flagship Video Model: Universal Ref & AV Sync."
+              - generic [ref=e821]: 300s
+            - generic [ref=e825]:
+              - checkbox [checked] [ref=e826]
+              - img
+          - generic [ref=e827] [cursor=pointer]:
+            - img "Seedance 2.0 Fast" [ref=e829]
+            - generic [ref=e830]:
+              - generic [ref=e831]:
+                - text: Seedance 2.0 Fast
+                - generic [ref=e833]: 会员专属
+              - generic [ref=e834]: "ByteDance’s Flagship Video Model (Fast): Universal Ref & AV Sync with high-speed"
+              - generic [ref=e836]: 200s
+            - generic [ref=e840]:
+              - checkbox [checked] [ref=e841]
+              - img
+          - generic [ref=e842] [cursor=pointer]:
+            - img "Kling 3.0" [ref=e844]
+            - generic [ref=e845]:
+              - generic [ref=e846]:
+                - text: Kling 3.0
+                - generic [ref=e848]: 会员专属
+              - generic [ref=e849]: Kling's latest video model.
+              - generic [ref=e851]: 300s
+            - generic [ref=e855]:
+              - checkbox [checked] [ref=e856]
+              - img
+          - generic [ref=e857] [cursor=pointer]:
+            - img "Kling 3.0 Omni" [ref=e859]
+            - generic [ref=e860]:
+              - generic [ref=e861]:
+                - text: Kling 3.0 Omni
+                - generic [ref=e863]: 会员专属
+              - generic [ref=e864]: Kling's latest video model.
+              - generic [ref=e866]: 300s
+            - generic [ref=e870]:
+              - checkbox [checked] [ref=e871]
+              - img
+          - generic [ref=e872] [cursor=pointer]:
+            - img "Seedance 1.5 Pro" [ref=e874]
+            - generic [ref=e875]:
+              - generic [ref=e876]: Seedance 1.5 Pro
+              - generic [ref=e877]: Bytedance's latest video generation model
+              - generic [ref=e879]: 300s
+            - generic [ref=e883]:
+              - checkbox [checked] [ref=e884]
+              - img
+          - generic [ref=e885] [cursor=pointer]:
+            - img "Kling 2.6" [ref=e887]
+            - generic [ref=e888]:
+              - generic [ref=e889]:
+                - text: Kling 2.6
+                - generic [ref=e891]: 会员专属
+              - generic [ref=e892]: Kling's video model with integrated audio.
+              - generic [ref=e894]: 300s
+            - generic [ref=e898]:
+              - checkbox [checked] [ref=e899]
+              - img
+          - generic [ref=e900] [cursor=pointer]:
+            - img "Wan 2.6" [ref=e902]
+            - generic [ref=e903]:
+              - generic [ref=e904]: Wan 2.6
+              - generic [ref=e905]: Video generation model with built-in audio.
+              - generic [ref=e907]: 600s
+            - generic [ref=e911]:
+              - checkbox [checked] [ref=e912]
+              - img
+          - generic [ref=e913] [cursor=pointer]:
+            - img "Sora 2 Pro" [ref=e915]
+            - generic [ref=e916]:
+              - generic [ref=e917]:
+                - text: Sora 2 Pro
+                - generic [ref=e919]: 会员专属
+              - generic [ref=e920]: OpenAI's flagship video generation model with synced audio
+              - generic [ref=e922]: 300s
+            - generic [ref=e926]:
+              - checkbox [checked] [ref=e927]
+              - img
+          - generic [ref=e928] [cursor=pointer]:
+            - img "Sora 2" [ref=e930]
+            - generic [ref=e931]:
+              - generic [ref=e932]:
+                - text: Sora 2
+                - generic [ref=e934]: 会员专属
+              - generic [ref=e935]: OpenAI's flagship video generation model with synced audio
+              - generic [ref=e937]: 300s
+            - generic [ref=e941]:
+              - checkbox [checked] [ref=e942]
+              - img
+          - generic [ref=e943] [cursor=pointer]:
+            - img "Veo 3.1" [ref=e945]
+            - generic [ref=e946]:
+              - generic [ref=e947]:
+                - text: Veo 3.1
+                - generic [ref=e949]: 会员专属
+              - generic [ref=e950]: Google’s latest video model with integrated audio and visuals.
+              - generic [ref=e952]: 180s
+            - generic [ref=e956]:
+              - checkbox [checked] [ref=e957]
+              - img
+          - generic [ref=e958] [cursor=pointer]:
+            - img "Veo 3.1 Fast" [ref=e960]
+            - generic [ref=e961]:
+              - generic [ref=e962]:
+                - text: Veo 3.1 Fast
+                - generic [ref=e964]: 会员专属
+              - generic [ref=e965]: Google’s latest video model with integrated audio and visuals.
+              - generic [ref=e967]: 180s
+            - generic [ref=e971]:
+              - checkbox [checked] [ref=e972]
+              - img
+          - generic [ref=e973] [cursor=pointer]:
+            - img "Kling O1" [ref=e975]
+            - generic [ref=e976]:
+              - generic [ref=e977]:
+                - text: Kling O1
+                - generic [ref=e979]: 会员专属
+              - generic [ref=e980]: Kling's video model.
+              - generic [ref=e982]: 300s
+            - generic [ref=e986]:
+              - checkbox [checked] [ref=e987]
+              - img
+          - generic [ref=e988] [cursor=pointer]:
+            - img "Hailuo 2.3" [ref=e990]
+            - generic [ref=e991]:
+              - generic [ref=e992]: Hailuo 2.3
+              - generic [ref=e993]: Hailuo's latest video model.
+              - generic [ref=e995]: 180s
+            - generic [ref=e999]:
+              - checkbox [checked] [ref=e1000]
+              - img
+          - generic [ref=e1001] [cursor=pointer]:
+            - img "Veo 3" [ref=e1003]
+            - generic [ref=e1004]:
+              - generic [ref=e1005]:
+                - text: Veo 3
+                - generic [ref=e1007]: 会员专属
+              - generic [ref=e1008]: Google’s video model with integrated audio and visuals.
+              - generic [ref=e1010]: 180s
+            - generic [ref=e1014]:
+              - checkbox [checked] [ref=e1015]
+              - img
+          - generic [ref=e1016] [cursor=pointer]:
+            - img "Vidu Q2" [ref=e1018]
+            - generic [ref=e1019]:
+              - generic [ref=e1020]: Vidu Q2
+              - generic [ref=e1021]: Vidu's latest video model.
+              - generic [ref=e1023]: 300s
+            - generic [ref=e1027]:
+              - checkbox [checked] [ref=e1028]
+              - img
+        - generic [ref=e1029]:
+          - generic [ref=e1030]: 3D
+          - generic [ref=e1031] [cursor=pointer]:
+            - img "Tripo" [ref=e1033]
+            - generic [ref=e1034]:
+              - generic [ref=e1035]: Tripo
+              - generic [ref=e1036]: High-quality 3D model generator.
+              - generic [ref=e1038]: 180s
+            - generic [ref=e1042]:
+              - checkbox [checked] [ref=e1043]
+              - img

@@ -1,0 +1,185 @@
+- generic [ref=e1]:
+  - button "Google 账号： 周业翔 (tokihamisaa@gmail.com)" [ref=e11] [cursor=pointer]:
+    - img [ref=e13]
+    - img [ref=e19]
+  - main [ref=e21]:
+    - generic:
+      - button "主菜单" [ref=e38] [cursor=pointer]:
+        - img [ref=e41]: menu
+      - button "发起新对话" [disabled] [ref=e45]:
+        - generic [ref=e47]: Gemini
+    - generic [ref=e52]:
+      - button "临时对话" [ref=e814] [cursor=pointer]:
+        - img [ref=e816]
+      - generic [ref=e61]:
+        - button "PRO" [disabled]:
+          - generic: PRO
+    - generic [ref=e23]:
+      - navigation "打开边栏" [ref=e24]:
+        - generic [ref=e63]:
+          - button "搜索" [ref=e386] [cursor=pointer]:
+            - img [ref=e387]: search
+          - generic [ref=e64]:
+            - group [ref=e65]:
+              - link "发起新对话" [ref=e67] [cursor=pointer]:
+                - /url: /app
+                - img [ref=e70]: edit_square
+                - generic [ref=e74]: 发起新对话
+            - generic [ref=e75]:
+              - link "我的内容" [ref=e94] [cursor=pointer]:
+                - /url: mystuff
+                - img [ref=e97]: family_star
+                - generic [ref=e98]: 我的内容
+              - generic [ref=e391]:
+                - link "笔记本" [ref=e393] [cursor=pointer]:
+                  - /url: /notebooks/view
+                  - generic [ref=e394]: 笔记本
+                  - img [ref=e397]: keyboard_arrow_right
+                - region [ref=e398]:
+                  - generic [ref=e400]:
+                    - button "2025年终述职" [ref=e401] [cursor=pointer]:
+                      - img [ref=e404]: book_5
+                      - generic [ref=e405]: 2025年终述职
+                    - button "Open notebook actions menu" [ref=e407] [cursor=pointer]: more_vert
+                  - generic [ref=e411]:
+                    - button "Mercado平台规则" [ref=e412] [cursor=pointer]:
+                      - img [ref=e415]: book_5
+                      - generic [ref=e416]: Mercado平台规则
+                    - button "Open notebook actions menu" [ref=e418] [cursor=pointer]: more_vert
+                - generic "新建笔记本" [ref=e422] [cursor=pointer]:
+                  - img [ref=e425]: add_2
+                  - generic [ref=e426]: 新建笔记本
+              - generic [ref=e100]:
+                - link "Gem" [ref=e103] [cursor=pointer]:
+                  - /url: /gems/view
+                  - generic [ref=e104]: Gem
+                  - img [ref=e107]: keyboard_arrow_right
+                - region [ref=e108]:
+                  - generic [ref=e110]:
+                    - button "数据分析师" [ref=e111] [cursor=pointer]:
+                      - img [ref=e112]: gem_spark
+                      - generic [ref=e113]: 数据分析师
+                    - button "“数据分析师”Gem 的更多选项" [ref=e115] [cursor=pointer]: more_vert
+                  - generic [ref=e119]:
+                    - button "vibe coding" [ref=e120] [cursor=pointer]:
+                      - img [ref=e121]: gem_spark
+                      - generic [ref=e122]: vibe coding
+                    - button "“vibe coding”Gem 的更多选项" [ref=e124] [cursor=pointer]: more_vert
+              - generic [ref=e129]:
+                - heading "对话" [level=1] [ref=e131]
+                - region [ref=e132]:
+                  - button "Design de Detalhes da Página de E-commerce" [ref=e134] [cursor=pointer]:
+                    - generic [ref=e135]: Design de Detalhes da Página de E-commerce
+                  - button "Design de Detalhes da Página do Produto" [ref=e139] [cursor=pointer]:
+                    - generic [ref=e140]: Design de Detalhes da Página do Produto
+                  - button "Prompt Design for Product Details Page" [ref=e144] [cursor=pointer]:
+                    - generic [ref=e145]: Prompt Design for Product Details Page
+                  - button "E-commerce Design for Safety Grab Bars" [ref=e149] [cursor=pointer]:
+                    - generic [ref=e150]: E-commerce Design for Safety Grab Bars
+                  - button "电商详情页设计方案生成" [ref=e154] [cursor=pointer]:
+                    - generic [ref=e155]: 电商详情页设计方案生成
+                  - button "巴西仿真花市场分析方案" [ref=e159] [cursor=pointer]:
+                    - generic [ref=e160]: 巴西仿真花市场分析方案
+                  - button "巴西干花市场分析方案" [ref=e164] [cursor=pointer]:
+                    - generic [ref=e165]: 巴西干花市场分析方案
+                  - button "Mercado API 无法获取大盘数据" [ref=e169] [cursor=pointer]:
+                    - generic [ref=e170]: Mercado API 无法获取大盘数据
+                  - button "玩具相机产品描述生成" [ref=e174] [cursor=pointer]:
+                    - generic [ref=e175]: 玩具相机产品描述生成
+                  - button "ECharts 气泡图双向滑块实现" [ref=e179] [cursor=pointer]:
+                    - generic [ref=e180]: ECharts 气泡图双向滑块实现
+                  - button "N8N 凭据丢失原因与解决" [ref=e184] [cursor=pointer]:
+                    - generic [ref=e185]: N8N 凭据丢失原因与解决
+                  - button "Design E-commerce Page For Cushion" [ref=e189] [cursor=pointer]:
+                    - generic [ref=e190]: Design E-commerce Page For Cushion
+                  - button "Gemini 节点提示词优化" [ref=e194] [cursor=pointer]:
+                    - generic [ref=e195]: Gemini 节点提示词优化
+                  - button "优化看板系统功能与显示" [ref=e199] [cursor=pointer]:
+                    - generic [ref=e200]: 优化看板系统功能与显示
+                  - button "Request Cannot Be Fulfilled" [ref=e204] [cursor=pointer]:
+                    - generic [ref=e205]: Request Cannot Be Fulfilled
+                  - button "Modify Order Fetching Logic" [ref=e209] [cursor=pointer]:
+                    - generic [ref=e210]: Modify Order Fetching Logic
+                  - button "React 应用部署到 Hugging Face" [ref=e214] [cursor=pointer]:
+                    - generic [ref=e215]: React 应用部署到 Hugging Face
+                  - button "电商数据可视化分析方案" [ref=e219] [cursor=pointer]:
+                    - generic [ref=e220]: 电商数据可视化分析方案
+                  - button "电商类目分析与重分类系统" [ref=e224] [cursor=pointer]:
+                    - generic [ref=e225]: 电商类目分析与重分类系统
+                  - button "Canvas Copied Confirmation" [ref=e229] [cursor=pointer]:
+                    - generic [ref=e230]: Canvas Copied Confirmation
+                  - button "UI 优化：类目追踪面板更新" [ref=e234] [cursor=pointer]:
+                    - generic [ref=e235]: UI 优化：类目追踪面板更新
+                  - button "N8N 获取类目三级 ID" [ref=e239] [cursor=pointer]:
+                    - generic [ref=e240]: N8N 获取类目三级 ID
+                  - button "n8n 访问企业微信云文档" [ref=e244] [cursor=pointer]:
+                    - generic [ref=e245]: n8n 访问企业微信云文档
+                  - button "Canvas Copied Confirmation" [ref=e249] [cursor=pointer]:
+                    - generic [ref=e250]: Canvas Copied Confirmation
+                  - button "Cyber 数据分析与战略建议" [ref=e254] [cursor=pointer]:
+                    - generic [ref=e255]: Cyber 数据分析与战略建议
+                  - button "INDEX/MATCH to IF Formula Conversion" [ref=e259] [cursor=pointer]:
+                    - generic [ref=e260]: INDEX/MATCH to IF Formula Conversion
+                  - button "26年3月业绩分析与改进措施" [ref=e264] [cursor=pointer]:
+                    - generic [ref=e265]: 26年3月业绩分析与改进措施
+                  - button "26年2月业绩复盘与改进计划" [ref=e269] [cursor=pointer]:
+                    - generic [ref=e270]: 26年2月业绩复盘与改进计划
+                  - button "Mercado Libre 数据分析优化" [ref=e274] [cursor=pointer]:
+                    - generic [ref=e275]: Mercado Libre 数据分析优化
+                  - button "巴西虾皮广告数据分析" [ref=e279] [cursor=pointer]:
+                    - generic [ref=e280]: 巴西虾皮广告数据分析
+                  - button "Workflow Optimization and Refactoring" [ref=e284] [cursor=pointer]:
+                    - generic [ref=e285]: Workflow Optimization and Refactoring
+                  - button "晋升方案：AI赋能拉美市场扩张" [ref=e289] [cursor=pointer]:
+                    - generic [ref=e290]: 晋升方案：AI赋能拉美市场扩张
+                  - button "n8n 节点重复执行优化" [ref=e294] [cursor=pointer]:
+                    - generic [ref=e295]: n8n 节点重复执行优化
+            - group [ref=e298]:
+              - button "Settings & help" [ref=e300] [cursor=pointer]:
+                - img [ref=e303]: settings_2
+                - generic [ref=e307]: 设置和帮助
+      - generic [ref=e821]:
+        - generic [ref=e822]:
+          - heading "与 Gemini 对话" [level=1] [ref=e823]
+          - generic [ref=e828]:
+            - generic [ref=e829]:
+              - generic [ref=e835]: 业翔，你好
+              - heading "今天想聊点什么？" [level=1] [ref=e842]:
+                - generic [ref=e843]: 今天想聊点什么？
+            - generic [ref=e851]:
+              - button "为你推荐，按钮，点按即可使用工具" [ref=e853] [cursor=pointer]:
+                - generic [ref=e854]: 为你推荐
+              - button "🖼️ 制作图片，按钮，点按即可使用工具" [ref=e856] [cursor=pointer]:
+                - generic [ref=e857]: 🖼️ 制作图片
+              - button "🎸 创作音乐，按钮，点按即可使用工具" [ref=e859] [cursor=pointer]:
+                - generic [ref=e860]: 🎸 创作音乐
+              - button "给我的一天注入活力，按钮，点按即可使用工具" [ref=e862] [cursor=pointer]:
+                - generic [ref=e863]: 给我的一天注入活力
+              - button "帮我学习，按钮，点按即可使用工具" [ref=e865] [cursor=pointer]:
+                - generic [ref=e866]: 帮我学习
+              - button "随便写点什么，按钮，点按即可使用工具" [ref=e868] [cursor=pointer]:
+                - generic [ref=e869]: 随便写点什么
+        - generic [ref=e870]:
+          - group [ref=e871]:
+            - generic [ref=e874]:
+              - textbox "为 Gemini 输入提示" [active] [ref=e879]:
+                - text: 问问 Gemini
+                - paragraph [ref=e880]
+              - generic [ref=e881]:
+                - button "打开文件上传菜单" [ref=e886] [cursor=pointer]:
+                  - img [ref=e887]: add_2
+                - button "工具" [ref=e893]:
+                  - img [ref=e894]: page_info
+                  - generic [ref=e897]: 工具
+              - generic [ref=e900]:
+                - button "打开模式选择器" [ref=e903]:
+                  - generic [ref=e905]:
+                    - generic [ref=e906]: 快速
+                    - img [ref=e907]: keyboard_arrow_down
+                - generic [ref=e910]:
+                  - button "麦克风" [ref=e913] [cursor=pointer]:
+                    - img [ref=e915]: mic
+                  - generic:
+                    - button "发送" [disabled]:
+                      - img: send
+          - paragraph [ref=e920]

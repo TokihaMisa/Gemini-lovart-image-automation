@@ -1,0 +1,259 @@
+- generic [ref=e283]:
+  - generic [ref=e285]:
+    - main [ref=e286]:
+      - application "tldraw" [ref=e288]:
+        - generic [ref=e289]:
+          - img
+        - generic:
+          - generic [ref=e4]:
+            - generic [ref=e5] [cursor=pointer]:
+              - img [ref=e7]
+              - img [ref=e10]
+            - generic [ref=e12]:
+              - textbox [ref=e306]: SJ251245NEGVI
+              - generic [ref=e17] [cursor=pointer]:
+                - img [ref=e19]
+                - img [ref=e21]
+          - generic [ref=e33]:
+            - generic [ref=e34]:
+              - generic [ref=e35] [cursor=pointer]:
+                - img [ref=e36]
+                - generic [ref=e38]: "80"
+              - img "周业翔" [ref=e295] [cursor=pointer]
+            - generic:
+              - generic:
+                - button "对话":
+                  - generic:
+                    - img
+                  - generic: 对话
+          - generic [ref=e44]:
+            - button [ref=e47] [cursor=pointer]:
+              - img [ref=e49]
+            - button [ref=e53] [cursor=pointer]:
+              - img [ref=e55]
+            - button [ref=e59] [cursor=pointer]:
+              - img [ref=e61]
+            - button [ref=e65] [cursor=pointer]:
+              - img [ref=e67]
+            - generic [ref=e69]:
+              - button [ref=e72] [cursor=pointer]:
+                - img [ref=e74]
+              - button [ref=e78] [cursor=pointer]:
+                - img [ref=e80]
+              - button [ref=e84] [cursor=pointer]:
+                - img [ref=e86]
+            - button [ref=e91] [cursor=pointer]:
+              - img [ref=e93]
+            - button [ref=e97] [cursor=pointer]:
+              - img [ref=e99]
+            - button [ref=e103] [cursor=pointer]:
+              - img [ref=e105]
+          - generic:
+            - complementary
+          - generic [ref=e108]:
+            - button [ref=e110] [cursor=pointer]:
+              - img [ref=e113]
+            - button [ref=e116] [cursor=pointer]:
+              - img [ref=e118]
+            - button [ref=e123] [cursor=pointer]:
+              - img [ref=e125]
+            - button [ref=e302] [cursor=pointer]:
+              - img [ref=e304]
+            - button "100%" [ref=e296] [cursor=pointer]:
+              - generic [ref=e139]: 100%
+          - generic:
+            - generic:
+              - generic: 输入你的想法开始创作，
+              - generic:
+                - generic: 或按
+                - generic:
+                  - generic: C
+                - generic: 开始对话
+          - generic:
+            - img
+        - generic:
+          - button "将焦点移至画布" [ref=e297] [cursor=pointer]
+          - region "Notifications (F8)":
+            - list
+    - complementary [ref=e143]:
+      - generic [ref=e145]:
+        - generic [ref=e146]:
+          - generic [ref=e147]:
+            - paragraph [ref=e152]: 新对话
+            - generic [ref=e153]:
+              - generic [ref=e154]:
+                - button [disabled] [ref=e155]:
+                  - img [ref=e157]
+                - button "历史对话" [ref=e299]:
+                  - img [ref=e161]
+              - button [disabled] [ref=e166]:
+                - img [ref=e168]
+              - button [ref=e170] [cursor=pointer]:
+                - img [ref=e172]
+          - generic [ref=e177]:
+            - generic [ref=e179]: 试试这些 Lovart Skills
+            - generic [ref=e180]:
+              - button "Seedance 2.0 视频创作 Seedance 2.0 视频创作" [ref=e181] [cursor=pointer]:
+                - img "Seedance 2.0 视频创作" [ref=e183]
+                - generic [ref=e184]: Seedance 2.0 视频创作
+              - button "一镜到底视频 一镜到底视频" [ref=e185] [cursor=pointer]:
+                - img "一镜到底视频" [ref=e187]
+                - generic [ref=e188]: 一镜到底视频
+              - button "Instagram Post Instagram Post" [ref=e189] [cursor=pointer]:
+                - img "Instagram Post" [ref=e191]
+                - generic [ref=e192]: Instagram Post
+              - button "一键跨平台适配 一键跨平台适配" [ref=e193] [cursor=pointer]:
+                - img "一键跨平台适配" [ref=e195]
+                - generic [ref=e196]: 一键跨平台适配
+              - button "Logo 生成 Logo 生成" [ref=e197] [cursor=pointer]:
+                - img "Logo 生成" [ref=e199]
+                - generic [ref=e200]: Logo 生成
+              - button "UGC：生活化上身图 UGC：生活化上身图" [ref=e201] [cursor=pointer]:
+                - img "UGC：生活化上身图" [ref=e203]
+                - generic [ref=e204]: UGC：生活化上身图
+              - button "AI 造型师：高转化模特图 AI 造型师：高转化模特图" [ref=e205] [cursor=pointer]:
+                - img "AI 造型师：高转化模特图" [ref=e207]
+                - generic [ref=e208]: AI 造型师：高转化模特图
+              - button "所有Skills" [ref=e209] [cursor=pointer]:
+                - img [ref=e211]
+                - generic [ref=e213]: 所有Skills
+          - generic [ref=e216]:
+            - generic [ref=e217]:
+              - textbox [ref=e218]:
+                - paragraph [ref=e219]
+              - generic:
+                - generic: Start with an idea, or type "@" to mention
+            - generic [ref=e220]:
+              - generic [ref=e221]:
+                - button [ref=e223] [cursor=pointer]:
+                  - img [ref=e225]
+                - button [ref=e228] [cursor=pointer]:
+                  - img [ref=e231]
+                - button "Agent" [ref=e300] [cursor=pointer]:
+                  - generic [ref=e234]:
+                    - img [ref=e236]
+                    - generic [ref=e238]: Agent
+                  - img [ref=e240]
+              - generic [ref=e242]:
+                - generic [ref=e243]:
+                  - button [ref=e246] [cursor=pointer]:
+                    - img [ref=e248]
+                  - button [ref=e251] [cursor=pointer]:
+                    - img [ref=e253]
+                - button [ref=e255] [cursor=pointer]:
+                  - img [ref=e256]
+        - generic:
+          - generic:
+            - generic:
+              - generic:
+                - generic:
+                  - img
+              - generic: 将文件拖拽至此处添加到对话
+  - listbox "Typeahead menu"
+  - region "Notifications alt+T"
+  - dialog [ref=e332]:
+    - generic [ref=e335]:
+      - button [ref=e337] [cursor=pointer]:
+        - img [ref=e339]
+      - generic [ref=e341]:
+        - generic [ref=e343]: 账户管理
+        - button "个人主页" [ref=e344] [cursor=pointer]:
+          - img [ref=e345]
+          - generic [ref=e347]: 个人主页
+        - button "订阅" [ref=e348] [cursor=pointer]:
+          - img [ref=e349]
+          - generic [ref=e351]: 订阅
+        - button "账单" [ref=e352] [cursor=pointer]:
+          - img [ref=e353]
+          - generic [ref=e355]: 账单
+      - generic [ref=e359]:
+        - heading "订阅" [level=3] [ref=e361]
+        - generic [ref=e362]:
+          - generic [ref=e364]: Free
+          - button "升级" [ref=e366] [cursor=pointer]:
+            - generic [ref=e367]: 升级
+        - generic [ref=e368]:
+          - generic [ref=e370]:
+            - img [ref=e371]
+            - generic [ref=e373]: "80"
+          - generic [ref=e375]:
+            - generic [ref=e376]: "本日积分余额:"
+            - generic [ref=e377]:
+              - img [ref=e378]
+              - generic [ref=e380]: "80"
+          - generic [ref=e381]:
+            - generic [ref=e382]: Nano Banana 2 / Pro：1.4倍积分消耗（当地时间 15:00-17:00）
+            - img [ref=e385] [cursor=pointer]
+        - generic [ref=e387]:
+          - button "用量" [ref=e390] [cursor=pointer]:
+            - generic [ref=e391]: 用量
+          - generic [ref=e394]:
+            - generic [ref=e395]:
+              - generic [ref=e397]: 明细
+              - button "全部" [ref=e399] [cursor=pointer]:
+                - generic [ref=e400]: 全部
+                - img [ref=e401]
+              - generic [ref=e404]: 日期
+              - generic [ref=e406]: 积分消耗
+            - generic [ref=e407]:
+              - generic [ref=e408]:
+                - generic [ref=e412]: Daily Login Bonus
+                - generic [ref=e414]: 已获取
+                - generic [ref=e416]: 2026-05-11 14:29
+                - generic [ref=e418]: "+80"
+              - generic [ref=e419]:
+                - generic [ref=e423]: Daily Bonus Credits Expired
+                - generic [ref=e425]: 已消耗
+                - generic [ref=e427]: 2026-04-09 07:59
+                - generic [ref=e429]: "-80"
+              - generic [ref=e430]:
+                - generic [ref=e434]: Daily Login Bonus
+                - generic [ref=e436]: 已获取
+                - generic [ref=e438]: 2026-04-08 10:49
+                - generic [ref=e440]: "+80"
+              - generic [ref=e441]:
+                - generic [ref=e445]: Daily Bonus Credits Expired
+                - generic [ref=e447]: 已消耗
+                - generic [ref=e449]: 2026-04-01 07:59
+                - generic [ref=e451]: "-80"
+              - generic [ref=e452]:
+                - generic [ref=e456]: Daily Login Bonus
+                - generic [ref=e458]: 已获取
+                - generic [ref=e460]: 2026-03-31 14:37
+                - generic [ref=e462]: "+80"
+              - generic [ref=e463]:
+                - generic [ref=e467]: Daily Bonus Credits Expired
+                - generic [ref=e469]: 已消耗
+                - generic [ref=e471]: 2026-03-29 07:59
+                - generic [ref=e473]: "-28"
+              - generic [ref=e474]:
+                - generic [ref=e478]: "[@image:#1: Image]参考这个图片结构。 A three-part scientific infographic with a layout similar to image_0.png"
+                - generic [ref=e480]: 已消耗
+                - generic [ref=e482]: 2026-03-28 16:58
+                - generic [ref=e484]: "-14"
+              - generic [ref=e485]:
+                - generic [ref=e489]: "[@image:#1: Image] 参考这张图片的结构。 A three-panel (A, B, C) academic research illustration diagram on the"
+                - generic [ref=e491]: 已消耗
+                - generic [ref=e493]: 2026-03-28 16:33
+                - generic [ref=e495]: "-12"
+              - generic [ref=e496]:
+                - generic [ref=e500]: generator
+                - generic [ref=e502]: 已消耗
+                - generic [ref=e504]: 2026-03-28 16:26
+                - generic [ref=e506]: "-9"
+              - generic [ref=e507]:
+                - generic [ref=e511]: generator
+                - generic [ref=e513]: 已消耗
+                - generic [ref=e515]: 2026-03-28 16:19
+                - generic [ref=e517]: "-5"
+              - generic [ref=e518]:
+                - generic [ref=e522]: "参考[@image:#1: Image]图片结构 整体描述： 一个详细的、分三部分的（a, b, c）科学研究图表，采用��"
+                - generic [ref=e524]: 已消耗
+                - generic [ref=e526]: 2026-03-28 16:16
+                - generic [ref=e528]: "-12"
+              - generic [ref=e529]:
+                - generic [ref=e533]: Daily Login Bonus
+                - generic [ref=e535]: 已获取
+                - generic [ref=e537]: 2026-03-28 16:10
+                - generic [ref=e539]: "+80"
+              - generic [ref=e541]: 暂无更多数据

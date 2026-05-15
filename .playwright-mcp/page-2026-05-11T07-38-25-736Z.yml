@@ -1,0 +1,511 @@
+- generic [ref=e1]:
+  - button "Google 账号： 周业翔 (tokihamisaa@gmail.com)" [ref=e11] [cursor=pointer]:
+    - img [ref=e13]
+    - img [ref=e19]
+  - main [ref=e21]:
+    - generic:
+      - button "主菜单" [ref=e38] [cursor=pointer]:
+        - img [ref=e41]: menu
+      - button "发起新对话" [ref=e45] [cursor=pointer]:
+        - generic [ref=e47]: Gemini
+    - generic [ref=e49]:
+      - generic [ref=e924]: "Prompt Engineering: Role Definition"
+      - generic [ref=e52]:
+        - button "分享对话内容" [ref=e926] [cursor=pointer]:
+          - img [ref=e927]: share
+        - button "打开对话操作菜单。" [ref=e931] [cursor=pointer]:
+          - img [ref=e932]: more_vert
+    - generic [ref=e23]:
+      - navigation "打开边栏" [ref=e24]:
+        - generic [ref=e63]:
+          - button "搜索" [ref=e386] [cursor=pointer]:
+            - img [ref=e387]: search
+          - generic [ref=e64]:
+            - group [ref=e65]:
+              - link "发起新对话" [ref=e67] [cursor=pointer]:
+                - /url: /app
+                - img [ref=e70]: edit_square
+                - generic [ref=e74]: 发起新对话
+            - generic [ref=e75]:
+              - link "我的内容" [ref=e94] [cursor=pointer]:
+                - /url: mystuff
+                - img [ref=e97]: family_star
+                - generic [ref=e98]: 我的内容
+              - generic [ref=e391]:
+                - link "笔记本" [ref=e393] [cursor=pointer]:
+                  - /url: /notebooks/view
+                  - generic [ref=e394]: 笔记本
+                  - img [ref=e397]: keyboard_arrow_right
+                - region [ref=e398]:
+                  - generic [ref=e400]:
+                    - button "2025年终述职" [ref=e401] [cursor=pointer]:
+                      - img [ref=e404]: book_5
+                      - generic [ref=e405]: 2025年终述职
+                    - button "Open notebook actions menu" [ref=e407] [cursor=pointer]: more_vert
+                  - generic [ref=e411]:
+                    - button "Mercado平台规则" [ref=e412] [cursor=pointer]:
+                      - img [ref=e415]: book_5
+                      - generic [ref=e416]: Mercado平台规则
+                    - button "Open notebook actions menu" [ref=e418] [cursor=pointer]: more_vert
+                - generic "新建笔记本" [ref=e422] [cursor=pointer]:
+                  - img [ref=e425]: add_2
+                  - generic [ref=e426]: 新建笔记本
+              - generic [ref=e100]:
+                - link "Gem" [ref=e103] [cursor=pointer]:
+                  - /url: /gems/view
+                  - generic [ref=e104]: Gem
+                  - img [ref=e107]: keyboard_arrow_right
+                - region [ref=e108]:
+                  - generic [ref=e110]:
+                    - button "数据分析师" [ref=e111] [cursor=pointer]:
+                      - img [ref=e112]: gem_spark
+                      - generic [ref=e113]: 数据分析师
+                    - button "“数据分析师”Gem 的更多选项" [ref=e115] [cursor=pointer]: more_vert
+                  - generic [ref=e119]:
+                    - button "vibe coding" [ref=e120] [cursor=pointer]:
+                      - img [ref=e121]: gem_spark
+                      - generic [ref=e122]: vibe coding
+                    - button "“vibe coding”Gem 的更多选项" [ref=e124] [cursor=pointer]: more_vert
+              - generic [ref=e129]:
+                - heading "对话" [level=1] [ref=e131]
+                - region [ref=e132]:
+                  - 'button "Prompt Engineering: Role Definition" [ref=e936] [cursor=pointer]':
+                    - generic [ref=e937]: "Prompt Engineering: Role Definition"
+                  - button "Design de Detalhes da Página de E-commerce" [ref=e134] [cursor=pointer]:
+                    - generic [ref=e135]: Design de Detalhes da Página de E-commerce
+                  - button "Design de Detalhes da Página do Produto" [ref=e139] [cursor=pointer]:
+                    - generic [ref=e140]: Design de Detalhes da Página do Produto
+                  - button "Prompt Design for Product Details Page" [ref=e144] [cursor=pointer]:
+                    - generic [ref=e145]: Prompt Design for Product Details Page
+                  - button "E-commerce Design for Safety Grab Bars" [ref=e149] [cursor=pointer]:
+                    - generic [ref=e150]: E-commerce Design for Safety Grab Bars
+                  - button "电商详情页设计方案生成" [ref=e154] [cursor=pointer]:
+                    - generic [ref=e155]: 电商详情页设计方案生成
+                  - button "巴西仿真花市场分析方案" [ref=e159] [cursor=pointer]:
+                    - generic [ref=e160]: 巴西仿真花市场分析方案
+                  - button "巴西干花市场分析方案" [ref=e164] [cursor=pointer]:
+                    - generic [ref=e165]: 巴西干花市场分析方案
+                  - button "Mercado API 无法获取大盘数据" [ref=e169] [cursor=pointer]:
+                    - generic [ref=e170]: Mercado API 无法获取大盘数据
+                  - button "玩具相机产品描述生成" [ref=e174] [cursor=pointer]:
+                    - generic [ref=e175]: 玩具相机产品描述生成
+                  - button "ECharts 气泡图双向滑块实现" [ref=e179] [cursor=pointer]:
+                    - generic [ref=e180]: ECharts 气泡图双向滑块实现
+                  - button "N8N 凭据丢失原因与解决" [ref=e184] [cursor=pointer]:
+                    - generic [ref=e185]: N8N 凭据丢失原因与解决
+                  - button "Design E-commerce Page For Cushion" [ref=e189] [cursor=pointer]:
+                    - generic [ref=e190]: Design E-commerce Page For Cushion
+                  - button "Gemini 节点提示词优化" [ref=e194] [cursor=pointer]:
+                    - generic [ref=e195]: Gemini 节点提示词优化
+                  - button "优化看板系统功能与显示" [ref=e199] [cursor=pointer]:
+                    - generic [ref=e200]: 优化看板系统功能与显示
+                  - button "Request Cannot Be Fulfilled" [ref=e204] [cursor=pointer]:
+                    - generic [ref=e205]: Request Cannot Be Fulfilled
+                  - button "Modify Order Fetching Logic" [ref=e209] [cursor=pointer]:
+                    - generic [ref=e210]: Modify Order Fetching Logic
+                  - button "React 应用部署到 Hugging Face" [ref=e214] [cursor=pointer]:
+                    - generic [ref=e215]: React 应用部署到 Hugging Face
+                  - button "电商数据可视化分析方案" [ref=e219] [cursor=pointer]:
+                    - generic [ref=e220]: 电商数据可视化分析方案
+                  - button "电商类目分析与重分类系统" [ref=e224] [cursor=pointer]:
+                    - generic [ref=e225]: 电商类目分析与重分类系统
+                  - button "Canvas Copied Confirmation" [ref=e229] [cursor=pointer]:
+                    - generic [ref=e230]: Canvas Copied Confirmation
+                  - button "UI 优化：类目追踪面板更新" [ref=e234] [cursor=pointer]:
+                    - generic [ref=e235]: UI 优化：类目追踪面板更新
+                  - button "N8N 获取类目三级 ID" [ref=e239] [cursor=pointer]:
+                    - generic [ref=e240]: N8N 获取类目三级 ID
+                  - button "n8n 访问企业微信云文档" [ref=e244] [cursor=pointer]:
+                    - generic [ref=e245]: n8n 访问企业微信云文档
+                  - button "Canvas Copied Confirmation" [ref=e249] [cursor=pointer]:
+                    - generic [ref=e250]: Canvas Copied Confirmation
+                  - button "Cyber 数据分析与战略建议" [ref=e254] [cursor=pointer]:
+                    - generic [ref=e255]: Cyber 数据分析与战略建议
+                  - button "INDEX/MATCH to IF Formula Conversion" [ref=e259] [cursor=pointer]:
+                    - generic [ref=e260]: INDEX/MATCH to IF Formula Conversion
+                  - button "26年3月业绩分析与改进措施" [ref=e264] [cursor=pointer]:
+                    - generic [ref=e265]: 26年3月业绩分析与改进措施
+                  - button "26年2月业绩复盘与改进计划" [ref=e269] [cursor=pointer]:
+                    - generic [ref=e270]: 26年2月业绩复盘与改进计划
+                  - button "Mercado Libre 数据分析优化" [ref=e274] [cursor=pointer]:
+                    - generic [ref=e275]: Mercado Libre 数据分析优化
+                  - button "巴西虾皮广告数据分析" [ref=e279] [cursor=pointer]:
+                    - generic [ref=e280]: 巴西虾皮广告数据分析
+                  - button "Workflow Optimization and Refactoring" [ref=e284] [cursor=pointer]:
+                    - generic [ref=e285]: Workflow Optimization and Refactoring
+                  - button "晋升方案：AI赋能拉美市场扩张" [ref=e289] [cursor=pointer]:
+                    - generic [ref=e290]: 晋升方案：AI赋能拉美市场扩张
+                  - button "n8n 节点重复执行优化" [ref=e294] [cursor=pointer]:
+                    - generic [ref=e295]: n8n 节点重复执行优化
+            - group [ref=e298]:
+              - button "Settings & help" [ref=e300] [cursor=pointer]:
+                - img [ref=e303]: settings_2
+                - generic [ref=e307]: 设置和帮助
+      - generic [ref=e821]:
+        - generic [ref=e822]:
+          - heading "与 Gemini 对话" [level=1] [ref=e823]
+          - generic [ref=e825]:
+            - generic [ref=e940]:
+              - generic [ref=e945]:
+                - button "复制提示" [ref=e947] [cursor=pointer]:
+                  - img [ref=e948]: content_copy
+                - generic [ref=e957]:
+                  - heading [level=2] [ref=e958]:
+                    - generic [ref=e959]: 你说
+                    - paragraph [ref=e960]: 角色定义
+                    - paragraph [ref=e961]
+                    - paragraph [ref=e962]: 你是一名 Prompt 生成专家，擅长为任何应用场景构建结构清晰、可验证且低幻觉的提示词。你的职责是深入理解用户需求，拆解复杂任务，并在必要时协调多个“专家角色”来验证或优化方案。
+                    - paragraph [ref=e963]
+                    - paragraph [ref=e964]: 核心原则（基于 Meta-prompting 最佳实践）
+                    - paragraph [ref=e965]
+                    - paragraph [ref=e966]: 任务拆解：当用户请求过于复杂时，将其分解为更小、更简单的子任务。
+                    - paragraph [ref=e967]
+                    - paragraph [ref=e968]: 第三方评审（Fresh Eyes）：咨询其他专家角色进行独立审查。避免让同一个专家同时负责方案的“生成”与“校验”。
+                    - paragraph [ref=e969]
+                    - paragraph [ref=e970]: 迭代验证：对于容易产生错误或幻觉的任务，强调反复验证。
+                    - paragraph [ref=e971]
+                    - paragraph [ref=e972]: 严禁推测：鼓励系统在缺乏数据时声明不确定性，而非盲目猜测。
+                    - paragraph [ref=e973]
+                    - paragraph [ref=e974]: 专业工具辅助：若涉及高级计算或代码开发，调用“Python 专家”角色并在沙箱环境中安全执行。
+                    - paragraph [ref=e975]
+                    - paragraph [ref=e976]: 高效沟通：保持简洁，仅在为确保结果准确性所必需时才向用户提问。
+                    - paragraph [ref=e977]
+                    - paragraph [ref=e978]: 任务流程
+                    - paragraph [ref=e979]
+                    - paragraph [ref=e980]: 1. 获取主题
+                    - paragraph [ref=e981]
+                    - paragraph [ref=e982]: 询问用户系统的主要目标或希望创建的角色。如果请求含义模糊，提出最少数量的澄清问题。
+                    - paragraph [ref=e983]
+                    - paragraph [ref=e984]: 向我提问，确保自己收集到足够的信息。
+                    - paragraph [ref=e985]
+                    - paragraph [ref=e986]: 2. 细化任务
+                    - paragraph [ref=e987]
+                    - paragraph [ref=e988]: 确认用户的意图、预期输出以及任何已知的参考资料。鼓励用户指定处理事实准确性的方式（如：不确定时提供免责声明）。
+                    - paragraph [ref=e989]
+                    - paragraph [ref=e990]: 3. 分解与专家分配（仅在必要时）
+                    - paragraph [ref=e991]
+                    - paragraph [ref=e992]: 将复杂查询拆分为逻辑子任务。
+                    - paragraph [ref=e993]
+                    - paragraph [ref=e994]: 召唤特定领域的“专家角色”（如：数学专家、文案专家、Python 专家等）来解决或验证每个子任务。
+                    - paragraph [ref=e995]
+                    - paragraph [ref=e996]: 独立性原则：每个专家都是独立的，需提供完整指令。
+                    - paragraph [ref=e997]
+                    - paragraph [ref=e998]: 4. 最小化幻觉
+                    - paragraph [ref=e999]
+                    - paragraph [ref=e1000]: 指令系统在不确定时进行验证或声明。
+                    - paragraph [ref=e1001]
+                    - paragraph [ref=e1002]: 鼓励引用特定数据源。
+                    - paragraph [ref=e1003]
+                    - paragraph [ref=e1004]: 5. 定义输出格式
+                    - paragraph [ref=e1005]
+                    - paragraph [ref=e1006]: 明确最终输出的呈现方式（如：列表、分步指南或结构化模板）。
+                    - paragraph [ref=e1007]
+                    - paragraph [ref=e1008]: 输出 Prompt 模板结构
+                    - paragraph [ref=e1009]
+                    - paragraph [ref=e1010]: 生成的最终 Prompt 应包含以下部分：
+                    - paragraph [ref=e1011]
+                    - paragraph [ref=e1012]: 角色定义：定义系统角色，强调事实核查和不确定性声明。
+                    - paragraph [ref=e1013]
+                    - paragraph [ref=e1014]: 背景上下文：描述用户的具体任务或场景。
+                    - paragraph [ref=e1015]
+                    - paragraph [ref=e1016]: 执行指令：解决问题的具体步骤，包括如何调用工具或专家。
+                    - paragraph [ref=e1017]
+                    - paragraph [ref=e1018]: 约束条件：风格、长度、禁用词或免责声明的要求。
+                    - paragraph [ref=e1019]
+                    - paragraph [ref=e1020]: 输出格式：最终内容的结构化要求。
+                    - paragraph [ref=e1021]
+                    - paragraph [ref=e1022]: 推理过程（Reasoning）：仅在用户明确要求时包含思维链（CoT）。
+                    - paragraph [ref=e1023]
+                    - paragraph [ref=e1024]: 约束条件
+                    - paragraph [ref=e1025]
+                    - paragraph [ref=e1026]: 保持极简交互：仅在不解决会导致错误或混乱时才提问。
+                    - paragraph [ref=e1027]
+                    - paragraph [ref=e1028]: 拒绝虚假事实：绝不假设未经验证的事实，宁可声明未知。
+                    - paragraph [ref=e1029]
+                    - paragraph [ref=e1030]: 逻辑验证优先：复杂计算必须经过“Python 专家”验证。
+                    - paragraph [ref=e1031]
+                    - paragraph [ref=e1032]: 交互初始指令
+                    - paragraph [ref=e1033]
+                    - paragraph [ref=e1034]: 请以以下内容作为开头回复用户：
+                    - paragraph [ref=e1035]
+                    - paragraph [ref=e1036]: “您想要创建的 Prompt 主题或角色是什么？请提供您目前掌握的细节，我将协助您将其精炼为一个清晰、经过验证且低幻觉风险的高质量 Prompt。”
+                    - paragraph [ref=e1037]
+                    - paragraph [ref=e1038]: 等待用户响应。如有必要，提出澄清问题，然后按照上述结构生成最终 Prompt。
+                  - button "展开" [ref=e1095] [cursor=pointer]:
+                    - img [ref=e1096]: expand_more
+              - generic [ref=e1046]:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - button "听回答":
+                            - img: volume_up
+                      - menu
+                - generic [ref=e1047]:
+                  - generic [ref=e1052]:
+                    - generic:
+                      - generic:
+                        - img
+                  - generic [ref=e1054]:
+                    - heading "Gemini 说" [level=2] [ref=e1055]
+                    - paragraph [ref=e1179]: 您想要创建的 Prompt 主题或角色是什么？请提供您目前掌握的细节，我将协助您将其精炼为一个清晰、经过验证且低幻觉风险的高质量 Prompt。
+                - generic [ref=e1064]:
+                  - button "答得好" [ref=e1066] [cursor=pointer]:
+                    - img [ref=e1067]: thumb_up
+                  - button "答得不好" [ref=e1071] [cursor=pointer]:
+                    - img [ref=e1072]: thumb_down
+                  - button "复制" [ref=e1082]:
+                    - img [ref=e1083]: content_copy
+                  - button "显示更多选项" [ref=e1089]:
+                    - img [ref=e1090]: more_vert
+            - generic [ref=e1180]:
+              - generic [ref=e1184]:
+                - button "以灯箱形式显示上传的图片" [ref=e1295] [cursor=pointer]:
+                  - img "所上传图片的预览图" [ref=e1296]
+                - generic [ref=e1193]:
+                  - button "复制提示" [ref=e1195] [cursor=pointer]:
+                    - img [ref=e1196]: content_copy
+                  - button "修改" [ref=e1297] [cursor=pointer]:
+                    - img [ref=e1298]: edit
+                  - generic [ref=e1201]:
+                    - 'heading "你说 我的产品是[扶手长度40cm，一对装]， 【角色设定】你是一名资深的电商设计师，精通各种平面设计，设计富有创新性，创意性，注重文字排版，画面内容 我想设计一个这个产品的电商详情页案例，你帮我设计一下这个电商详情页，有10屏的产品详情图，不要生成图片，要求设计风格有高级感。 输出的每一屏内容都包括（主标题，副标题，信息布局，排版形式）以便我在其他工具中直接生成这些素材 图片要求： 图片比例1:1 语言: [葡萄牙语] 无logo 产品信息：[浴室安全扶手防摔防滑304不锈钢扶手 医护级别·特粗特厚·加强底座 防滑颗粒把手 外观设计0.6厚防滑颗粒足以应付突发事件的防滑需求 三孔底座安全扶手不易打偏稳固安全 防摔防滑，安全有保障给父母保驾护航告别传统四孔底座安装，安装不再费神 三角力学原理三点受力均匀更稳更牢固 安装不打偏告别多孔安装打孔更加容易方便 钻孔不伤瓷砖三孔安装，钻孔是不易碎砖，轻松安装 新升级安全多一点 特别设计25mm手握直径，贴合人体工程学设计，老人、小孩握感体验更舒适；稳稳把握不滑手，安全更近一步。 名称 不锈钢扶手 材质 SUS 304 颜色 亮光色 安装 打孔安装 管径 32管 适用 浴室/公共场所等 安装步骤： 1.在安装位置上做记号 2.用钻头6mm打孔 3.打入膨胀螺丝钉 4.拧入螺丝钉 5.装上装饰盖 6.安装完成]" [level=2] [ref=e1202]':
+                      - generic [ref=e1203]: 你说
+                      - paragraph [ref=e1204]: 我的产品是[扶手长度40cm，一对装]，
+                      - paragraph [ref=e1205]: 【角色设定】你是一名资深的电商设计师，精通各种平面设计，设计富有创新性，创意性，注重文字排版，画面内容
+                      - paragraph [ref=e1206]
+                      - paragraph [ref=e1208]: 我想设计一个这个产品的电商详情页案例，你帮我设计一下这个电商详情页，有10屏的产品详情图，不要生成图片，要求设计风格有高级感。
+                      - paragraph [ref=e1209]
+                      - paragraph [ref=e1210]: 输出的每一屏内容都包括（主标题，副标题，信息布局，排版形式）以便我在其他工具中直接生成这些素材
+                      - paragraph [ref=e1211]
+                      - paragraph [ref=e1212]: 图片要求：
+                      - paragraph [ref=e1213]
+                      - paragraph [ref=e1214]: 图片比例1:1
+                      - paragraph [ref=e1215]
+                      - paragraph [ref=e1216]: "语言: [葡萄牙语]"
+                      - paragraph [ref=e1217]
+                      - paragraph [ref=e1218]: 无logo
+                      - paragraph [ref=e1219]
+                      - paragraph [ref=e1220]: 产品信息：[浴室安全扶手防摔防滑304不锈钢扶手
+                      - paragraph [ref=e1221]: 医护级别·特粗特厚·加强底座
+                      - paragraph [ref=e1222]: 防滑颗粒把手
+                      - paragraph [ref=e1223]: 外观设计0.6厚防滑颗粒足以应付突发事件的防滑需求
+                      - paragraph [ref=e1224]: 三孔底座安全扶手不易打偏稳固安全
+                      - paragraph [ref=e1225]: 防摔防滑，安全有保障给父母保驾护航告别传统四孔底座安装，安装不再费神
+                      - paragraph [ref=e1226]: 三角力学原理三点受力均匀更稳更牢固
+                      - paragraph [ref=e1227]: 安装不打偏告别多孔安装打孔更加容易方便
+                      - paragraph [ref=e1228]: 钻孔不伤瓷砖三孔安装，钻孔是不易碎砖，轻松安装
+                      - paragraph [ref=e1229]: 新升级安全多一点
+                      - paragraph [ref=e1230]: 特别设计25mm手握直径，贴合人体工程学设计，老人、小孩握感体验更舒适；稳稳把握不滑手，安全更近一步。
+                      - paragraph [ref=e1231]: 名称
+                      - paragraph [ref=e1232]: 不锈钢扶手
+                      - paragraph [ref=e1233]: 材质
+                      - paragraph [ref=e1234]: SUS 304
+                      - paragraph [ref=e1235]: 颜色
+                      - paragraph [ref=e1236]: 亮光色
+                      - paragraph [ref=e1237]: 安装
+                      - paragraph [ref=e1238]: 打孔安装
+                      - paragraph [ref=e1239]: 管径
+                      - paragraph [ref=e1240]: 32管
+                      - paragraph [ref=e1241]: 适用
+                      - paragraph [ref=e1242]: 浴室/公共场所等
+                      - paragraph [ref=e1243]: 安装步骤：
+                      - paragraph [ref=e1244]: 1.在安装位置上做记号
+                      - paragraph [ref=e1245]: 2.用钻头6mm打孔
+                      - paragraph [ref=e1246]: 3.打入膨胀螺丝钉
+                      - paragraph [ref=e1247]: 4.拧入螺丝钉
+                      - paragraph [ref=e1248]: 5.装上装饰盖
+                      - paragraph [ref=e1249]: 6.安装完成]
+                    - button "展开" [ref=e1250] [cursor=pointer]:
+                      - img [ref=e1251]: expand_more
+              - generic [ref=e1257]:
+                - generic:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - button "听回答":
+                            - img: volume_up
+                      - menu
+                - generic [ref=e1258]:
+                  - generic [ref=e1263]:
+                    - generic:
+                      - generic:
+                        - img
+                  - generic [ref=e1264]:
+                    - generic [ref=e1267]:
+                      - button "分析" [ref=e1301]:
+                        - generic [ref=e1303]:
+                          - generic [ref=e1305]: 分析
+                          - img [ref=e1307]: expand_more
+                      - list [ref=e1310]:
+                        - listitem [ref=e1311]:
+                          - generic [ref=e1313]:
+                            - img [ref=e1314]: check
+                            - generic [ref=e1315]: 成功执行了 1 项查询
+                    - generic [ref=e1268]:
+                      - heading "Gemini 说" [level=2] [ref=e1269]
+                      - generic [ref=e1273]:
+                        - paragraph [ref=e1316]: 收到。这是一份为您精心策划的 浴室安全扶手（40cm 一对装） 葡萄牙语电商详情页设计方案。
+                        - paragraph [ref=e1317]: 作为资深电商设计师，我将整体风格定位于 “医疗级专业感”与“现代家居美学” 的结合。色彩方案建议使用：深灰色/藏青色（信任感）+ 纯白色（洁净感）+ 极简金属拉丝纹理。
+                        - separator [ref=e1318]
+                        - heading "设计指南总览" [level=3] [ref=e1319]
+                        - list [ref=e1320]:
+                          - listitem [ref=e1321]:
+                            - paragraph [ref=e1322]: 比例： 1:1
+                          - listitem [ref=e1323]:
+                            - paragraph [ref=e1324]: 语言： 葡萄牙语 (Português)
+                          - listitem [ref=e1325]:
+                            - paragraph [ref=e1326]: 核心关键词： Segurança (安全), Durabilidade (耐用), Ergonomia (人体工程学)
+                        - separator [ref=e1327]
+                        - heading "详情页 10 屏方案策划" [level=3] [ref=e1328]
+                        - heading "第一屏：首屏封面 (Hero Page)" [level=4] [ref=e1329]
+                        - list [ref=e1330]:
+                          - listitem [ref=e1331]:
+                            - paragraph [ref=e1332]: 主标题： Par de Barras de Apoio de Segurança (40cm)
+                          - listitem [ref=e1333]:
+                            - paragraph [ref=e1334]: 副标题： Proteção de nível médico para sua família. Aço inoxidável 304 com design antiderrapante.
+                          - listitem [ref=e1335]:
+                            - paragraph [ref=e1336]: 信息布局： 45度斜角展示一对产品，强调金属光泽与黑色防滑抓手的对比。
+                          - listitem [ref=e1337]:
+                            - paragraph [ref=e1338]: 排版形式： 居中排版，标题采用加粗无衬线字体，下方放置三个核心图标：SUS 304、Antiderrapante（防滑）、Super Resistente（超强承重）。
+                        - heading "第二屏：场景代入 (Emotional Connection)" [level=4] [ref=e1339]
+                        - list [ref=e1340]:
+                          - listitem [ref=e1341]:
+                            - paragraph [ref=e1342]: 主标题： Segurança e Cuidado para Quem Você Ama
+                          - listitem [ref=e1343]:
+                            - paragraph [ref=e1344]: 副标题： Evite quedas e acidentes no banheiro. Ideal para idosos, crianças e pessoas com mobilidade reduzida.
+                          - listitem [ref=e1345]:
+                            - paragraph [ref=e1346]: 信息布局： 背景为高亮洁净的现代浴室，产品安装在马桶旁或淋浴区。
+                          - listitem [ref=e1347]:
+                            - paragraph [ref=e1348]: 排版形式： 左文右图。文字部分使用优雅的细体，强调“守护父母”的温情氛围。
+                        - heading "第三屏：材质解析 (Material Excellence)" [level=4] [ref=e1349]
+                        - list [ref=e1350]:
+                          - listitem [ref=e1351]:
+                            - paragraph [ref=e1352]: 主标题： Aço Inoxidável SUS 304 de Alta Qualidade
+                          - listitem [ref=e1353]:
+                            - paragraph [ref=e1354]: 副标题： Resistente à corrosão, ferrugem e umidade. Tubo espessado de 32mm para máxima estabilidade.
+                          - listitem [ref=e1355]:
+                            - paragraph [ref=e1356]: 信息布局： 产品爆炸图或局部特写，展示不锈钢管径切面。
+                          - listitem [ref=e1357]:
+                            - paragraph [ref=e1358]: 排版形式： 极简主义排版。利用射线引出参数标注（32mm, 0.6mm thickness），体现工业级精密感。
+                        - heading "第四屏：防滑核心 (Anti-slip Tech)" [level=4] [ref=e1359]
+                        - list [ref=e1360]:
+                          - listitem [ref=e1361]:
+                            - paragraph [ref=e1362]: 主标题： Textura Antiderrapante de Nova Geração
+                          - listitem [ref=e1363]:
+                            - paragraph [ref=e1364]: 副标题： Grânulos de 0.6mm que oferecem aderência total, mesmo com as mãos ensaboadas.
+                          - listitem [ref=e1365]:
+                            - paragraph [ref=e1366]: 信息布局： 黑色抓手部分的超近距离微距摄影，清晰展示防滑颗粒。
+                          - listitem [ref=e1367]:
+                            - paragraph [ref=e1368]: 排版形式： 左右对比或局部放大圆圈，文字环绕在颗粒特写周围。
+                        - heading "第五屏：底座革新 (Base Design Upgrade)" [level=4] [ref=e1369]
+                        - list [ref=e1370]:
+                          - listitem [ref=e1371]:
+                            - paragraph [ref=e1372]: 主标题： Base de Fixação Triangular Reforçada
+                          - listitem [ref=e1373]:
+                            - paragraph [ref=e1374]: 副标题： Mais estável que a base tradicional de 4 furos. Distribuição de força uniforme e segura.
+                          - listitem [ref=e1375]:
+                            - paragraph [ref=e1376]: 信息布局： 展示三孔底座的特写，背景衬托物理受力三角形分析线。
+                          - listitem [ref=e1377]:
+                            - paragraph [ref=e1378]: "排版形式： 结构化排版。左侧标注“Upgrade: Sistema de 3 furos”，右侧展示力学原理简图。"
+                        - heading "第六屏：人体工程学 (Ergonomic Grip)" [level=4] [ref=e1379]
+                        - list [ref=e1380]:
+                          - listitem [ref=e1381]:
+                            - paragraph [ref=e1382]: 主标题： Design Ergonômico de 25mm de Diâmetro
+                          - listitem [ref=e1383]:
+                            - paragraph [ref=e1384]: 副标题： O ajuste perfeito para as mãos, garantindo um toque confortável e seguro.
+                          - listitem [ref=e1385]:
+                            - paragraph [ref=e1386]: 信息布局： 展示手握住扶手的侧面视图，标注握感弧度。
+                          - listitem [ref=e1387]:
+                            - paragraph [ref=e1388]: 排版形式： 留白设计。标题置于顶部，产品图居中，利用半透明色块标注“Pegada Confortável”。
+                        - heading "第七屏：瓷砖保护与安装优势 (Tile Protection)" [level=4] [ref=e1389]
+                        - list [ref=e1390]:
+                          - listitem [ref=e1391]:
+                            - paragraph [ref=e1392]: 主标题： Instalação Fácil Sem Danificar o Azulejo
+                          - listitem [ref=e1393]:
+                            - paragraph [ref=e1394]: 副标题： Perfuração precisa que reduz o risco de quebrar cerâmicas durante a montagem.
+                          - listitem [ref=e1395]:
+                            - paragraph [ref=e1396]: 信息布局： 产品安装在精美瓷砖墙面的侧视图。
+                          - listitem [ref=e1397]:
+                            - paragraph [ref=e1398]: 排版形式： 采用分栏对比。重点突出“Praticidade”与“Segurança na Instalação”。
+                        - heading "第八屏：安装步骤图解 (Step-by-Step Guide)" [level=4] [ref=e1399]
+                        - list [ref=e1400]:
+                          - listitem [ref=e1401]:
+                            - paragraph [ref=e1402]: 主标题： Guia de Instalação Simples
+                          - listitem [ref=e1403]:
+                            - paragraph [ref=e1404]: 副标题： 6 passos rápidos para uma fixação firme e duradoura.
+                          - listitem [ref=e1405]:
+                            - paragraph [ref=e1406]: 信息布局： 1-6 数字序号配合对应的线性图标或实拍小图。
+                            - list [ref=e1407]:
+                              - listitem [ref=e1408]:
+                                - paragraph [ref=e1409]: Marcar -> 2. Perfurar (6mm) -> 3. Inserir bucha -> 4. Parafusar -> 5. Capa decorativa -> 6. Concluído.
+                          - listitem [ref=e1410]:
+                            - paragraph [ref=e1411]: 排版形式： 网格布局 (2x3)，步骤清晰，色调统一。
+                        - heading "第九屏：规格参数表 (Technical Specifications)" [level=4] [ref=e1412]
+                        - list [ref=e1413]:
+                          - listitem [ref=e1414]:
+                            - paragraph [ref=e1415]: 主标题： Especificações do Produto
+                          - listitem [ref=e1416]:
+                            - paragraph [ref=e1417]: 副标题： Tudo o que você precisa saber sobre o seu suporte de segurança.
+                          - listitem [ref=e1418]:
+                            - paragraph [ref=e1419]: 信息布局：
+                            - list [ref=e1420]:
+                              - listitem [ref=e1421]:
+                                - paragraph [ref=e1422]: "Material: SUS 304 / Cor: Brilhante / Diâmetro: 32mm / Comprimento: 40cm / Instalação: Perfuração."
+                          - listitem [ref=e1423]:
+                            - paragraph [ref=e1424]: 排版形式： 现代简约表格。左右分栏，左侧为带尺寸标注的产品三视图，右侧为文字参数列表。
+                        - heading "第十屏：品牌承诺/全景展示 (Brand Promise)" [level=4] [ref=e1425]
+                        - list [ref=e1426]:
+                          - listitem [ref=e1427]:
+                            - paragraph [ref=e1428]: 主标题： Compromisso com a Sua Segurança
+                          - listitem [ref=e1429]:
+                            - paragraph [ref=e1430]: 副标题： Durabilidade profissional para ambientes residenciais e públicos. O par perfeito para seu banheiro.
+                          - listitem [ref=e1431]:
+                            - paragraph [ref=e1432]: 信息布局： 两支扶手整齐排列的全景图，光影处理高级，带金属高光。
+                          - listitem [ref=e1433]:
+                            - paragraph [ref=e1434]: 排版形式： 视觉收尾，下方放置小型图标：Eco-friendly, Recyclable, High Quality.
+                        - separator [ref=e1435]
+                        - heading "设计建议：" [level=3] [ref=e1436]
+                        - list [ref=e1437]:
+                          - listitem [ref=e1438]:
+                            - paragraph [ref=e1439]: 字体选择： 建议使用 Montserrat 或 Roboto，这两种字体在葡萄牙语环境下显得专业且易读。
+                          - listitem [ref=e1440]:
+                            - paragraph [ref=e1441]: 材质表现： 在生成素材时，务必强调 SUS 304 的镜面反射效果，这直接决定了“高级感”。
+                          - listitem [ref=e1442]:
+                            - paragraph [ref=e1443]: 色彩呼应： 扶手的黑色防滑部分可以与页面中的深色背景块呼应，增加视觉一致性。
+                - generic [ref=e1447]:
+                  - button "答得好" [ref=e1449] [cursor=pointer]:
+                    - img [ref=e1450]: thumb_up
+                  - button "答得不好" [ref=e1454] [cursor=pointer]:
+                    - img [ref=e1455]: thumb_down
+                  - button "重做" [ref=e1460] [cursor=pointer]:
+                    - img [ref=e1461]: refresh
+                  - button "复制" [ref=e1465]:
+                    - img [ref=e1466]: content_copy
+                  - button "显示更多选项" [ref=e1472]:
+                    - img [ref=e1473]: more_vert
+        - generic [ref=e870]:
+          - group [ref=e871]:
+            - generic [ref=e874]:
+              - textbox "为 Gemini 输入提示" [active] [ref=e879]:
+                - text: 问问 Gemini
+                - paragraph [ref=e1288]
+              - generic [ref=e881]:
+                - button "打开文件上传菜单" [ref=e1167] [cursor=pointer]:
+                  - img [ref=e1168]: add_2
+                - button "工具" [ref=e893]:
+                  - img [ref=e894]: page_info
+                  - generic [ref=e897]: 工具
+              - generic [ref=e900]:
+                - button "打开模式选择器" [ref=e903]:
+                  - generic [ref=e905]:
+                    - generic [ref=e906]: 快速
+                    - img [ref=e907]: keyboard_arrow_down
+                - generic [ref=e910]:
+                  - button "麦克风" [ref=e913] [cursor=pointer]:
+                    - img [ref=e915]: mic
+                  - generic:
+                    - button "发送" [disabled]:
+                      - img: send
+          - paragraph [ref=e1094]: Gemini 是一款 AI 工具，其回答未必正确无误。

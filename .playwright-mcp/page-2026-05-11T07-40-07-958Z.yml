@@ -1,0 +1,385 @@
+- generic [active] [ref=e1]:
+  - main [ref=e2]:
+    - generic [ref=e5]:
+      - link [ref=e8] [cursor=pointer]:
+        - /url: /zh
+        - img [ref=e9]
+      - generic [ref=e11]:
+        - link "首页" [ref=e12] [cursor=pointer]:
+          - /url: /zh
+        - link "定价" [ref=e13] [cursor=pointer]:
+          - /url: /zh/pricing
+        - link "新闻" [ref=e14] [cursor=pointer]:
+          - /url: /zh/news
+      - button "开始体验" [ref=e17] [cursor=pointer]:
+        - generic [ref=e19]: 开始体验
+    - generic [ref=e22]:
+      - generic [ref=e23]:
+        - paragraph [ref=e25]: 你的 AI 设计助手
+        - generic [ref=e26]:
+          - heading "为 新生代运动品牌 (1)" [level=1] [ref=e28]:
+            - text: 为
+            - generic [ref=e29]:
+              - generic [ref=e31]: 新生代运动品牌
+              - generic [ref=e32] [cursor=pointer]: (1)
+          - heading "设计一个 商品详情页" [level=1] [ref=e34]:
+            - text: 设计一个
+            - generic [ref=e37]: 商品详情页
+        - button "立即设计" [ref=e39] [cursor=pointer]:
+          - generic [ref=e41]: 立即设计
+      - generic [ref=e47]:
+        - generic [ref=e48]:
+          - img [ref=e50]
+          - generic [ref=e52]:
+            - generic [ref=e53] [cursor=pointer]:
+              - paragraph: 运动产品发布
+              - img [ref=e54]
+            - generic:
+              - generic:
+                - generic:
+                  - paragraph: 运动产品发布
+                  - img
+                - generic:
+                  - paragraph: 徒步品牌宣传视频
+                - generic:
+                  - paragraph: 咖啡店品牌系统
+        - generic [ref=e61]:
+          - generic [ref=e62]:
+            - img [ref=e63]
+            - generic [ref=e65]: Video
+          - generic [ref=e66]: 800 x 1440
+        - generic [ref=e74]:
+          - generic [ref=e76]: 新对话
+          - generic [ref=e78]:
+            - paragraph [ref=e82]: 为跑鞋产品页面设计视觉素材，包括主图、产品特写和突显性能与材质的运动员上脚照。
+            - generic [ref=e84]:
+              - generic [ref=e85]:
+                - generic [ref=e87]:
+                  - img [ref=e89]
+                  - generic [ref=e92]:
+                    - generic [ref=e94]: 正在分析用户意图
+                    - generic [ref=e95]: 已分析用户意图
+                - generic [ref=e99]:
+                  - img [ref=e101]
+                  - generic [ref=e103]:
+                    - generic [ref=e105]: 正在搜索高质量参考
+                    - generic [ref=e106]: 已探索视觉趋势
+                - generic [ref=e110]:
+                  - img [ref=e112]
+                  - generic [ref=e114]:
+                    - generic [ref=e116]: 正在研究品牌信息
+                    - generic [ref=e117]: 已收集参考资料
+              - generic [ref=e119]:
+                - generic [ref=e120]: 我已为新一代跑鞋产品详情页生成了一套视觉素材，聚焦清晰度和性能感染力。
+                - generic [ref=e121]: 这套素材包含充满速度感的主图、聚焦材质的特写以及可控的上脚照，通过统一的光线和透视角度支撑产品详情页的视觉流程。
+          - generic [ref=e123]:
+            - textbox "你想设计什么？" [ref=e125]
+            - generic [ref=e126]:
+              - button "Add attachment" [ref=e128]:
+                - img [ref=e129]
+              - generic [ref=e131]:
+                - button "Select model" [ref=e132]:
+                  - img [ref=e133]
+                - button "Send message" [disabled] [ref=e136]:
+                  - img [ref=e137]
+    - generic [ref=e142]:
+      - generic [ref=e145]:
+        - generic [ref=e146]:
+          - paragraph [ref=e148]: 自主智能
+          - heading "以系统思维设计" [level=2] [ref=e149]
+        - paragraph [ref=e150]: 设计决策，并非一座孤岛。 Lovart 将色彩、版式、语言统一为完整的品牌体系， 从第一稿，到第一百稿。
+      - generic [ref=e152]:
+        - generic [ref=e154]:
+          - generic [ref=e155]:
+            - generic [ref=e156]:
+              - img [ref=e157]
+              - generic [ref=e160]: Image
+            - generic [ref=e161]: 720 x 960
+          - generic [ref=e163]:
+            - img "Smart glasses"
+          - generic [ref=e168]:
+            - generic [ref=e169]:
+              - generic [ref=e171]:
+                - generic [ref=e172]:
+                  - img "Eyewear"
+                - generic [ref=e173]: Eyewear
+              - generic [ref=e174]:
+                - generic [ref=e175]: 为
+                - generic [ref=e176]: 该
+                - generic [ref=e177]: 眼
+                - generic [ref=e178]: 镜
+                - generic [ref=e179]: 品
+                - generic [ref=e180]: 牌
+                - generic [ref=e181]: 创
+                - generic [ref=e182]: 建
+                - generic [ref=e183]: 一
+                - generic [ref=e184]: 套
+                - generic [ref=e185]: 电
+                - generic [ref=e186]: 商
+                - generic [ref=e187]: 活
+                - generic [ref=e188]: 动
+                - generic [ref=e189]: 海
+                - generic [ref=e190]: 报
+            - generic [ref=e191]:
+              - button [ref=e192]:
+                - img [ref=e193]
+              - generic [ref=e195]:
+                - button [ref=e196]:
+                  - img [ref=e197]
+                - button [ref=e199]:
+                  - img [ref=e200]
+        - generic [ref=e202]:
+          - generic [ref=e203]:
+            - generic [ref=e204]:
+              - generic [ref=e205]:
+                - img [ref=e206]
+                - generic [ref=e209]: Image
+              - generic [ref=e210]: 720 x 960
+            - generic [ref=e211]:
+              - img "Poster 01"
+          - generic [ref=e214]:
+            - generic [ref=e215]:
+              - generic [ref=e216]:
+                - img [ref=e217]
+                - generic [ref=e220]: Image
+              - generic [ref=e221]: 720 x 960
+            - generic [ref=e222]:
+              - img "Poster 02"
+          - generic [ref=e225]:
+            - generic [ref=e226]:
+              - generic [ref=e227]:
+                - img [ref=e228]
+                - generic [ref=e231]: Image
+              - generic [ref=e232]: 720 x 960
+            - generic [ref=e233]:
+              - img "Poster 03"
+    - generic [ref=e238]:
+      - generic [ref=e240]:
+        - generic [ref=e241]:
+          - paragraph [ref=e243]: 功能特性
+          - heading "设计, 不止于生成" [level=2] [ref=e244]
+        - paragraph [ref=e245]: AI 只是起点，品味由你来主导。
+      - generic [ref=e246]:
+        - generic [ref=e249]:
+          - generic [ref=e250]:
+            - generic [ref=e251]:
+              - paragraph [ref=e252]: 点选编辑
+              - heading "懂你所想， 精准编辑" [level=3] [ref=e253]:
+                - paragraph [ref=e254]: 懂你所想，
+                - paragraph [ref=e255]: 精准编辑
+            - generic [ref=e256]:
+              - paragraph [ref=e257]: 精准定点修改，只改该改之处。 Lovart 保持设计品质，让每一次编辑都恰到好处。
+              - button "体验点选编辑" [ref=e259] [cursor=pointer]:
+                - generic [ref=e261]: 体验点选编辑
+          - generic [ref=e262]:
+            - generic [ref=e263]:
+              - generic [ref=e264]:
+                - img [ref=e265]
+                - generic [ref=e268]: Image
+              - generic [ref=e269]: 1440 x 800
+            - generic [ref=e270]:
+              - img "Touch Edit" [ref=e271]
+              - img "Touch Edit Result" [ref=e272]
+              - img [ref=e275]
+              - img [ref=e282]
+              - generic [ref=e287]:
+                - generic [ref=e288]:
+                  - generic [ref=e289]:
+                    - generic [ref=e290]:
+                      - generic [ref=e291]: 移
+                      - generic [ref=e292]: 除
+                    - generic [ref=e294]:
+                      - img "旗帜" [ref=e296]
+                      - img [ref=e298]
+                      - generic [ref=e301]: 旗帜
+                      - img [ref=e303]
+                    - generic [ref=e307]: 和
+                    - generic [ref=e309]:
+                      - img "汽车" [ref=e311]
+                      - img [ref=e313]
+                      - generic [ref=e316]: 汽车
+                      - img [ref=e318]
+                  - generic [ref=e320]:
+                    - generic [ref=e321]:
+                      - generic [ref=e322]: 的
+                      - generic [ref=e323]: 图
+                      - generic [ref=e324]: 案
+                      - generic [ref=e325]: ，
+                      - generic [ref=e326]: 并
+                      - generic [ref=e327]: 换
+                      - generic [ref=e328]: 成
+                    - generic [ref=e330]:
+                      - img "Lovart Logo" [ref=e332]
+                      - img [ref=e334]
+                      - generic [ref=e337]: Lovart Logo
+                      - img [ref=e339]
+                - button [ref=e341]:
+                  - img [ref=e342]
+        - generic [ref=e346]:
+          - generic [ref=e348]:
+            - generic [ref=e349]:
+              - generic [ref=e350]:
+                - img [ref=e351]
+                - generic [ref=e354]: Image
+              - generic [ref=e355]: 960 x 720
+            - generic [ref=e356]:
+              - generic [ref=e357]:
+                - img "Portrait" [ref=e358]
+                - img "Portrait Result" [ref=e359]
+              - img "Green beanie hat" [ref=e362]
+              - img "Made by Lovart book" [ref=e365]
+              - generic [ref=e366]:
+                - paragraph [ref=e367]:
+                  - generic [ref=e368]: 把
+                  - generic [ref=e369]: 男
+                  - generic [ref=e370]: 孩
+                  - generic [ref=e371]: 的
+                  - generic [ref=e372]: 帽
+                  - generic [ref=e373]: 子
+                  - generic [ref=e374]: 换
+                  - generic [ref=e375]: 成
+                  - generic [ref=e376]: 这
+                  - generic [ref=e377]: 个
+                  - generic [ref=e378]: ，
+                  - generic [ref=e379]: 让
+                  - generic [ref=e380]: 他
+                  - generic [ref=e381]: 拿
+                  - generic [ref=e382]: 着
+                  - generic [ref=e383]: 这
+                  - generic [ref=e384]: 本
+                  - generic [ref=e385]: 书
+                  - generic [ref=e386]: 。
+                - button [ref=e387]:
+                  - img [ref=e388]
+          - generic [ref=e390]:
+            - generic [ref=e391]:
+              - paragraph [ref=e392]: 风格一致性
+              - heading "每一次创作， 风格始终如一" [level=3] [ref=e393]:
+                - paragraph [ref=e394]: 每一次创作， 风格始终如一
+            - generic [ref=e395]:
+              - paragraph [ref=e396]: Lovart 洞察你的风格，在不同形式与项目中保持一致。无论迭代多少版，换过几种格式，辨识度始终在线。
+              - button "探索风格一致性" [ref=e398] [cursor=pointer]:
+                - generic [ref=e400]: 探索风格一致性
+        - generic [ref=e403]:
+          - generic [ref=e404]:
+            - generic [ref=e405]:
+              - paragraph [ref=e406]: 文字编辑
+              - heading "自由编辑文字， 灵活且可控" [level=3] [ref=e407]:
+                - paragraph [ref=e408]: 自由编辑文字，
+                - paragraph [ref=e409]: 灵活且可控
+            - generic [ref=e410]:
+              - paragraph [ref=e411]: 文字，不必困于画面。 Lovart 智能分层，让图中文字独立可编辑。 画面完整，表达无拘。
+              - button "体验文字编辑" [ref=e413] [cursor=pointer]:
+                - generic [ref=e415]: 体验文字编辑
+          - generic [ref=e417]:
+            - generic [ref=e418]:
+              - generic [ref=e419]:
+                - img [ref=e420]
+                - generic [ref=e423]: Image
+              - generic [ref=e424]: 960 x 720
+            - generic:
+              - generic:
+                - img "Text Edit"
+                - generic:
+                  - generic: Pros De
+                  - generic: L'internet
+                - generic:
+                  - generic [ref=e425]: Pros De
+                  - generic [ref=e430]: L'internet
+            - generic [ref=e436]:
+              - generic [ref=e438]:
+                - img [ref=e439]
+                - generic [ref=e441]: 文字编辑
+              - textbox "Enter text" [ref=e443]: Pros De
+              - textbox "Enter text" [ref=e445]: L'internet
+        - generic [ref=e448]:
+          - generic [ref=e450]:
+            - generic [ref=e451]:
+              - img "Modern office interior" [ref=e452]
+              - img [ref=e454]
+            - generic [ref=e456]:
+              - img "Office space" [ref=e457]
+              - img [ref=e459]
+            - generic [ref=e461]:
+              - img "Interior design" [ref=e462]
+              - img [ref=e464]
+            - generic [ref=e466]:
+              - img "Modern workspace" [ref=e467]
+              - img [ref=e469]
+            - generic [ref=e471]:
+              - img [ref=e472]
+              - paragraph [ref=e475]:
+                - generic [ref=e476]:
+                  - generic [ref=e477]: 现
+                  - generic [ref=e478]: 代
+                  - generic [ref=e479]: 办
+                  - generic [ref=e480]: 公
+                  - generic [ref=e481]: 室
+                  - generic [ref=e482]: 内
+                  - generic [ref=e483]: 景
+          - generic [ref=e484]:
+            - generic [ref=e485]:
+              - paragraph [ref=e486]: 视觉洞察
+              - heading "设计参考， 贵在精准" [level=3] [ref=e487]:
+                - paragraph [ref=e488]: 设计参考，
+                - paragraph [ref=e489]: 贵在精准
+            - generic [ref=e490]:
+              - paragraph [ref=e491]: Lovart 实时检索全网，为你甄选真正相关的灵感，契合你的审美，指向你的答案。
+              - button "探索视觉洞察" [ref=e493] [cursor=pointer]:
+                - generic [ref=e495]: 探索视觉洞察
+    - generic [ref=e496]:
+      - generic [ref=e499]:
+        - img [ref=e500]
+        - generic [ref=e502]:
+          - generic [ref=e503]:
+            - heading "用 Lovart 设计" [level=2] [ref=e504]
+            - paragraph [ref=e505]: 全速创作，让愿景成真
+          - button "免费开始" [ref=e506] [cursor=pointer]:
+            - generic [ref=e508]: 免费开始
+      - generic [ref=e510]:
+        - img [ref=e512]
+        - generic [ref=e514]:
+          - generic [ref=e515]:
+            - paragraph [ref=e516]: 公司
+            - generic [ref=e517]:
+              - link "定价" [ref=e518] [cursor=pointer]:
+                - /url: /zh/pricing
+              - link "博客" [ref=e519] [cursor=pointer]:
+                - /url: /zh/blog
+              - link "更新日志" [ref=e520] [cursor=pointer]:
+                - /url: /zh/changelog
+              - link "文档" [ref=e521] [cursor=pointer]:
+                - /url: /zh/docs
+              - link "新闻" [ref=e522] [cursor=pointer]:
+                - /url: /zh/news
+              - link "使用条款" [ref=e523] [cursor=pointer]:
+                - /url: /zh/statement/terms-of-use
+              - link "隐私政策" [ref=e524] [cursor=pointer]:
+                - /url: /zh/statement/privacy-policy
+          - generic [ref=e525]:
+            - paragraph [ref=e526]: 社交媒体
+            - generic [ref=e527]:
+              - link "X" [ref=e528] [cursor=pointer]:
+                - /url: https://twitter.com/lovart_ai
+              - link "YouTube" [ref=e529] [cursor=pointer]:
+                - /url: https://www.youtube.com/@lovart_ai
+              - link "LinkedIn" [ref=e530] [cursor=pointer]:
+                - /url: https://www.linkedin.com/company/lovart-ai
+              - link "Instagram" [ref=e531] [cursor=pointer]:
+                - /url: https://www.instagram.com/lovart.ai
+              - link "TikTok" [ref=e532] [cursor=pointer]:
+                - /url: https://www.tiktok.com/@lovart_ai
+        - generic [ref=e535]:
+          - paragraph [ref=e536]: © 2026 版权所有，Lovart
+          - generic [ref=e537]:
+            - generic [ref=e538]:
+              - button "Auto theme" [ref=e539] [cursor=pointer]:
+                - generic [ref=e540]: Auto
+              - button "Dark mode" [ref=e541]:
+                - img [ref=e542]
+              - button "Light mode" [ref=e544] [cursor=pointer]:
+                - img [ref=e545]
+            - button "简体中文" [ref=e548]:
+              - img [ref=e549]
+              - paragraph [ref=e551]: 简体中文
+  - region "Notifications alt+T"
