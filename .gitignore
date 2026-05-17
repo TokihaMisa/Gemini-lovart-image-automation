@@ -1,0 +1,15 @@
+output/
+logs/
+runs/
+browser_profile/
+__pycache__/
+.venv/
+*.pyc
+.env
+config.yaml
+data/
+New project/
+lovart-skill/
+lovart-skill.zip
+.claude/
+.playwright-mcp/

@@ -1,0 +1,416 @@
+import csv
+import json
+import logging
+import math
+import os
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import yaml
+
+
+def load_config(path: str = "config.yaml") -> dict:
+    load_dotenv()
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def load_dotenv(path: str | Path = ".env") -> None:
+    """Load simple KEY=VALUE lines into os.environ without overwriting existing values."""
+    env_path = Path(path)
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def setup_logging(log_dir: str = "logs") -> logging.Logger:
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    log_file = Path(log_dir) / f"run_{timestamp}.log"
+
+    logger = logging.getLogger("image_automation")
+    logger.setLevel(logging.DEBUG)
+    logger.handlers.clear()
+
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    return logger
+
+
+def col_letter_to_index(letter: str) -> int:
+    """Convert Excel column letter to 0-based index. A->0, B->1, etc."""
+    result = 0
+    for ch in letter.upper():
+        result = result * 26 + (ord(ch) - ord("A") + 1)
+    return result - 1
+
+
+def col_letter_to_openpyxl_idx(letter: str) -> int:
+    """Convert Excel column letter to 1-based openpyxl column index."""
+    return col_letter_to_index(letter) + 1
+
+
+def ensure_output_dir(product_id: str, base_dir: str = "output") -> Path:
+    return product_output_dir(product_id, base_dir)
+
+
+def product_output_dir(product_id: str, base_dir: str = "output") -> Path:
+    """Return the canonical output directory for a product."""
+    path = Path(base_dir) / str(product_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def env_or_config(config: dict, key: str, env_name: str, default: str = "") -> str:
+    """Read a secret/config value with environment variables taking priority."""
+    value = os.environ.get(env_name)
+    if value:
+        return value
+    return str(config.get(key, default) or "")
+
+
+def read_status(product_dir: str | Path) -> dict:
+    path = Path(product_dir) / "status.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def update_status(product_dir: str | Path, stage: str, **fields) -> dict:
+    """Merge a stage flag and fields into output/<product_id>/status.json."""
+    path = Path(product_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    status = read_status(path)
+    status[stage] = True
+    status.update(fields)
+    status["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    (path / "status.json").write_text(
+        json.dumps(status, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return status
+
+
+def is_product_completed(product_dir: str | Path) -> bool:
+    return bool(read_status(product_dir).get("lovart_done"))
+
+
+RESULT_FIELDNAMES = ["product_id", "product_name", "status", "project_url", "error"]
+
+
+def append_result(
+    results_path: str | Path,
+    product_id: str,
+    product_name: str,
+    project_url: str = "",
+    status: str = "success",
+    error: str = "",
+) -> None:
+    """Append one product outcome to results.csv using real CSV escaping."""
+    path = Path(results_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists() or path.stat().st_size == 0
+    if not write_header:
+        _upgrade_results_csv_header(path)
+
+    with path.open("a", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        if write_header:
+            writer.writerow(RESULT_FIELDNAMES)
+        writer.writerow([product_id, product_name, status, project_url, error])
+
+
+def _upgrade_results_csv_header(path: Path) -> None:
+    """Upgrade legacy 3-column results.csv files before appending new rows."""
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        rows = list(csv.reader(fh))
+    if not rows or rows[0] == RESULT_FIELDNAMES:
+        return
+    if rows[0] != ["product_id", "product_name", "project_url"]:
+        return
+
+    upgraded_rows = [RESULT_FIELDNAMES]
+    for row in rows[1:]:
+        product_id = row[0] if len(row) > 0 else ""
+        product_name = row[1] if len(row) > 1 else ""
+        project_url = row[2] if len(row) > 2 else ""
+        upgraded_rows.append([product_id, product_name, "success", project_url, ""])
+
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerows(upgraded_rows)
+
+
+def split_image_roles(image_paths: list[str]) -> dict:
+    """Split workbook images by position into product/accessory/dimension/reference roles."""
+    return {
+        "product_image": image_paths[0] if len(image_paths) >= 1 else "",
+        "accessory_image": image_paths[1] if len(image_paths) >= 2 else "",
+        "dimension_image": image_paths[2] if len(image_paths) >= 3 else "",
+        "reference_images": [path for path in image_paths[3:] if path] if len(image_paths) >= 4 else [],
+    }
+
+
+def build_final_lovart_images(
+    white_image: str,
+    scene_image: str,
+    accessory_image: str = "",
+    dimension_image: str = "",
+    reference_sheet: str = "",
+) -> list[str]:
+    """Build final Lovart upload order, keeping the merged reference sheet last."""
+    images = [white_image, scene_image]
+    if accessory_image:
+        images.append(accessory_image)
+    if dimension_image:
+        images.append(dimension_image)
+    if reference_sheet:
+        images.append(reference_sheet)
+    return [path for path in images if path]
+
+
+def merge_reference_images(reference_paths: list[str], output_path: str | Path, tile_size: int = 512) -> str:
+    """Merge reference images into one contact sheet for Gemini/Lovart style reference."""
+    if not reference_paths:
+        return ""
+    try:
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required to merge reference images. Run: pip install Pillow==12.0.0") from exc
+
+    images = []
+    for path in reference_paths:
+        with Image.open(path) as img:
+            img = ImageOps.exif_transpose(img).convert("RGB")
+            img.thumbnail((tile_size, tile_size), Image.Resampling.LANCZOS)
+            tile = Image.new("RGB", (tile_size, tile_size), "white")
+            x = (tile_size - img.width) // 2
+            y = (tile_size - img.height) // 2
+            tile.paste(img, (x, y))
+            images.append(tile)
+
+    columns = max(1, math.ceil(math.sqrt(len(images))))
+    rows = math.ceil(len(images) / columns)
+    sheet = Image.new("RGB", (columns * tile_size, rows * tile_size), "white")
+    for idx, tile in enumerate(images):
+        x = (idx % columns) * tile_size
+        y = (idx // columns) * tile_size
+        sheet.paste(tile, (x, y))
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(output, quality=95)
+    return str(output)
+
+
+WHITE_BACKGROUND_PROMPT = (
+    "请帮我把这张产品图精修一下，要求突出产品的高级感，超清摄影，1k画质，"
+    "产品造型要和原图保持一致，比例1:1，白底图"
+)
+
+
+SCENE_PROMPT = (
+    "根据这个产品设计一张场景图，其他均保持不变，产品的特征要保持一致，图片比例1：1，超清摄影，1k画质"
+)
+
+
+def build_design_prompt(product_name_cn: str, language: str, selling_points: str) -> str:
+    """Build the product-specific Gemini prompt in UTF-8 Chinese."""
+    output_language = language or "巴西葡萄牙语"
+    return (
+        f"图1，图2，是我的{product_name_cn}产品\n"
+        "【角色设定】你是一名资深的电商设计师，精通各种平面设计，设计富有创新性，创意性，注重文字排版，画面内容\n"
+        "我想设计一个这个产品的电商详情页案例，你帮我设计一下这个电商详情页，有12屏的产品详情图，不要生成图片，"
+        "要求设计风格有温馨感，高级感，可以参考 图3 这个设计风格。\n"
+        "输出的每一屏内容都包括（主标题，副标题，信息布局，排版形式）以便我在其他工具中直接生成这些素材。请不要反问，直接根据现有信息生成最优的prompt。\n\n"
+        "图片要求：\n"
+        "图片比例1:1\n"
+        f"语言: {output_language}\n"
+        "无logo\n\n"
+        f"产品信息：\n{selling_points}\n\n"
+    )
+
+
+def build_lovart_image_note(has_reference_sheet: bool, has_accessory_image: bool, has_dimension_image: bool) -> str:
+    """Describe uploaded image roles for the final Lovart detail-page generation."""
+    parts = [
+        "上传图片说明：",
+        "图1是白底产品图，图2是产品场景图，二者都是我的商品主体参考。",
+    ]
+    next_index = 3
+    if has_accessory_image:
+        parts.append(f"图{next_index}是配件图，属于商品组成部分或包装配件参考。")
+        next_index += 1
+    if has_dimension_image:
+        parts.append(f"图{next_index}是尺寸图，属于商品真实尺寸和结构信息参考。")
+        next_index += 1
+    if has_reference_sheet:
+        parts.append(
+            f"最后一张图（图{next_index}）才是合并参考图，只用于参考设计风格、排版氛围和视觉调性；"
+            "不要把最后一张参考图里的非本商品元素当成我的商品。"
+        )
+        parts.append("除最后一张参考图以外，其余上传图片都属于我的商品或商品信息，必须优先保持真实形态。")
+    else:
+        parts.append("本次没有单独的风格参考图，所有上传图片都属于我的商品或商品信息。")
+    return "\n".join(parts) + "\n\n"
+
+
+def build_lovart_prompt(
+    product_name_cn: str,
+    language: str,
+    selling_points: str,
+    generated_prompt: str,
+    image_note: str = "",
+) -> str:
+    """Prepend product guardrails before sending Gemini's generated prompt to Lovart."""
+    prefix = (
+        f"我的产品是：{product_name_cn}\n\n"
+        f"{image_note}"
+        "我上传的图片是产品真实外形、结构、颜色、材质和比例的强参考。创意场景、背景和排版可以重新设计，"
+        "但产品主体必须严格贴近参考图片，不要改变真实形态，不要幻想出不存在的部件、颜色或结构。\n\n"
+        "【角色设定】你是一名资深电商视觉设计师，擅长商品详情页、信息层级、卖点提炼和图片生成提示词设计。\n\n"
+        "我需要你为这个产品设计一套完整的电商详情页\n"
+        "设计要求：\n"
+        "- 画面要有高级感、商业感和清晰的信息层级。\n"
+        "- 图片比例为 1:1，1K画质。\n"
+        f"- 图片语言：{language}\n"
+        "- 不要出现 logo。\n"
+        "- 文案要适合跨境电商详情页，不要空泛。\n\n"
+        f"产品信息/卖点：\n{selling_points}\n\n"
+        "以下是 Gemini 已生成的详细提示词，请在此基础上执行：\n\n"
+    )
+    return f"{prefix}{generated_prompt.strip()}\n"
+
+
+def build_lovart_confirmation_prompt(
+    product_name_cn: str,
+    language: str,
+    selling_points: str,
+    confirmation_text: str,
+    confirmation_payload,
+    project_id: str,
+    thread_id: str,
+    round_index: int,
+    max_auto_confirm_credits: int,
+    lovart_mode: str,
+) -> str:
+    """Build a strict Gemini prompt for deciding whether to confirm a Lovart gate."""
+    payload_json = json.dumps(confirmation_payload, ensure_ascii=False, indent=2)
+    return (
+        "你需要判断 Lovart 返回的确认请求是否应该继续确认。\n"
+        "请只根据下面的信息判断，不要重新设计图片，不要输出长篇解释。\n\n"
+        "重要提醒：Lovart 返回的确认内容不一定是消耗 credits；在 unlimited 模式下，它也可能只是排队、继续生成、工具调用、选项选择或普通流程确认。\n\n"
+        "决策规则：\n"
+        "- 如果这是为了继续生成当前产品电商详情页图片的正常流程确认，请选择 CONFIRM。\n"
+        "- 如果当前是 unlimited 模式，且确认内容只是继续排队/继续生成/允许调用生成工具，不要因为出现“确认”就误判为付费消耗。\n"
+        "- 只有当确认内容明确要求异常高成本、超出 credits 上限、账号/权限/安全风险、删除/覆盖项目、与当前产品无关，或无法判断时，才选择 STOP。\n"
+        "- 如果返回内容里有多个选项，请选择最适合继续生成当前图片任务的选项；没有选项时只判断是否确认。\n\n"
+        "必须严格输出 JSON，不要使用 Markdown：\n"
+        '{"decision":"CONFIRM或STOP","reason":"一句话说明","message_to_lovart":"如果需要发给Lovart的简短选择/说明，没有就留空"}\n\n'
+        f"当前产品：{product_name_cn}\n"
+        f"图片语言：{language}\n"
+        f"产品信息/卖点：\n{selling_points}\n\n"
+        f"当前 Lovart 模式：{lovart_mode}\n"
+        f"自动确认 credits 上限：{max_auto_confirm_credits}\n"
+        f"Lovart project_id：{project_id}\n"
+        f"Lovart thread_id：{thread_id}\n"
+        f"确认轮次：{round_index}\n\n"
+        f"Lovart 可读确认内容：\n{confirmation_text or '(无可读文字)'}\n\n"
+        f"Lovart 原始确认 JSON：\n{payload_json}\n"
+    )
+
+
+def parse_lovart_confirmation_decision(text: str) -> dict:
+    """Parse Gemini's confirmation decision into a small normalized dict."""
+    raw = (text or "").strip()
+    data = None
+    if raw:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", raw, flags=re.S)
+            if match:
+                try:
+                    data = json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    data = None
+
+    if isinstance(data, dict):
+        decision = str(data.get("decision", "")).strip().upper()
+        reason = str(data.get("reason", "") or "").strip()
+        message = str(data.get("message_to_lovart", "") or "").strip()
+    else:
+        upper = raw.upper()
+        decision = "CONFIRM" if "CONFIRM" in upper and "STOP" not in upper else "STOP"
+        reason = raw[:500]
+        message = ""
+
+    if decision not in {"CONFIRM", "STOP"}:
+        decision = "STOP"
+        if not reason:
+            reason = "Gemini did not return a clear CONFIRM decision."
+
+    return {
+        "decision": decision,
+        "reason": reason,
+        "message_to_lovart": message,
+        "raw_response": raw,
+    }
+
+
+def sanitize_filename(value: str, default: str = "item") -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(value)).strip(" ._")
+    return cleaned[:80] or default
+
+
+def create_run_dir(base_dir: str | Path = "runs") -> Path:
+    run_dir = Path(base_dir) / datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
+
+
+def write_run_summary(run_dir: str | Path, rows: list[dict]) -> None:
+    """Write per-run summary.json and summary.csv."""
+    path = Path(run_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "summary.json").write_text(
+        json.dumps(rows, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    fieldnames = [
+        "product_id",
+        "product_name",
+        "status",
+        "project_url",
+        "gemini_chars",
+        "artifact_count",
+        "duration_seconds",
+        "error",
+    ]
+    with (path / "summary.csv").open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})

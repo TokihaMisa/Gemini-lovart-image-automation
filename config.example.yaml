@@ -1,0 +1,62 @@
+excel:
+  path: "data\\products.xlsx"
+  sheet: 0
+  columns:
+    id: "A"
+    name_cn: "B"
+    language: "C"
+    selling_points: "D"
+  image_columns:
+    start: "E"
+    # Optional: stop at a fixed column.
+    # end: "H"
+    # Optional: scan at most N columns from start if end is not set.
+    max_columns: 20
+    # Optional: stop after N consecutive empty image cells if neither end nor max_columns stops first.
+    empty_streak: 20
+
+browser:
+  chrome_exe: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  user_data_dir: "browser_profile"
+
+gemini:
+  preamble_file: "preamble.txt"
+  base_url: "https://gemini.google.com"
+  thinking_mode: true
+  reply_timeout: 300
+  upload_timeout: 120
+
+gemini_api:
+  # Set GEMINI_API_KEY in your environment.
+  model: "gemini-2.5-flash-lite"
+
+nvidia_api:
+  # Set NVIDIA_API_KEY in your environment or .env.
+  base_url: "https://integrate.api.nvidia.com/v1"
+  model_choice: "kimi"
+  send_images: true
+  models:
+    # Kimi K2.5 supports image input and thinking mode by default.
+    kimi: "moonshotai/kimi-k2.5"
+
+lovart:
+  # Set LOVART_ACCESS_KEY and LOVART_SECRET_KEY in your environment.
+  base_url: "https://lgw.lovart.ai"
+  # image_model options:
+  # auto, gpt_image_2, nano_banana, nano_banana_2, nano_banana_pro,
+  # midjourney, seedream_v4, seedream_v4_5
+  # Multiple models are allowed with commas, e.g. "nano_banana_2,nano_banana_pro".
+  image_model: "auto"
+  # prefer = let Lovart Agent auto-plan but prefer this image model.
+  # force = force only this image generation tool.
+  model_selection: "prefer"
+  # Optional: fast or thinking. Empty/default lets Lovart choose its default.
+  reasoning_mode: "fast"
+  # In unlimited mode, if Lovart shows a credits confirmation, do not confirm it.
+  # The automation keeps refreshing status because it may still be queued.
+  wait_forever_on_credit_prompt: true
+  max_confirmation_rounds: 5
+  max_auto_confirm_credits: 10
+  wait_timeout: 10800
+  poll_interval: 5
+  timeout: 600
