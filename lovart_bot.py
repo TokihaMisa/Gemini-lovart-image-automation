@@ -189,11 +189,13 @@ class LovartBot:
                     reason="Lovart was still running when the local wait timeout was reached",
                 )
             else:
+                project_url = f"https://www.lovart.ai/canvas?projectId={project_id}" if project_id else ""
                 update_status(
                     product_dir,
                     "failed",
                     project_id=project_id,
                     thread_id=thread_id,
+                    project_url=project_url,
                     needs_manual_action=False,
                     reason=result.get("warning") or result.get("final_status") or "Lovart generation failed",
                 )
@@ -242,11 +244,13 @@ class LovartBot:
             )
 
             if not result.get("generation_succeeded"):
+                project_url = f"https://www.lovart.ai/canvas?projectId={project_id}" if project_id else ""
                 update_status(
                     product_dir,
                     f"lovart_{step_name}_failed",
                     project_id=project_id,
                     thread_id=thread_id,
+                    project_url=project_url,
                     reason=result.get("warning") or result.get("final_status") or "Lovart support image failed",
                 )
                 return result
@@ -270,6 +274,7 @@ class LovartBot:
                 project_id=project_id,
                 thread_id=thread_id,
                 local_path=first_image,
+                **{f"lovart_{step_name}_local_path": first_image},
                 artifact_count=len(image_files),
             )
             return result

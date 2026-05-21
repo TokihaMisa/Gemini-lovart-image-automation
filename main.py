@@ -1,4 +1,5 @@
 import argparse
+import csv
 import signal
 import sys
 import time
@@ -256,6 +257,98 @@ def _record_failure(product, status: str, error: str = "", project_url: str = ""
     append_result("output/results.csv", product.id, product.name_cn, project_url, status=status, error=error)
 
 
+def _lovart_project_url(project_id: str = "") -> str:
+    return f"https://www.lovart.ai/canvas?projectId={project_id}" if project_id else ""
+
+
+def _project_url_from_status(status: dict) -> str:
+    return status.get("project_url") or _lovart_project_url(status.get("project_id", ""))
+
+
+def _existing_path(path: str | Path | None) -> str:
+    if not path:
+        return ""
+    candidate = Path(path)
+    return str(candidate) if candidate.exists() else ""
+
+
+def _find_support_image(product_dir: Path, status: dict, step_name: str, final_index: int) -> str:
+    """Find an already downloaded Lovart support image for resume."""
+    keys = [
+        f"lovart_{step_name}_local_path",
+        f"{step_name}_local_path",
+    ]
+    for key in keys:
+        found = _existing_path(status.get(key))
+        if found:
+            return found
+
+    final_images = status.get("lovart_final_images") or []
+    if isinstance(final_images, list) and len(final_images) > final_index:
+        found = _existing_path(final_images[final_index])
+        if found:
+            return found
+
+    step_dir = product_dir / "lovart_steps" / step_name
+    if step_dir.exists():
+        image_exts = {".png", ".jpg", ".jpeg", ".webp"}
+        candidates = [
+            path for path in step_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in image_exts and path.stat().st_size > 0
+        ]
+        if candidates:
+            candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+            return str(candidates[0])
+
+    return ""
+
+
+def _backfill_result_project_urls(results_path: str | Path = "output/results.csv") -> int:
+    path = Path(results_path)
+    if not path.exists() or path.stat().st_size == 0:
+        return 0
+
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        fieldnames = reader.fieldnames or []
+        rows = list(reader)
+
+    if not rows:
+        return 0
+
+    changed = 0
+    by_id = {}
+    order = []
+    for row in rows:
+        product_id = row.get("product_id", "")
+        if not product_id:
+            continue
+        if row.get("project_url"):
+            pass
+        else:
+            status = read_status(product_output_dir(product_id))
+            project_url = _project_url_from_status(status)
+            if project_url:
+                row["project_url"] = project_url
+                changed += 1
+        if product_id not in by_id:
+            order.append(product_id)
+        else:
+            changed += 1
+        by_id[product_id] = row
+
+    if changed:
+        try:
+            with path.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.DictWriter(fh, fieldnames=fieldnames)
+                writer.writeheader()
+                for product_id in order:
+                    writer.writerow(by_id[product_id])
+        except PermissionError:
+            return 0
+    return changed
+
+
 def _dry_run_products(products, logger, run_dir, output_dir="output"):
     summary_rows = []
     for product in products:
@@ -286,6 +379,9 @@ def _dry_run_products(products, logger, run_dir, output_dir="output"):
 def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
     success = fail = skipped = still_running = 0
     summary_rows = []
+    backfilled = _backfill_result_project_urls()
+    if backfilled:
+        logger.info(f"Backfilled {backfilled} Lovart project URL(s) in output/results.csv")
 
     for idx, product in enumerate(products, 1):
         if _shutdown_requested:
@@ -345,38 +441,63 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 reference_sheet=reference_sheet,
             )
 
-            lovart_project_id = lovart.create_project(product.id)
-            update_status(product_dir, "lovart_project_created", project_id=lovart_project_id)
+            status = read_status(product_dir)
+            lovart_project_id = status.get("project_id", "")
+            if lovart_project_id:
+                update_status(
+                    product_dir,
+                    "lovart_project_reused",
+                    project_id=lovart_project_id,
+                    project_url=_lovart_project_url(lovart_project_id),
+                )
+            else:
+                lovart_project_id = lovart.create_project(product.id)
+                update_status(
+                    product_dir,
+                    "lovart_project_created",
+                    project_id=lovart_project_id,
+                    project_url=_lovart_project_url(lovart_project_id),
+                )
 
-            white_result = lovart.create_support_image(
-                product_id=product.id,
-                step_name="white_bg",
-                prompt=WHITE_BACKGROUND_PROMPT,
-                image_paths=[product_image],
-                project_id=lovart_project_id,
-                confirmation_advisor=gemini,
-                product_name_cn=product.name_cn,
-                language=product.language,
-                selling_points=product.selling_points,
-            )
-            white_image = (white_result or {}).get("local_path", "")
-            if not white_image:
-                raise RuntimeError("Lovart white-background image generation did not return a local image")
+            status = read_status(product_dir)
+            white_image = _find_support_image(product_dir, status, "white_bg", 0)
+            if white_image:
+                logger.info(f"Lovart API: reusing white_bg image for '{product.id}'")
+            else:
+                white_result = lovart.create_support_image(
+                    product_id=product.id,
+                    step_name="white_bg",
+                    prompt=WHITE_BACKGROUND_PROMPT,
+                    image_paths=[product_image],
+                    project_id=lovart_project_id,
+                    confirmation_advisor=gemini,
+                    product_name_cn=product.name_cn,
+                    language=product.language,
+                    selling_points=product.selling_points,
+                )
+                white_image = (white_result or {}).get("local_path", "")
+                if not white_image:
+                    raise RuntimeError("Lovart white-background image generation did not return a local image")
 
-            scene_result = lovart.create_support_image(
-                product_id=product.id,
-                step_name="scene",
-                prompt=SCENE_PROMPT,
-                image_paths=[white_image],
-                project_id=lovart_project_id,
-                confirmation_advisor=gemini,
-                product_name_cn=product.name_cn,
-                language=product.language,
-                selling_points=product.selling_points,
-            )
-            scene_image = (scene_result or {}).get("local_path", "")
-            if not scene_image:
-                raise RuntimeError("Lovart scene image generation did not return a local image")
+            status = read_status(product_dir)
+            scene_image = _find_support_image(product_dir, status, "scene", 1)
+            if scene_image:
+                logger.info(f"Lovart API: reusing scene image for '{product.id}'")
+            else:
+                scene_result = lovart.create_support_image(
+                    product_id=product.id,
+                    step_name="scene",
+                    prompt=SCENE_PROMPT,
+                    image_paths=[white_image],
+                    project_id=lovart_project_id,
+                    confirmation_advisor=gemini,
+                    product_name_cn=product.name_cn,
+                    language=product.language,
+                    selling_points=product.selling_points,
+                )
+                scene_image = (scene_result or {}).get("local_path", "")
+                if not scene_image:
+                    raise RuntimeError("Lovart scene image generation did not return a local image")
 
             gemini_images = [white_image, scene_image]
             if reference_sheet:
@@ -398,6 +519,10 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 "lovart_final_images_ready",
                 lovart_final_image_count=len(lovart_images),
                 lovart_final_images=lovart_images,
+                lovart_white_bg_local_path=white_image,
+                lovart_scene_local_path=scene_image,
+                project_id=lovart_project_id,
+                project_url=_lovart_project_url(lovart_project_id),
             )
 
             prompt = gemini.generate_prompt(
@@ -453,12 +578,14 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
             elif result and result.get("final_status") == "pending_confirmation":
                 logger.warning(f"NEEDS MANUAL ACTION [{idx}/{len(products)}] {product.id}")
                 fail += 1
-                _record_failure(product, "needs_manual_action", "Lovart pending confirmation")
+                status = read_status(product_dir)
+                project_url = _project_url_from_status(status)
+                _record_failure(product, "needs_manual_action", "Lovart pending confirmation", project_url)
                 summary_rows.append({
                     "product_id": product.id,
                     "product_name": product.name_cn,
                     "status": "needs_manual_action",
-                    "project_url": "",
+                    "project_url": project_url,
                     "gemini_chars": len(prompt),
                     "artifact_count": "",
                     "duration_seconds": round(time.time() - started, 2),
@@ -493,27 +620,32 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 reason = ""
                 if result:
                     reason = result.get("warning") or result.get("final_status") or ""
-                _record_failure(product, "failed", reason)
+                status = read_status(product_dir)
+                project_url = _project_url_from_status(status)
+                update_status(product_dir, "failed", reason=reason, project_url=project_url)
+                _record_failure(product, "failed", reason, project_url)
                 summary_rows.append({
                     "product_id": product.id,
                     "product_name": product.name_cn,
                     "status": "failed",
-                    "project_url": "",
+                    "project_url": project_url,
                     "gemini_chars": len(prompt),
                     "artifact_count": "",
                     "duration_seconds": round(time.time() - started, 2),
                     "error": reason,
                 })
         except Exception as exc:
-            update_status(product_dir, "failed", reason=str(exc))
+            status = read_status(product_dir)
+            project_url = _project_url_from_status(status)
+            update_status(product_dir, "failed", reason=str(exc), project_url=project_url)
             logger.error(f"FAIL [{idx}/{len(products)}] {product.id}: {exc}")
             fail += 1
-            _record_failure(product, "failed", str(exc))
+            _record_failure(product, "failed", str(exc), project_url)
             summary_rows.append({
                 "product_id": product.id,
                 "product_name": product.name_cn,
                 "status": "failed",
-                "project_url": "",
+                "project_url": project_url,
                 "gemini_chars": "",
                 "artifact_count": "",
                 "duration_seconds": round(time.time() - started, 2),

@@ -147,7 +147,7 @@ class GeminiBot:
 
         script = """
         () => {
-            const patterns = [/临时/, /temporary/i];
+            const patterns = [/临时/, /臨時/, /temporary/i];
             const candidates = [...document.querySelectorAll('button, [role="button"], a')];
             const visible = (el) => {
                 const rect = el.getBoundingClientRect();
@@ -186,36 +186,101 @@ class GeminiBot:
         return False
 
     def _select_thinking_mode(self) -> bool:
-        """Select Gemini Thinking mode before sending prompts."""
-        if self._click_thinking_control():
-            self.page.wait_for_timeout(1000)
-            self.logger.info("Gemini: Thinking mode selected")
-            return True
+        """Select Gemini 3 Flash and set thinking level to extended."""
+        if not self._open_mode_menu():
+            self.logger.warning("Gemini: mode menu control not found")
+            return False
 
-        if self._open_mode_menu():
+        self.page.wait_for_timeout(500)
+        if not self._click_flash_model():
+            self.logger.warning("Gemini: 3 Flash model option not found")
+            return False
+
+        self.page.wait_for_timeout(1000)
+        if not self._open_thinking_level_menu():
+            if not self._open_mode_menu():
+                self.logger.warning("Gemini: mode menu could not be reopened for thinking level")
+                return False
             self.page.wait_for_timeout(500)
-            if self._click_thinking_control():
-                self.page.wait_for_timeout(1000)
-                self.logger.info("Gemini: Thinking mode selected from mode menu")
-                return True
+            if not self._open_thinking_level_menu():
+                self.logger.warning("Gemini: thinking level menu not found")
+                return False
 
-        self.logger.warning("Gemini: Thinking mode control not found")
-        return False
+        self.page.wait_for_timeout(500)
+        if not self._click_extended_thinking_level():
+            self.logger.warning("Gemini: extended thinking level option not found")
+            return False
+
+        self.page.wait_for_timeout(1000)
+        self.logger.info("Gemini: selected 3 Flash with extended thinking level")
+        return True
+
+    def _click_flash_model(self) -> bool:
+        selectors = [
+            'gem-menu-item:has-text("3.5 Flash")',
+            '[role="menuitem"]:has-text("3.5 Flash")',
+            'button:has-text("3.5 Flash")',
+            '[role="button"]:has-text("3.5 Flash")',
+            'gem-menu-item:has-text("3 Flash")',
+            '[role="menuitem"]:has-text("3 Flash")',
+            'button:has-text("3 Flash")',
+            '[role="button"]:has-text("3 Flash")',
+            'gem-menu-item:has-text("全方位帮助")',
+            '[role="menuitem"]:has-text("全方位帮助")',
+        ]
+        if self._click_gemini_control(
+            selectors,
+            r'[/^3(?:\.\d+)?\s*Flash\b/i, /Flash[\s\S]*全方位帮助/i]',
+            "Flash model",
+            exclude_list=r'[/Flash-Lite/i, /Lite/i, /极速回答/]',
+        ):
+            return True
+        return self._current_model_is_flash()
+
+    def _open_thinking_level_menu(self) -> bool:
+        selectors = [
+            'gem-menu-item:has-text("思考等级")',
+            '[role="menuitem"]:has-text("思考等级")',
+            'button:has-text("思考等级")',
+            '[role="button"]:has-text("思考等级")',
+            'gem-menu-item:has-text("Thinking level")',
+            '[role="menuitem"]:has-text("Thinking level")',
+            'button:has-text("Thinking level")',
+            '[role="button"]:has-text("Thinking level")',
+        ]
+        return self._click_gemini_control(selectors, r'[/思考等级/, /thinking level/i]', "thinking level menu")
+
+    def _click_extended_thinking_level(self) -> bool:
+        selectors = [
+            'gem-menu-item:has-text("扩展")',
+            '[role="menuitem"]:has-text("扩展")',
+            'button:has-text("扩展")',
+            '[role="button"]:has-text("扩展")',
+            'gem-menu-item:has-text("Extended")',
+            '[role="menuitem"]:has-text("Extended")',
+            'button:has-text("Extended")',
+            '[role="button"]:has-text("Extended")',
+        ]
+        return self._click_gemini_control(selectors, r'[/^扩展\b/, /^Extended\b/i]', "extended thinking level")
 
     def _click_thinking_control(self) -> bool:
         selectors = [
             'button[aria-label*="思考"]',
             '[role="button"][aria-label*="思考"]',
             '[role="menuitem"]:has-text("思考")',
+            'gem-menu-item:has-text("思考")',
             'button:has-text("思考")',
             '[role="button"]:has-text("思考")',
             'mat-option:has-text("思考")',
             'button[aria-label*="Thinking"]',
             '[role="button"][aria-label*="Thinking"]',
             '[role="menuitem"]:has-text("Thinking")',
+            'gem-menu-item:has-text("Thinking")',
             'button:has-text("Thinking")',
             '[role="button"]:has-text("Thinking")',
             'mat-option:has-text("Thinking")',
+            '[role="menuitem"]:has-text("Deep Think")',
+            'gem-menu-item:has-text("Deep Think")',
         ]
         for selector in selectors:
             try:
@@ -229,9 +294,9 @@ class GeminiBot:
 
         script = """
         () => {
-            const include = [/思考模式/, /^思考$/, /thinking mode/i, /^thinking$/i];
-            const exclude = [/显示思路/, /show thinking/i, /思路/, /thought/i];
-            const candidates = [...document.querySelectorAll('button, [role="button"], [role="menuitem"], mat-option, [aria-label], [title]')];
+            const include = [/思考模式/, /^思考$/, /思考等级/, /thinking mode/i, /^thinking$/i, /deep think/i];
+            const exclude = [/显示思路/, /显示思考/, /show thinking/i, /思路/, /thought/i];
+            const candidates = [...document.querySelectorAll('button, [role="button"], [role="menuitem"], gem-menu-item, mat-option, [aria-label], [title]')];
             const visible = (el) => {
                 const rect = el.getBoundingClientRect();
                 const style = getComputedStyle(el);
@@ -267,12 +332,106 @@ class GeminiBot:
             self.logger.warning(f"Gemini: Thinking mode DOM scan failed: {exc}")
         return False
 
+    def _current_model_is_flash(self) -> bool:
+        script = """
+        () => {
+            const controls = [...document.querySelectorAll('button[aria-label*="打开模式选择器"], [role="button"][aria-label*="打开模式选择器"]')];
+            const visible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+            };
+            return controls
+                .filter(visible)
+                .some((el) => /Flash/i.test(el.innerText || el.textContent || '') && !/Lite/i.test(el.innerText || el.textContent || ''));
+        }
+        """
+        try:
+            if self.page.evaluate(script):
+                self.logger.info("Gemini: Flash model already selected")
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _click_gemini_control(
+        self,
+        selectors: list[str],
+        pattern_list: str,
+        label: str,
+        exclude_list: str | None = None,
+    ) -> bool:
+        for selector in selectors:
+            try:
+                control = self.page.locator(selector).first
+                if control.is_visible(timeout=1200):
+                    try:
+                        control.click(timeout=3000, force=True)
+                    except TypeError:
+                        control.click(timeout=3000)
+                    self.logger.info(f"Gemini: clicked {label} via {selector}")
+                    return True
+            except Exception:
+                continue
+
+        exclude_line = ""
+        exclude_filter = ""
+        if exclude_list:
+            exclude_line = f"const exclude = {exclude_list};"
+            exclude_filter = ".filter((item) => !exclude.some((pattern) => pattern.test(item.text)))"
+
+        script = f"""
+        () => {{
+            const include = {pattern_list};
+            {exclude_line}
+            const candidates = [...document.querySelectorAll('button, [role="button"], [role="menuitem"], gem-menu-item, mat-option, [aria-label], [title]')];
+            const visible = (el) => {{
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+            }};
+            const matches = candidates
+                .filter(visible)
+                .map((el) => ({{
+                    el,
+                    text: [
+                        el.innerText,
+                        el.getAttribute('aria-label'),
+                        el.getAttribute('title'),
+                        el.getAttribute('data-tooltip'),
+                    ].filter(Boolean).join(' ').trim(),
+                    rect: el.getBoundingClientRect(),
+                }}))
+                .filter((item) => item.text)
+                .filter((item) => include.some((pattern) => pattern.test(item.text)))
+                {exclude_filter};
+            matches.sort((a, b) => (b.rect.top - a.rect.top) || (b.rect.right - a.rect.right));
+            if (!matches.length) return null;
+            matches[0].el.click();
+            return matches[0].text;
+        }}
+        """
+        try:
+            clicked = self.page.evaluate(script)
+            if clicked:
+                self.logger.info(f"Gemini: clicked {label} via DOM scan")
+                return True
+        except Exception as exc:
+            self.logger.warning(f"Gemini: {label} DOM scan failed: {exc}")
+        return False
+
     def _open_mode_menu(self) -> bool:
         selectors = [
+            'button[aria-label*="打开模式选择器"]',
+            '[role="button"][aria-label*="打开模式选择器"]',
             'button[aria-label*="快速"]',
             '[role="button"][aria-label*="快速"]',
             'button:has-text("快速")',
             '[role="button"]:has-text("快速")',
+            'button:has-text("Flash")',
+            '[role="button"]:has-text("Flash")',
+            'button:has-text("Pro")',
+            '[role="button"]:has-text("Pro")',
             'button[aria-label*="Fast"]',
             '[role="button"][aria-label*="Fast"]',
             'button:has-text("Fast")',
@@ -294,7 +453,7 @@ class GeminiBot:
 
         script = """
         () => {
-            const patterns = [/快速模式/, /^快速$/, /fast mode/i, /^fast$/i, /mode/i, /模式/];
+            const patterns = [/打开模式选择器/, /快速模式/, /^快速$/, /fast mode/i, /^fast$/i, /^flash$/i, /mode/i, /模式/, /^pro$/i];
             const exclude = [/fast forward/i, /快速生成图片/];
             const candidates = [...document.querySelectorAll('button, [role="button"], [aria-label], [title]')];
             const visible = (el) => {
@@ -340,22 +499,69 @@ class GeminiBot:
         clicked = False
         for selector in [
             'button:has(img[alt="add_2"])',
+            'button[aria-label*="上传和工具"]',
             'button[aria-label*="上传"]',
+            'button[aria-label*="添加"]',
+            'button[aria-label*="附件"]',
             'button[aria-label*="Upload"]',
             'button[aria-label*="upload"]',
             'button[aria-label*="Open file"]',
             'button[aria-label*="attach"]',
+            'button[aria-label*="Attach"]',
+            '[role="button"][aria-label*="上传和工具"]',
         ]:
             try:
                 locator = self.page.locator(selector)
                 if locator.count() > 0:
-                    locator.first.click(timeout=3000)
+                    try:
+                        locator.first.click(timeout=3000, force=True)
+                    except TypeError:
+                        locator.first.click(timeout=3000)
                     self.page.wait_for_timeout(1000)
                     self.logger.info(f"Gemini: clicked add button via {selector}")
                     clicked = True
                     break
             except Exception:
                 continue
+
+        if not clicked and hasattr(self.page, "evaluate"):
+            script = """
+            () => {
+                const include = [/上传和工具/, /上传/, /添加文件/, /添加图片/, /附件/, /upload/i, /attach/i, /add files/i, /add image/i];
+                const candidates = [...document.querySelectorAll('button, [role="button"], [aria-label], [title]')];
+                const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+                };
+                const matches = candidates
+                    .filter(visible)
+                    .map((el) => ({
+                        el,
+                        text: [
+                            el.innerText,
+                            el.getAttribute('aria-label'),
+                            el.getAttribute('title'),
+                            el.getAttribute('data-tooltip'),
+                        ].filter(Boolean).join(' ').trim(),
+                        rect: el.getBoundingClientRect(),
+                    }))
+                    .filter((item) => item.text)
+                    .filter((item) => include.some((pattern) => pattern.test(item.text)));
+                matches.sort((a, b) => (b.rect.top - a.rect.top) || (b.rect.right - a.rect.right));
+                if (!matches.length) return null;
+                matches[0].el.click();
+                return matches[0].text;
+            }
+            """
+            try:
+                clicked_text = self.page.evaluate(script)
+                if clicked_text:
+                    self.page.wait_for_timeout(1000)
+                    self.logger.info("Gemini: clicked add button via DOM scan")
+                    clicked = True
+            except Exception as exc:
+                self.logger.warning(f"Gemini: add/upload DOM scan failed: {exc}")
 
         if not clicked:
             self.logger.warning("Gemini: add/upload button not found")
@@ -374,8 +580,14 @@ class GeminiBot:
         for selector in [
             'li:has-text("Upload")',
             'li:has-text("上传")',
+            'button[role="menuitem"]:has-text("上传文件")',
+            '[role="menuitem"]:has-text("上传文件")',
             'div[role="menuitem"]:has-text("file")',
+            'button:has-text("Upload file")',
+            '[role="menuitem"]:has-text("Upload file")',
             'button:has-text("上传文件")',
+            'gem-menu-item:has-text("上传文件")',
+            'button:has-text("file")',
         ]:
             try:
                 item = self.page.locator(selector).first
@@ -404,7 +616,7 @@ class GeminiBot:
                     """
                     () => {
                         const text = document.body.innerText || '';
-                        const busy = /(上传中|正在上传|处理中|uploading|processing|attaching)/i.test(text);
+                        const busy = /(上传中|正在上传|处理中|正在处理|uploading|processing|attaching)/i.test(text);
                         const fileInputs = [...document.querySelectorAll('input[type="file"]')];
                         const fileCount = fileInputs.reduce((total, input) => total + (input.files ? input.files.length : 0), 0);
                         const attachments = [...document.querySelectorAll('img, video, [aria-label], [data-test-id], mat-chip, .chip')]
@@ -417,7 +629,7 @@ class GeminiBot:
                                 ].filter(Boolean).join(' ');
                                 return /(image|photo|picture|uploaded|attachment|图片|照片|附件|已上传)/i.test(label);
                             }).length;
-                        const sendButtons = [...document.querySelectorAll('button[aria-label*="Send"], button[aria-label*="发送"], button[aria-label*="submit"]')];
+                        const sendButtons = [...document.querySelectorAll('button[aria-label*="Send"], button[aria-label*="发送"], button[aria-label*="提交"], button[aria-label*="submit"]')];
                         const sendDisabled = sendButtons.some((button) => button.disabled || button.getAttribute('aria-disabled') === 'true');
                         return { busy, fileCount, attachments, sendDisabled };
                     }
@@ -459,6 +671,7 @@ class GeminiBot:
         for selector in [
             'button[aria-label*="Send"]',
             'button[aria-label*="发送"]',
+            'button[aria-label*="提交"]',
             'button[aria-label*="submit"]',
         ]:
             try:

@@ -7,7 +7,8 @@ from pathlib import Path
 
 from excel_reader import resolve_image_scan_config
 from gemini_bot import GeminiBot
-from utils import write_run_summary
+from main import _process_products
+from utils import update_status, write_run_summary
 
 
 class MediumPriorityBehaviorTests(unittest.TestCase):
@@ -241,6 +242,73 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
 
         self.assertFalse(logger.completed)
         self.assertTrue(logger.timed_out)
+
+    def test_process_products_resumes_failed_product_with_existing_lovart_support_images(self):
+        class Product:
+            id = "SKU-RESUME"
+            name_cn = "Product"
+            language = "Portuguese"
+            selling_points = "points"
+            image_paths = ["output/SKU-RESUME/image_1.png"]
+
+        class Gemini:
+            def generate_prompt(self, **kwargs):
+                events.append(("gemini_images", kwargs["image_paths"]))
+                return "generated prompt"
+
+        class Lovart:
+            def create_project(self, product_id):
+                raise AssertionError("should reuse existing project")
+
+            def create_support_image(self, **kwargs):
+                raise AssertionError("should reuse support image")
+
+            def create_and_generate(self, **kwargs):
+                events.append(("detail_project", kwargs["project_id"]))
+                events.append(("detail_images", kwargs["image_paths"]))
+                return {"generation_succeeded": True, "project_id": kwargs["project_id"]}
+
+        class Logger:
+            def info(self, message):
+                pass
+
+            def warning(self, message):
+                pass
+
+            def error(self, message):
+                raise AssertionError(message)
+
+        events = []
+        cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                product_dir = Path("output") / "SKU-RESUME"
+                white = product_dir / "lovart_steps" / "white_bg" / "white.png"
+                scene = product_dir / "lovart_steps" / "scene" / "scene.png"
+                white.parent.mkdir(parents=True, exist_ok=True)
+                scene.parent.mkdir(parents=True, exist_ok=True)
+                white.write_bytes(b"white")
+                scene.write_bytes(b"scene")
+                product_image = product_dir / "image_1.png"
+                product_image.write_bytes(b"product")
+                update_status(
+                    product_dir,
+                    "failed",
+                    project_id="project-123",
+                    project_url="https://www.lovart.ai/canvas?projectId=project-123",
+                    lovart_final_images=[str(white), str(scene)],
+                    reason="Gemini failed",
+                )
+
+                result = _process_products([Product()], Gemini(), Lovart(), Logger(), Path("runs") / "run")
+            finally:
+                os.chdir(cwd)
+
+        self.assertEqual(result, (1, 0, 0, 0))
+        self.assertIn(("detail_project", "project-123"), events)
+        self.assertIn(("gemini_images", [str(white), str(scene)]), events)
+        self.assertIn(("detail_images", [str(white), str(scene)]), events)
 
 
 if __name__ == "__main__":

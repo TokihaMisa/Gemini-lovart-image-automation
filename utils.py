@@ -128,18 +128,48 @@ def append_result(
     status: str = "success",
     error: str = "",
 ) -> None:
-    """Append one product outcome to results.csv using real CSV escaping."""
+    """Upsert one product outcome to results.csv using real CSV escaping."""
     path = Path(results_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not path.exists() or path.stat().st_size == 0
-    if not write_header:
-        _upgrade_results_csv_header(path)
+    rows = _read_result_rows(path)
+    new_row = {
+        "product_id": product_id,
+        "product_name": product_name,
+        "status": status,
+        "project_url": project_url,
+        "error": error,
+    }
 
-    with path.open("a", encoding="utf-8", newline="") as fh:
-        writer = csv.writer(fh)
-        if write_header:
-            writer.writerow(RESULT_FIELDNAMES)
-        writer.writerow([product_id, product_name, status, project_url, error])
+    by_id = {}
+    order = []
+    for row in rows:
+        existing_id = row.get("product_id", "")
+        if not existing_id:
+            continue
+        if existing_id not in by_id:
+            order.append(existing_id)
+        by_id[existing_id] = {field: row.get(field, "") for field in RESULT_FIELDNAMES}
+
+    if product_id not in by_id:
+        order.append(product_id)
+    by_id[product_id] = new_row
+
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=RESULT_FIELDNAMES)
+        writer.writeheader()
+        for key in order:
+            writer.writerow(by_id[key])
+
+
+def _read_result_rows(path: Path) -> list[dict]:
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+    _upgrade_results_csv_header(path)
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        if reader.fieldnames != RESULT_FIELDNAMES:
+            return []
+        return list(reader)
 
 
 def _upgrade_results_csv_header(path: Path) -> None:

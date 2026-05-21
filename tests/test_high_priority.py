@@ -52,18 +52,20 @@ class HighPriorityBehaviorTests(unittest.TestCase):
             self.assertEqual(data["project_url"], "https://example.test")
             self.assertTrue(is_product_completed(out))
 
-    def test_append_result_writes_header_and_escapes_csv(self):
+    def test_append_result_writes_header_escapes_csv_and_upserts_by_product_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "results.csv"
             append_result(path, "SKU-123", 'Name, "quoted"', "https://example.test")
             append_result(path, "SKU-456", "Failed item", status="failed", error='bad, "quoted"')
+            append_result(path, "SKU-456", "Recovered item", "https://example.test/2", status="success")
 
             with path.open("r", encoding="utf-8", newline="") as fh:
                 rows = list(csv.reader(fh))
 
         self.assertEqual(rows[0], ["product_id", "product_name", "status", "project_url", "error"])
         self.assertEqual(rows[1], ["SKU-123", 'Name, "quoted"', "success", "https://example.test", ""])
-        self.assertEqual(rows[2], ["SKU-456", "Failed item", "failed", "", 'bad, "quoted"'])
+        self.assertEqual(rows[2], ["SKU-456", "Recovered item", "success", "https://example.test/2", ""])
+        self.assertEqual(len(rows), 3)
 
     def test_split_image_roles_preserves_empty_accessory_and_dimension_slots(self):
         roles = split_image_roles(["product.png", "", "", "ref1.png", "", "ref2.png"])

@@ -48,10 +48,13 @@ Excel 默认字段含义：
 
 运行后主要生成在 `output/`：
 
-- `output/<商品ID>/image_*.jpeg`：从 Excel 提取出的商品图片。
-- `output/<商品名>/gemini_prompt.txt`：Gemini 生成的设计提示词。
+- `output/<商品ID>/image_*.jpeg`：从 Excel 提取出的商品图片。第 1 张是产品图，第 2 张是配件图，第 3 张是尺寸图，第 4 张起是参考图；空位表示没有对应图片。
+- `output/<商品ID>/reference_sheet.jpg`：第 4 张起的参考图合并大图，存在参考图时生成。
+- `output/<商品ID>/lovart_steps/white_bg/`：Lovart 用产品图生成的白底精修图。
+- `output/<商品ID>/lovart_steps/scene/`：Lovart 用白底图生成的场景图。
+- `output/<商品ID>/gemini_prompt.txt`：Gemini 生成的设计提示词。
 - `output/<商品ID>/lovart/`：Lovart 返回并下载的生成结果。
-- `output/results.csv`：成功生成时追加商品 ID、商品名、Lovart 项目链接。
+- `output/results.csv`：单一汇总结果表，一行一个商品 ID。每次运行按 `product_id` 更新同一行，记录成功、失败、仍在运行等结果；只要已有 Lovart project，也会写入项目链接。
 
 日志生成在 `logs/run_时间.log`。
 
@@ -108,13 +111,14 @@ Excel 默认字段含义：
 
 1. 打开 `https://gemini.google.com/app`。
 2. 尝试点击右上角的临时会话/Temporary chat。
-3. 切换到思考模式/Thinking mode；如果切换失败，会保存 debug 快照并停止当前商品，避免误走快速模式。
-4. 发送 `preamble.txt`，并等待 Gemini 的前置回复真正完成。
-5. 上传商品图片，并等待图片上传完成。
-6. 发送商品设计请求。
-7. 根据 Gemini 页面自身状态等待回复完成：生成中的停止按钮、进度条、`aria-busy` 等状态消失并连续稳定后，才进入提取结果；不再通过回复文字关键词判断是否完成。
-8. 从页面 DOM 中提取最后一条 Gemini 回复。
-9. 保存为 `gemini_prompt.txt`。
+3. 打开模式选择器，优先选择 `3.5 Flash`；兼容旧版 `3 Flash`，并排除 `Flash-Lite/极速回答`。
+4. 再次打开模式选择器，点击 `思考等级`，选择 `扩展`。如果当前已经是 Flash，也会继续执行思考等级选择。
+5. 发送 `preamble.txt`，并等待 Gemini 的前置回复真正完成。
+6. 上传图片，并等待图片上传完成。当前详情页设计阶段通常上传白底图、场景图和参考图合并大图。
+7. 发送商品设计请求。
+8. 根据 Gemini 页面自身状态等待回复完成：生成中的停止按钮、进度条、`aria-busy` 等状态消失并连续稳定后，才进入提取结果；不再通过回复文字关键词判断是否完成。
+9. 从页面 DOM 中提取最后一条 Gemini 回复。
+10. 保存为 `gemini_prompt.txt`。
 
 历史验证中，浏览器路径最稳定的方式是复用独立的 `browser_profile`，并避免依赖 `networkidle` 这类网页后台活动很重时不稳定的等待条件。
 
@@ -125,12 +129,16 @@ Excel 默认字段含义：
 1. 根据用户选择调用 Lovart 模式设置：
    - `fast=True`：快速模式，可能消耗 credits。
    - `fast=False`：unlimited 模式，可能排队。
-2. 上传本地商品图到 Lovart，得到 CDN URL。
-3. 创建 Lovart project。
-4. 将 Gemini prompt 和图片附件发送到 Lovart chat。
-5. 按配置轮询状态直到完成、失败或超时。
-6. 如果生成成功，下载 artifacts 到 `output/<商品ID>/lovart/`。
-7. 将项目重命名为商品 ID。
+2. 每个商品创建或复用一个 Lovart project；项目链接会写入 `status.json`，失败结果也会写入 `results.csv`。
+3. 先只用第 1 张产品图生成白底精修图，保存到 `lovart_steps/white_bg/`。
+4. 再用白底图生成场景图，保存到 `lovart_steps/scene/`。
+5. Gemini 使用白底图、场景图和参考图合并大图生成 12 屏详情页提示词。
+6. 最终 Lovart 详情图上传顺序为：白底图、场景图、配件图（如有）、尺寸图（如有）、参考图合并大图（如有）。提示词会说明最后一张才是风格参考图，其余都是商品或商品信息。
+7. 按配置轮询状态直到完成、失败、待确认或本地等待超时。
+8. 如果生成成功，下载 artifacts 到 `output/<商品ID>/lovart/`。
+9. 将项目重命名为商品 ID。
+
+如果某个商品在 Gemini 或最终 Lovart 阶段失败，但白底图、场景图和 Lovart project 已经存在，下次默认 `--resume` 运行时会复用这些中间结果继续后续流程，不会重新创建项目，也不会重新生成白底图/场景图。旧状态文件也会通过 `lovart_final_images` 或 `lovart_steps/white_bg`、`lovart_steps/scene` 目录反查可复用图片。
 
 `lovart_api.py` 是较完整的 Lovart OpenAPI 客户端，包含：
 
@@ -294,18 +302,30 @@ python main.py
 
 5. **缺少断点续跑和状态文件**
 
-   已为每个商品写入 `status.json`。主流程启动时会跳过已有 `lovart_done=true` 的商品。当前状态字段包括：
+   已为每个商品写入 `status.json`。主流程启动时会跳过已有 `lovart_done=true` 的商品；如果商品是 `failed` 但已有 `project_id/project_url` 和 Lovart 中间图，会复用原项目继续后续流程。当前状态字段包括：
 
    - `parsed`
+   - `image_roles_ready`
+   - `lovart_project_created`
+   - `lovart_project_reused`
+   - `project_id`
+   - `project_url`
+   - `lovart_white_bg_done`
+   - `lovart_white_bg_local_path`
+   - `lovart_scene_done`
+   - `lovart_scene_local_path`
+   - `lovart_final_images_ready`
+   - `lovart_final_images`
    - `gemini_done`
    - `lovart_uploaded`
    - `lovart_submitted`
    - `lovart_done`
+   - `lovart_still_running`
    - `needs_manual_action`
    - `failed`
    - `reason`
 
-   `results.csv` 也已改为用 Python `csv` 模块写入，包含表头并支持逗号、引号等字符转义。
+   `results.csv` 也已改为用 Python `csv` 模块写入，包含表头并支持逗号、引号等字符转义。它是按 `product_id` 更新的单一汇总表，不再追加同一商品的重复行。启动时会尝试把历史失败行中空缺的 `project_url` 用 `status.json` 里的 `project_id` 回填，并顺手合并重复 SKU；如果 CSV 正被 Excel/WPS 占用，会跳过回填但不影响继续运行。
 
 ### 中优先级
 
@@ -319,7 +339,7 @@ python main.py
 
 8. **`results.csv` 没有表头，也没有 CSV 转义（已顺手处理）**
 
-   已通过 `utils.append_result()` 统一写入 CSV。
+   已通过 `utils.append_result()` 统一写入 CSV。该函数现在实际执行 upsert：同一个 `product_id` 再次写入时更新原行，让 `results.csv` 保持为一张总进度表。
 
 9. **浏览器路径的选择器容易随网页变化失效（已处理留证）**
 
