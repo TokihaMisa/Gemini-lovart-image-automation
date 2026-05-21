@@ -188,6 +188,9 @@ class GeminiBot:
     def _select_thinking_mode(self) -> bool:
         """Select Gemini 3 Flash and set thinking level to extended."""
         if not self._open_mode_menu():
+            if self._current_model_is_flash() and self._current_thinking_level_is_extended():
+                self.logger.info("Gemini: Flash extended thinking mode already selected")
+                return True
             self.logger.warning("Gemini: mode menu control not found")
             return False
 
@@ -332,7 +335,7 @@ class GeminiBot:
             self.logger.warning(f"Gemini: Thinking mode DOM scan failed: {exc}")
         return False
 
-    def _current_model_is_flash(self) -> bool:
+    def _current_model_is_flash_legacy(self) -> bool:
         script = """
         () => {
             const controls = [...document.querySelectorAll('button[aria-label*="打开模式选择器"], [role="button"][aria-label*="打开模式选择器"]')];
@@ -349,6 +352,66 @@ class GeminiBot:
         try:
             if self.page.evaluate(script):
                 self.logger.info("Gemini: Flash model already selected")
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _current_model_is_flash(self) -> bool:
+        script = """
+        () => {
+            const controls = [...document.querySelectorAll('button, [role="button"], [aria-label], [title]')];
+            const visible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+            };
+            return controls
+                .filter(visible)
+                .some((el) => {
+                    const text = [
+                        el.innerText,
+                        el.textContent,
+                        el.getAttribute('aria-label'),
+                        el.getAttribute('title'),
+                    ].filter(Boolean).join(' ');
+                    return /Flash/i.test(text) && !/Lite/i.test(text);
+                });
+        }
+        """
+        try:
+            if self.page.evaluate(script):
+                self.logger.info("Gemini: Flash model already selected")
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _current_thinking_level_is_extended(self) -> bool:
+        script = """
+        () => {
+            const controls = [...document.querySelectorAll('button, [role="button"], [aria-label], [title]')];
+            const visible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+            };
+            return controls
+                .filter(visible)
+                .some((el) => {
+                    const text = [
+                        el.innerText,
+                        el.textContent,
+                        el.getAttribute('aria-label'),
+                        el.getAttribute('title'),
+                    ].filter(Boolean).join(' ');
+                    return /Extended/i.test(text) || /\\u6269\\u5c55/.test(text);
+                });
+        }
+        """
+        try:
+            if self.page.evaluate(script):
+                self.logger.info("Gemini: extended thinking level already selected")
                 return True
         except Exception:
             pass
@@ -496,6 +559,18 @@ class GeminiBot:
         if not image_paths:
             return False
 
+        attempts = max(1, int(self.cfg.get("upload_attempts", 3) or 3))
+        for attempt in range(1, attempts + 1):
+            if self._upload_images_once(image_paths):
+                return True
+            if attempt < attempts:
+                self.logger.warning(f"Gemini: image upload attempt {attempt}/{attempts} failed; retrying")
+                self.page.wait_for_timeout(2000)
+
+        self.logger.warning("Gemini: all upload attempts failed")
+        return False
+
+    def _upload_images_once(self, image_paths: list[str]) -> bool:
         clicked = False
         for selector in [
             'button:has(img[alt="add_2"])',

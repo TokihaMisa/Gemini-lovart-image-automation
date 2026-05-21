@@ -25,6 +25,7 @@ gemini:
   thinking_mode: true
   reply_timeout: 300
   upload_timeout: 120
+  upload_attempts: 3
 
 gemini_api:
   # Set GEMINI_API_KEY in your environment.
@@ -60,3 +61,5 @@ lovart:
   wait_timeout: 10800
   poll_interval: 5
   timeout: 600
+  upload_attempts: 3
+  upload_retry_delay: 2

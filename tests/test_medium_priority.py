@@ -179,6 +179,87 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         self.assertIn("set_files:2", events)
         self.assertIn("wait_upload_complete:2", events)
 
+    def test_gemini_upload_retries_when_first_menu_attempt_finds_no_file_input(self):
+        class FakeLocator:
+            def __init__(self, page, selector):
+                self.page = page
+                self.selector = selector
+                self.first = self
+
+            def count(self):
+                if "add_2" in self.selector:
+                    return 1
+                if 'input[type="file"]' in self.selector:
+                    return 1 if self.page.add_clicks >= 2 else 0
+                return 0
+
+            def click(self, timeout=None, force=False):
+                if "add_2" in self.selector:
+                    self.page.add_clicks += 1
+                events.append(f"click:{self.selector}")
+
+            def is_visible(self, timeout=None):
+                return False
+
+            def set_input_files(self, image_paths):
+                events.append(f"set_files:{len(image_paths)}")
+
+        class FakePage:
+            def __init__(self):
+                self.add_clicks = 0
+
+            def locator(self, selector):
+                return FakeLocator(self, selector)
+
+            def wait_for_timeout(self, ms):
+                events.append(f"wait:{ms}")
+
+        class FakeLogger:
+            def info(self, message):
+                pass
+
+            def warning(self, message):
+                events.append(f"warning:{message}")
+
+        class UploadGeminiBot(GeminiBot):
+            def _wait_for_uploads_complete(self, expected_count):
+                events.append(f"wait_upload_complete:{expected_count}")
+                return True
+
+        events = []
+        bot = UploadGeminiBot(FakePage(), {"gemini": {"upload_attempts": 2}}, FakeLogger())
+        self.assertTrue(bot._upload_images(["a.jpeg", "b.jpeg"]))
+        self.assertEqual(len([event for event in events if event.startswith("click:button:has")]), 2)
+        self.assertIn("set_files:2", events)
+
+    def test_gemini_thinking_mode_accepts_already_selected_flash_extended(self):
+        class FakePage:
+            def evaluate(self, script):
+                return True
+
+            def wait_for_timeout(self, ms):
+                pass
+
+        class FakeLogger:
+            def __init__(self):
+                self.messages = []
+
+            def info(self, message):
+                self.messages.append(message)
+
+            def warning(self, message):
+                self.messages.append(message)
+
+        class AlreadySelectedBot(GeminiBot):
+            def _open_mode_menu(self):
+                return False
+
+        logger = FakeLogger()
+        bot = AlreadySelectedBot(FakePage(), {"gemini": {}}, logger)
+
+        self.assertTrue(bot._select_thinking_mode())
+        self.assertTrue(any("already selected" in message for message in logger.messages))
+
     def test_gemini_reply_wait_uses_generation_state_not_text_keywords(self):
         class FakePage:
             def wait_for_timeout(self, ms):
@@ -309,6 +390,57 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         self.assertIn(("detail_project", "project-123"), events)
         self.assertIn(("gemini_images", [str(white), str(scene)]), events)
         self.assertIn(("detail_images", [str(white), str(scene)]), events)
+
+    def test_process_products_marks_support_timeout_as_still_running(self):
+        class Product:
+            id = "SKU-TIMEOUT"
+            name_cn = "Product"
+            language = "Portuguese"
+            selling_points = "points"
+            image_paths = ["output/SKU-TIMEOUT/image_1.png"]
+
+        class Gemini:
+            def generate_prompt(self, **kwargs):
+                raise AssertionError("should stop before Gemini when support image is still running")
+
+        class Lovart:
+            def create_project(self, product_id):
+                return "project-timeout"
+
+            def create_support_image(self, **kwargs):
+                return {
+                    "final_status": "timeout",
+                    "project_id": kwargs["project_id"],
+                    "generation_succeeded": False,
+                }
+
+        class Logger:
+            def info(self, message):
+                pass
+
+            def warning(self, message):
+                pass
+
+            def error(self, message):
+                raise AssertionError(message)
+
+        cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                product_dir = Path("output") / "SKU-TIMEOUT"
+                product_dir.mkdir(parents=True)
+                (product_dir / "image_1.png").write_bytes(b"product")
+
+                result = _process_products([Product()], Gemini(), Lovart(), Logger(), Path("runs") / "run")
+                with (Path("runs") / "run" / "summary.csv").open(encoding="utf-8", newline="") as fh:
+                    rows = list(csv.DictReader(fh))
+            finally:
+                os.chdir(cwd)
+
+        self.assertEqual(result, (0, 0, 0, 1))
+        self.assertEqual(rows[0]["status"], "lovart_still_running")
+        self.assertIn("white-background", rows[0]["error"])
 
 
 if __name__ == "__main__":

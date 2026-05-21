@@ -477,6 +477,24 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 )
                 white_image = (white_result or {}).get("local_path", "")
                 if not white_image:
+                    if white_result and white_result.get("final_status") == "timeout":
+                        status = read_status(product_dir)
+                        project_url = _project_url_from_status(status)
+                        reason = "Lovart white-background image still running after local wait timeout"
+                        logger.warning(f"STILL RUNNING [{idx}/{len(products)}] {product.id} white_bg")
+                        still_running += 1
+                        _record_failure(product, "lovart_still_running", reason, project_url)
+                        summary_rows.append({
+                            "product_id": product.id,
+                            "product_name": product.name_cn,
+                            "status": "lovart_still_running",
+                            "project_url": project_url,
+                            "gemini_chars": "",
+                            "artifact_count": "",
+                            "duration_seconds": round(time.time() - started, 2),
+                            "error": reason,
+                        })
+                        continue
                     raise RuntimeError("Lovart white-background image generation did not return a local image")
 
             status = read_status(product_dir)
@@ -497,6 +515,24 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 )
                 scene_image = (scene_result or {}).get("local_path", "")
                 if not scene_image:
+                    if scene_result and scene_result.get("final_status") == "timeout":
+                        status = read_status(product_dir)
+                        project_url = _project_url_from_status(status)
+                        reason = "Lovart scene image still running after local wait timeout"
+                        logger.warning(f"STILL RUNNING [{idx}/{len(products)}] {product.id} scene")
+                        still_running += 1
+                        _record_failure(product, "lovart_still_running", reason, project_url)
+                        summary_rows.append({
+                            "product_id": product.id,
+                            "product_name": product.name_cn,
+                            "status": "lovart_still_running",
+                            "project_url": project_url,
+                            "gemini_chars": "",
+                            "artifact_count": "",
+                            "duration_seconds": round(time.time() - started, 2),
+                            "error": reason,
+                        })
+                        continue
                     raise RuntimeError("Lovart scene image generation did not return a local image")
 
             gemini_images = [white_image, scene_image]

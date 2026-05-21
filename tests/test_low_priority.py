@@ -197,6 +197,37 @@ class LowPriorityBehaviorTests(unittest.TestCase):
         self.assertTrue(status["lovart_credit_prompt_waiting"])
         self.assertFalse(status["needs_manual_action"])
 
+    def test_lovart_upload_retries_transient_failures(self):
+        class Logger:
+            def warning(self, message):
+                messages.append(message)
+
+            def info(self, message):
+                messages.append(message)
+
+        class Skill:
+            def __init__(self):
+                self.calls = 0
+
+            def upload_file(self, path):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("temporary network issue")
+                return "https://cdn.example.test/image.png"
+
+        messages = []
+        bot = LovartBot.__new__(LovartBot)
+        bot.cfg = {"upload_attempts": 2, "upload_retry_delay": 0}
+        bot.logger = Logger()
+        bot.skill = Skill()
+
+        with patch("time.sleep", lambda seconds: None):
+            records = bot._upload_images(["image.png"])
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["url"], "https://cdn.example.test/image.png")
+        self.assertTrue(any("retrying" in message for message in messages))
+
     def test_build_dispimg_map_reads_wps_cellimages_relationships(self):
         cellimages = """<?xml version="1.0" encoding="UTF-8"?>
 <etc:cellImages xmlns:etc="http://www.wps.cn/officeDocument/2017/etCustomData"

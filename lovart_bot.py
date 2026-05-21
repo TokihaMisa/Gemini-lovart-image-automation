@@ -389,17 +389,29 @@ class LovartBot:
 
     def _upload_images(self, paths: list[str]) -> list[dict]:
         records = []
+        attempts = max(1, int(self.cfg.get("upload_attempts", 3) or 3))
+        retry_delay = float(self.cfg.get("upload_retry_delay", 2) or 0)
         for path in paths:
-            try:
-                url = self.skill.upload_file(path)
-                records.append({
-                    "local_path": str(path),
-                    "filename": Path(path).name,
-                    "url": url,
-                })
-                self.logger.info(f"Lovart API: uploaded {Path(path).name}")
-            except Exception as exc:
-                self.logger.warning(f"Lovart API: upload failed for {path}: {exc}")
+            for attempt in range(1, attempts + 1):
+                try:
+                    url = self.skill.upload_file(path)
+                    records.append({
+                        "local_path": str(path),
+                        "filename": Path(path).name,
+                        "url": url,
+                    })
+                    self.logger.info(f"Lovart API: uploaded {Path(path).name}")
+                    break
+                except Exception as exc:
+                    if attempt < attempts:
+                        self.logger.warning(
+                            f"Lovart API: upload failed for {path} "
+                            f"(attempt {attempt}/{attempts}); retrying: {exc}"
+                        )
+                        if retry_delay > 0:
+                            time.sleep(retry_delay)
+                    else:
+                        self.logger.warning(f"Lovart API: upload failed for {path}: {exc}")
         return records
 
     def _resolve_pending_confirmations(
