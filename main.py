@@ -832,6 +832,31 @@ def resolve_browser_executable(browser_cfg: dict, candidate_paths: list[str] | N
     return None
 
 
+def _resolve_browser_executable_for_run(
+    browser_cfg: dict,
+    interactive: bool = True,
+    candidate_paths: list[str] | None = None,
+    input_func=input,
+) -> str | None:
+    chrome_exe = resolve_browser_executable(browser_cfg, candidate_paths=candidate_paths)
+    if chrome_exe or not interactive:
+        return chrome_exe
+
+    configured = str(browser_cfg.get("chrome_exe", "") or "").strip()
+    if configured:
+        print(f"\n  Configured browser path was not found: {configured}")
+    print("  Chrome/Edge was not found in common install paths.")
+    print("  Paste chrome.exe/msedge.exe path, or press Enter to use Playwright bundled Chromium.")
+
+    while True:
+        manual_path = input_func("  Browser executable path (optional): ").strip().strip("\"'")
+        if not manual_path:
+            return None
+        if Path(manual_path).exists():
+            return manual_path
+        print(f"  Browser executable not found: {manual_path}")
+
+
 def _run_browser_flow(config, products, lovart, logger, run_dir, resume=True, wait_for_ready=True):
     browser_cfg = config["browser"]
     user_data_dir = Path(browser_cfg["user_data_dir"])
@@ -839,7 +864,7 @@ def _run_browser_flow(config, products, lovart, logger, run_dir, resume=True, wa
         user_data_dir = Path.cwd() / user_data_dir
     user_data_dir.mkdir(parents=True, exist_ok=True)
 
-    chrome_exe = resolve_browser_executable(browser_cfg)
+    chrome_exe = _resolve_browser_executable_for_run(browser_cfg, interactive=wait_for_ready)
     if chrome_exe:
         logger.info(f"Using browser executable: {chrome_exe}")
     else:
