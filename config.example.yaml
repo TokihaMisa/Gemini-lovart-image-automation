@@ -18,7 +18,8 @@ excel:
     empty_streak: 20
 
 browser:
-  chrome_exe: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  # Optional. Leave empty to auto-detect Chrome/Edge or use Playwright's bundled Chromium.
+  chrome_exe: ""
   user_data_dir: "browser_profile"
 
 gemini:
