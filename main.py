@@ -215,20 +215,26 @@ def _choose_prompt_source(config: dict, args) -> str:
     if args.prompt_source != "ask":
         return args.prompt_source
 
-    print(f"\n{'=' * 50}")
-    print("  Prompt generation source:")
-    print("    [1] Gemini Browser  (Playwright, reuses Chrome profile)")
-    print("    [2] Gemini API      (direct API)")
-    print("    [3] NVIDIA API      (Kimi, supports product images)")
-    print(f"{'=' * 50}")
-    selected = _ask_number("  Choose (1/2/3, default=2): ", 2, 1, 3)
-    if selected == 1:
-        return "gemini_browser"
-    if selected == 2:
-        return "gemini_api"
+    while True:
+        print(f"\n{'=' * 50}")
+        print("  Prompt generation source:")
+        print("    [1] Gemini Browser  (Playwright, reuses Chrome profile)")
+        print("    [2] Gemini API      (direct API)")
+        print("    [3] NVIDIA API      (Kimi, supports product images)")
+        print(f"{'=' * 50}")
+        selected = _ask_number("  Choose (1/2/3, default=2): ", 2, 1, 3)
+        if selected == 1:
+            return "gemini_browser"
+        if selected == 2:
+            if env_or_config(config.get("gemini_api", {}), "api_key", "GEMINI_API_KEY"):
+                return "gemini_api"
+            print("\n  GEMINI_API_KEY is not set. Choose Gemini Browser, fill .env, or choose another API source.")
+            continue
 
-    config.setdefault("nvidia_api", {})["model_choice"] = "kimi"
-    return "nvidia"
+        config.setdefault("nvidia_api", {})["model_choice"] = "kimi"
+        if env_or_config(config.get("nvidia_api", {}), "api_key", "NVIDIA_API_KEY"):
+            return "nvidia"
+        print("\n  NVIDIA_API_KEY is not set. Choose Gemini Browser, fill .env, or choose another API source.")
 
 
 def _choose_lovart_mode() -> bool:

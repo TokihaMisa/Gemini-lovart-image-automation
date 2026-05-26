@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,13 +21,43 @@ class NvidiaAPIBehaviorTests(unittest.TestCase):
 
     def test_choose_prompt_source_uses_kimi_without_model_submenu(self):
         args = parse_args([])
-        config = {"nvidia_api": {}}
+        config = {"nvidia_api": {"api_key": "key"}}
         answers = iter(["3"])
-        with patch("builtins.input", lambda prompt="": next(answers)):
+        with patch("builtins.input", lambda prompt="": next(answers)), patch.dict(os.environ, {}, clear=True):
             source = _choose_prompt_source(config, args)
 
         self.assertEqual(source, "nvidia")
         self.assertEqual(config["nvidia_api"]["model_choice"], "kimi")
+
+    def test_choose_prompt_source_reprompts_when_gemini_api_key_missing(self):
+        args = parse_args([])
+        config = {"gemini_api": {}, "nvidia_api": {}}
+        answers = iter(["2", "1"])
+
+        with patch("builtins.input", lambda prompt="": next(answers)), patch.dict(os.environ, {}, clear=True):
+            source = _choose_prompt_source(config, args)
+
+        self.assertEqual(source, "gemini_browser")
+
+    def test_choose_prompt_source_reprompts_when_nvidia_api_key_missing(self):
+        args = parse_args([])
+        config = {"gemini_api": {}, "nvidia_api": {}}
+        answers = iter(["3", "1"])
+
+        with patch("builtins.input", lambda prompt="": next(answers)), patch.dict(os.environ, {}, clear=True):
+            source = _choose_prompt_source(config, args)
+
+        self.assertEqual(source, "gemini_browser")
+        self.assertEqual(config["nvidia_api"]["model_choice"], "kimi")
+
+    def test_choose_prompt_source_keeps_explicit_gemini_api_even_without_key(self):
+        args = parse_args(["--prompt-source", "gemini_api"])
+        config = {"gemini_api": {}}
+
+        with patch("builtins.input", side_effect=AssertionError("should not prompt")), patch.dict(os.environ, {}, clear=True):
+            source = _choose_prompt_source(config, args)
+
+        self.assertEqual(source, "gemini_api")
 
     def test_resolve_nvidia_model_uses_configured_model_id(self):
         cfg = {"model_choice": "kimi", "models": {"kimi": "moonshotai/kimi-k2.5"}}
