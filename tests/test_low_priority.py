@@ -5,13 +5,20 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from excel_reader import _build_dispimg_map
+from excel_reader import _build_dispimg_map, parse_reference_images_are_product
 from lovart_bot import LovartBot, resolve_lovart_tool_config
 from main import _dry_run_products, _choose_lovart_tool_options, parse_args
 from utils import read_status
 
 
 class LowPriorityBehaviorTests(unittest.TestCase):
+    def test_parse_reference_images_are_product_yes_no_values(self):
+        for value in ("是", "yes", "Y", "true", "1"):
+            self.assertTrue(parse_reference_images_are_product(value))
+
+        for value in ("否", "no", "false", "0", "", None):
+            self.assertFalse(parse_reference_images_are_product(value))
+
     def test_parse_args_supports_noninteractive_run(self):
         args = parse_args([
             "--gemini", "api",
@@ -157,7 +164,7 @@ class LowPriorityBehaviorTests(unittest.TestCase):
         self.assertEqual([call["project_id"] for call in calls], ["same-project"])
         self.assertEqual(calls[0]["tool_config"]["prefer_models"], {"IMAGE": ["generate_image_gpt_image_2"]})
 
-    def test_credit_confirmation_in_unlimited_mode_keeps_polling(self):
+    def test_credit_confirmation_in_unlimited_mode_returns_manual_action(self):
         class Logger:
             def __init__(self):
                 self.messages = []
@@ -173,16 +180,18 @@ class LowPriorityBehaviorTests(unittest.TestCase):
                 self.result_calls = 0
 
             def get_status(self, thread_id):
-                return {"status": "running"} if self.result_calls < 2 else {"status": "done"}
+                return {"status": "done"}
 
             def get_result(self, thread_id):
                 self.result_calls += 1
-                if self.result_calls == 1:
-                    return {"pending_confirmation": {"message": "consume 50 credits"}}
-                return {"items": [{"artifacts": [{"type": "image", "content": "https://example.test/a.png"}]}]}
+                return {"pending_confirmation": {"message": "consume 50 credits"}}
 
         bot = LovartBot.__new__(LovartBot)
-        bot.cfg = {"wait_timeout": 5, "poll_interval": 1}
+        bot.cfg = {
+            "wait_timeout": 1,
+            "poll_interval": 1,
+            "wait_forever_on_credit_prompt": False,
+        }
         bot.logger = Logger()
         bot.skill = Skill()
         bot._fast_mode = False
@@ -192,10 +201,11 @@ class LowPriorityBehaviorTests(unittest.TestCase):
             result = bot._poll_with_progress("thread-1", "project-1", product_dir=product_dir)
             status = read_status(product_dir)
 
-        self.assertEqual(result["final_status"], "done")
-        self.assertTrue(result["generation_succeeded"])
+        self.assertEqual(result["final_status"], "pending_confirmation")
+        self.assertFalse(result["generation_succeeded"])
+        self.assertEqual(bot.skill.result_calls, 1)
         self.assertTrue(status["lovart_credit_prompt_waiting"])
-        self.assertFalse(status["needs_manual_action"])
+        self.assertTrue(status["needs_manual_action"])
 
     def test_lovart_upload_retries_transient_failures(self):
         class Logger:
@@ -227,6 +237,36 @@ class LowPriorityBehaviorTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["url"], "https://cdn.example.test/image.png")
         self.assertTrue(any("retrying" in message for message in messages))
+
+    def test_create_project_renames_project_immediately(self):
+        class Logger:
+            def info(self, message):
+                messages.append(message)
+
+            def warning(self, message):
+                messages.append(message)
+
+        class Skill:
+            def create_project(self):
+                calls.append(("create_project",))
+                return "project-1"
+
+            def rename_project(self, project_id, name):
+                calls.append(("rename_project", project_id, name))
+
+        messages = []
+        calls = []
+        bot = LovartBot.__new__(LovartBot)
+        bot.logger = Logger()
+        bot.skill = Skill()
+
+        project_id = bot.create_project("SKU-123")
+
+        self.assertEqual(project_id, "project-1")
+        self.assertEqual(calls, [
+            ("create_project",),
+            ("rename_project", "project-1", "SKU-123"),
+        ])
 
     def test_build_dispimg_map_reads_wps_cellimages_relationships(self):
         cellimages = """<?xml version="1.0" encoding="UTF-8"?>

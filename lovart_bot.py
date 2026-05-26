@@ -118,7 +118,13 @@ class LovartBot:
         """Create one Lovart project that can be reused across all product steps."""
         project_id = self.skill.create_project()
         self.logger.info(f"Lovart API: created project={project_id} for '{product_id}'")
+        if product_id:
+            self._rename_project(project_id, product_id)
         return project_id
+
+    def validate_project(self, project_id: str) -> bool:
+        """Return whether an existing Lovart project can still be reused."""
+        return self.skill.validate_project(project_id)
 
     def create_and_generate(
         self,
@@ -452,13 +458,13 @@ class LovartBot:
             if estimated_cost is not None and not self._fast_mode:
                 result["warning"] = (
                     f"Lovart showed a {estimated_cost:g}-credit confirmation in unlimited mode; "
-                    "left unconfirmed and kept waiting for status refresh."
+                    "left unconfirmed for manual review."
                 )
                 update_status(
                     product_dir,
                     "lovart_credit_prompt_waiting",
                     reason=result["warning"],
-                    needs_manual_action=False,
+                    needs_manual_action=True,
                 )
                 self.logger.warning(result["warning"])
                 return result
@@ -614,7 +620,6 @@ class LovartBot:
     def _poll_with_progress(self, thread_id: str, project_id: str, product_dir: Path | None = None) -> dict:
         timeout = self.cfg.get("wait_timeout", 10800)
         interval = self.cfg.get("poll_interval", 5)
-        wait_forever_on_credit = self.cfg.get("wait_forever_on_credit_prompt", True)
         deadline = time.time() + timeout
         status_names = {
             "pending": "排队中...",
@@ -623,47 +628,46 @@ class LovartBot:
             "abort": "已取消",
         }
         start = time.time()
-        credit_wait_logged = False
 
-        while time.time() < deadline or (credit_wait_logged and wait_forever_on_credit):
+        while time.time() < deadline:
             try:
                 status_info = self.skill.get_status(thread_id)
                 status = status_info.get("status", "unknown")
                 elapsed = int(time.time() - start)
                 dots = "." * ((elapsed // interval) % 4)
-                print(f"\r  [{elapsed}s] {status_names.get(status, status)}{dots}   ", end="", flush=True)
 
                 result = self.skill.get_result(thread_id)
                 pending_confirmation = result.get("pending_confirmation")
                 if pending_confirmation:
                     estimated_cost = self._confirmation_estimated_cost(pending_confirmation)
                     if estimated_cost is not None and not self._fast_mode:
-                        if not credit_wait_logged:
-                            print()
-                            confirmation_text = ""
-                            if product_dir:
-                                confirmation_text = self._save_pending_confirmation(product_dir, pending_confirmation)
-                                update_status(
-                                    product_dir,
-                                    "lovart_credit_prompt_waiting",
-                                    project_id=project_id,
-                                    thread_id=thread_id,
-                                    pending_confirmation_file=str(product_dir / "pending_confirmation.json"),
-                                    pending_confirmation_text=confirmation_text,
-                                    pending_confirmation_estimated_cost=estimated_cost,
-                                    needs_manual_action=False,
-                                    reason=(
-                                        f"Lovart showed a {estimated_cost:g}-credit confirmation in unlimited mode; "
-                                        "waiting instead of confirming."
-                                    ),
-                                )
-                            self.logger.warning(
-                                f"Lovart API: {estimated_cost:g}-credit confirmation appeared in unlimited mode; "
-                                "not confirming, continuing to poll"
+                        print()
+                        confirmation_text = ""
+                        if product_dir:
+                            confirmation_text = self._save_pending_confirmation(product_dir, pending_confirmation)
+                            update_status(
+                                product_dir,
+                                "lovart_credit_prompt_waiting",
+                                project_id=project_id,
+                                thread_id=thread_id,
+                                pending_confirmation_file=str(product_dir / "pending_confirmation.json"),
+                                pending_confirmation_text=confirmation_text,
+                                pending_confirmation_estimated_cost=estimated_cost,
+                                needs_manual_action=True,
+                                reason=(
+                                    f"Lovart showed a {estimated_cost:g}-credit confirmation in unlimited mode; "
+                                    "left unconfirmed for manual review."
+                                ),
                             )
-                            credit_wait_logged = True
-                        time.sleep(interval)
-                        continue
+                        self.logger.warning(
+                            f"Lovart API: {estimated_cost:g}-credit confirmation appeared in unlimited mode; "
+                            "not confirming; manual action required"
+                        )
+                        result["warning"] = (
+                            f"Lovart showed a {estimated_cost:g}-credit confirmation in unlimited mode; "
+                            "left unconfirmed for manual review."
+                        )
+                        return self._normalize_result(result, "pending_confirmation", project_id)
                     print()
                     self.logger.warning("Lovart API: pending confirmation")
                     return self._normalize_result(result, "pending_confirmation", project_id)
@@ -680,6 +684,8 @@ class LovartBot:
                     print()
                     self.logger.warning("Lovart API: aborted")
                     return self._normalize_result(result, "abort", project_id)
+
+                print(f"\r  [{elapsed}s] {status_names.get(status, status)}{dots}   ", end="", flush=True)
             except Exception as exc:
                 self.logger.warning(f"Lovart poll error: {exc}")
 

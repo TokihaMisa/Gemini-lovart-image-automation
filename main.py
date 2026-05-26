@@ -261,8 +261,31 @@ def _lovart_project_url(project_id: str = "") -> str:
     return f"https://www.lovart.ai/canvas?projectId={project_id}" if project_id else ""
 
 
+def _project_id_from_url(project_url: str = "") -> str:
+    marker = "projectId="
+    if marker not in project_url:
+        return ""
+    return project_url.split(marker, 1)[1].split("&", 1)[0].strip()
+
+
 def _project_url_from_status(status: dict) -> str:
     return status.get("project_url") or _lovart_project_url(status.get("project_id", ""))
+
+
+def _existing_project_id(status: dict) -> str:
+    return status.get("project_id") or _project_id_from_url(status.get("project_url", ""))
+
+
+def _can_reuse_lovart_project(lovart, project_id: str, logger) -> bool:
+    if not project_id:
+        return False
+    if not hasattr(lovart, "validate_project"):
+        return True
+    try:
+        return bool(lovart.validate_project(project_id))
+    except Exception as exc:
+        logger.warning(f"Lovart project validation failed for {project_id}: {exc}")
+        return False
 
 
 def _existing_path(path: str | Path | None) -> str:
@@ -439,11 +462,14 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 dimension_image=dimension_image,
                 reference_image_count=len(reference_images),
                 reference_sheet=reference_sheet,
+                reference_images_are_product=getattr(product, "reference_images_are_product", False),
             )
 
             status = read_status(product_dir)
-            lovart_project_id = status.get("project_id", "")
-            if lovart_project_id:
+            previous_lovart_project_id = _existing_project_id(status)
+            restart_lovart_project = False
+            if previous_lovart_project_id and _can_reuse_lovart_project(lovart, previous_lovart_project_id, logger):
+                lovart_project_id = previous_lovart_project_id
                 update_status(
                     product_dir,
                     "lovart_project_reused",
@@ -451,6 +477,17 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                     project_url=_lovart_project_url(lovart_project_id),
                 )
             else:
+                if previous_lovart_project_id:
+                    restart_lovart_project = True
+                    logger.warning(
+                        f"Lovart project {previous_lovart_project_id} for '{product.id}' is invalid; restarting product"
+                    )
+                    update_status(
+                        product_dir,
+                        "lovart_project_invalid",
+                        previous_project_id=previous_lovart_project_id,
+                        previous_project_url=_lovart_project_url(previous_lovart_project_id),
+                    )
                 lovart_project_id = lovart.create_project(product.id)
                 update_status(
                     product_dir,
@@ -460,7 +497,7 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 )
 
             status = read_status(product_dir)
-            white_image = _find_support_image(product_dir, status, "white_bg", 0)
+            white_image = "" if restart_lovart_project else _find_support_image(product_dir, status, "white_bg", 0)
             if white_image:
                 logger.info(f"Lovart API: reusing white_bg image for '{product.id}'")
             else:
@@ -495,10 +532,28 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                             "error": reason,
                         })
                         continue
+                    if white_result and white_result.get("final_status") == "pending_confirmation":
+                        status = read_status(product_dir)
+                        project_url = _project_url_from_status(status)
+                        reason = white_result.get("warning") or "Lovart white-background image needs credit confirmation"
+                        logger.warning(f"NEEDS MANUAL ACTION [{idx}/{len(products)}] {product.id} white_bg")
+                        fail += 1
+                        _record_failure(product, "needs_manual_action", reason, project_url)
+                        summary_rows.append({
+                            "product_id": product.id,
+                            "product_name": product.name_cn,
+                            "status": "needs_manual_action",
+                            "project_url": project_url,
+                            "gemini_chars": "",
+                            "artifact_count": "",
+                            "duration_seconds": round(time.time() - started, 2),
+                            "error": reason,
+                        })
+                        continue
                     raise RuntimeError("Lovart white-background image generation did not return a local image")
 
             status = read_status(product_dir)
-            scene_image = _find_support_image(product_dir, status, "scene", 1)
+            scene_image = "" if restart_lovart_project else _find_support_image(product_dir, status, "scene", 1)
             if scene_image:
                 logger.info(f"Lovart API: reusing scene image for '{product.id}'")
             else:
@@ -533,6 +588,24 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                             "error": reason,
                         })
                         continue
+                    if scene_result and scene_result.get("final_status") == "pending_confirmation":
+                        status = read_status(product_dir)
+                        project_url = _project_url_from_status(status)
+                        reason = scene_result.get("warning") or "Lovart scene image needs credit confirmation"
+                        logger.warning(f"NEEDS MANUAL ACTION [{idx}/{len(products)}] {product.id} scene")
+                        fail += 1
+                        _record_failure(product, "needs_manual_action", reason, project_url)
+                        summary_rows.append({
+                            "product_id": product.id,
+                            "product_name": product.name_cn,
+                            "status": "needs_manual_action",
+                            "project_url": project_url,
+                            "gemini_chars": "",
+                            "artifact_count": "",
+                            "duration_seconds": round(time.time() - started, 2),
+                            "error": reason,
+                        })
+                        continue
                     raise RuntimeError("Lovart scene image generation did not return a local image")
 
             gemini_images = [white_image, scene_image]
@@ -549,6 +622,7 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 has_reference_sheet=bool(reference_sheet),
                 has_accessory_image=bool(accessory_image),
                 has_dimension_image=bool(dimension_image),
+                reference_images_are_product=getattr(product, "reference_images_are_product", False),
             )
             update_status(
                 product_dir,

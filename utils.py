@@ -283,7 +283,12 @@ def build_design_prompt(product_name_cn: str, language: str, selling_points: str
     )
 
 
-def build_lovart_image_note(has_reference_sheet: bool, has_accessory_image: bool, has_dimension_image: bool) -> str:
+def build_lovart_image_note(
+    has_reference_sheet: bool,
+    has_accessory_image: bool,
+    has_dimension_image: bool,
+    reference_images_are_product: bool = False,
+) -> str:
     """Describe uploaded image roles for the final Lovart detail-page generation."""
     parts = [
         "上传图片说明：",
@@ -297,11 +302,18 @@ def build_lovart_image_note(has_reference_sheet: bool, has_accessory_image: bool
         parts.append(f"图{next_index}是尺寸图，属于商品真实尺寸和结构信息参考。")
         next_index += 1
     if has_reference_sheet:
-        parts.append(
-            f"最后一张图（图{next_index}）才是合并参考图，只用于参考设计风格、排版氛围和视觉调性；"
-            "不要把最后一张参考图里的非本商品元素当成我的商品。"
-        )
-        parts.append("除最后一张参考图以外，其余上传图片都属于我的商品或商品信息，必须优先保持真实形态。")
+        if reference_images_are_product:
+            parts.append(
+                f"最后一张图（图{next_index}）才是合并参考图，里面的参考图是同一个产品、同一个规格/颜色/款式；"
+                "可以直接当作我的商品参考，用来理解外形、结构、材质、颜色和其他角度的样子。"
+            )
+            parts.append("所有上传图片都属于我的商品或商品信息，必须优先保持真实形态，不要把它改成其他产品。")
+        else:
+            parts.append(
+                f"最后一张图（图{next_index}）才是合并参考图，只参考风格、排版氛围和视觉调性；"
+                "不要把参考图里的产品当成我的产品，不要参考里面产品的外形、结构、颜色或款式。"
+            )
+            parts.append("除最后一张参考图以外，其余上传图片都属于我的商品或商品信息，必须优先保持真实形态。")
     else:
         parts.append("本次没有单独的风格参考图，所有上传图片都属于我的商品或商品信息。")
     return "\n".join(parts) + "\n\n"

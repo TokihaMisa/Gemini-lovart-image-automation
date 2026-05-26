@@ -6,6 +6,8 @@ excel:
     name_cn: "B"
     language: "C"
     selling_points: "D"
+    # Fill 是/否. 是 = later reference images are the same product/spec/color/style.
+    reference_images_are_product: "H"
   image_columns:
     start: "E"
     # Optional: stop at a fixed column.
@@ -54,8 +56,7 @@ lovart:
   # Optional: fast or thinking. Empty/default lets Lovart choose its default.
   reasoning_mode: "fast"
   # In unlimited mode, if Lovart shows a credits confirmation, do not confirm it.
-  # The automation keeps refreshing status because it may still be queued.
-  wait_forever_on_credit_prompt: true
+  # The automation records needs_manual_action and continues with the next product.
   max_confirmation_rounds: 5
   max_auto_confirm_credits: 10
   wait_timeout: 10800
