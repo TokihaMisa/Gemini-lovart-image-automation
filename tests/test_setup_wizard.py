@@ -5,6 +5,7 @@ from pathlib import Path
 from setup_wizard import (
     ensure_local_setup_files,
     missing_or_placeholder_env_keys,
+    optional_or_placeholder_env_keys,
 )
 
 
@@ -23,13 +24,13 @@ class SetupWizardTests(unittest.TestCase):
             self.assertIn("created .env from .env.example", actions)
             self.assertIn("created config.yaml from config.example.yaml", actions)
 
-    def test_missing_or_placeholder_env_keys_reports_values_to_fill(self):
+    def test_missing_or_placeholder_env_keys_requires_only_lovart_keys(self):
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / ".env"
             env_path.write_text(
                 "\n".join([
                     "GEMINI_API_KEY=your_gemini_api_key",
-                    "NVIDIA_API_KEY=real-nvidia-key",
+                    "NVIDIA_API_KEY=",
                     "LOVART_ACCESS_KEY=",
                     "LOVART_SECRET_KEY=real-secret",
                 ]),
@@ -38,7 +39,24 @@ class SetupWizardTests(unittest.TestCase):
 
             missing = missing_or_placeholder_env_keys(env_path)
 
-            self.assertEqual(missing, ["GEMINI_API_KEY", "LOVART_ACCESS_KEY"])
+            self.assertEqual(missing, ["LOVART_ACCESS_KEY"])
+
+    def test_optional_or_placeholder_env_keys_reports_prompt_source_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text(
+                "\n".join([
+                    "GEMINI_API_KEY=your_gemini_api_key",
+                    "NVIDIA_API_KEY=",
+                    "LOVART_ACCESS_KEY=real-access",
+                    "LOVART_SECRET_KEY=real-secret",
+                ]),
+                encoding="utf-8",
+            )
+
+            optional = optional_or_placeholder_env_keys(env_path)
+
+            self.assertEqual(optional, ["GEMINI_API_KEY", "NVIDIA_API_KEY"])
 
 
 if __name__ == "__main__":

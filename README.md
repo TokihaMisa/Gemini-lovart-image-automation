@@ -45,6 +45,8 @@ LOVART_ACCESS_KEY=your_lovart_access_key
 LOVART_SECRET_KEY=your_lovart_secret_key
 ```
 
+`LOVART_ACCESS_KEY` and `LOVART_SECRET_KEY` are required. `GEMINI_API_KEY` is only needed when you choose Gemini API mode, and `NVIDIA_API_KEY` is only needed when you choose NVIDIA/Kimi mode.
+
 ## Running
 
 Interactive mode:

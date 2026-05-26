@@ -6,10 +6,13 @@ from pathlib import Path
 
 
 REQUIRED_ENV_KEYS = [
-    "GEMINI_API_KEY",
-    "NVIDIA_API_KEY",
     "LOVART_ACCESS_KEY",
     "LOVART_SECRET_KEY",
+]
+
+OPTIONAL_ENV_KEYS = [
+    "GEMINI_API_KEY",
+    "NVIDIA_API_KEY",
 ]
 
 
@@ -37,6 +40,15 @@ def missing_or_placeholder_env_keys(env_path: Path, required_keys: list[str] | N
     return [
         key
         for key in (required_keys or REQUIRED_ENV_KEYS)
+        if key not in values or _is_placeholder(values[key])
+    ]
+
+
+def optional_or_placeholder_env_keys(env_path: Path, optional_keys: list[str] | None = None) -> list[str]:
+    values = _read_env_values(env_path)
+    return [
+        key
+        for key in (optional_keys or OPTIONAL_ENV_KEYS)
         if key not in values or _is_placeholder(values[key])
     ]
 
@@ -111,16 +123,26 @@ def main(argv=None) -> int:
         print("- dependencies installed")
         print("- Playwright Chromium installed")
 
-    missing_keys = missing_or_placeholder_env_keys(root / ".env")
+    env_path = root / ".env"
+    missing_keys = missing_or_placeholder_env_keys(env_path)
+    optional_keys = optional_or_placeholder_env_keys(env_path)
     workbook = root / "data" / "products.xlsx"
 
     _print_header("Next steps")
     if missing_keys:
-        print("Fill these values in .env:")
+        print("Required Lovart values to fill in .env:")
         for key in missing_keys:
             print(f"- {key}")
     else:
-        print("- .env API keys look filled")
+        print("- required Lovart API keys look filled")
+
+    if optional_keys:
+        print("Optional prompt-source keys are not filled:")
+        for key in optional_keys:
+            print(f"- {key}")
+        print("  Fill GEMINI_API_KEY only for Gemini API mode; fill NVIDIA_API_KEY only for NVIDIA/Kimi mode.")
+    else:
+        print("- optional Gemini/NVIDIA API keys look filled")
 
     if workbook.exists():
         print("- data/products.xlsx found")
