@@ -7,11 +7,28 @@ from pathlib import Path
 
 from excel_reader import resolve_image_scan_config
 from gemini_bot import GeminiBot
-from main import _process_products
+from main import _process_products, resolve_browser_executable
 from utils import update_status, write_run_summary
 
 
 class MediumPriorityBehaviorTests(unittest.TestCase):
+    def test_resolve_browser_executable_uses_configured_existing_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            chrome = Path(tmp) / "chrome.exe"
+            chrome.write_text("", encoding="utf-8")
+
+            result = resolve_browser_executable({"chrome_exe": str(chrome)})
+
+        self.assertEqual(result, str(chrome))
+
+    def test_resolve_browser_executable_falls_back_to_bundled_chromium(self):
+        result = resolve_browser_executable(
+            {"chrome_exe": "C:\\missing\\chrome.exe"},
+            candidate_paths=[],
+        )
+
+        self.assertIsNone(result)
+
     def test_resolve_image_scan_config_supports_end_column(self):
         cfg = {"image_columns": {"start": "E", "end": "H", "empty_streak": 3}}
         result = resolve_image_scan_config(cfg)

@@ -805,6 +805,33 @@ def _build_nvidia_api(config, logger):
     )
 
 
+def _default_browser_candidates() -> list[str]:
+    candidates = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    ]
+    local_app_data = Path.home() / "AppData" / "Local"
+    candidates.extend([
+        str(local_app_data / "Google" / "Chrome" / "Application" / "chrome.exe"),
+        str(local_app_data / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
+    ])
+    return candidates
+
+
+def resolve_browser_executable(browser_cfg: dict, candidate_paths: list[str] | None = None) -> str | None:
+    configured = str(browser_cfg.get("chrome_exe", "") or "").strip()
+    if configured and Path(configured).exists():
+        return configured
+
+    for candidate in candidate_paths if candidate_paths is not None else _default_browser_candidates():
+        if candidate and Path(candidate).exists():
+            return candidate
+
+    return None
+
+
 def _run_browser_flow(config, products, lovart, logger, run_dir, resume=True, wait_for_ready=True):
     browser_cfg = config["browser"]
     user_data_dir = Path(browser_cfg["user_data_dir"])
@@ -812,23 +839,26 @@ def _run_browser_flow(config, products, lovart, logger, run_dir, resume=True, wa
         user_data_dir = Path.cwd() / user_data_dir
     user_data_dir.mkdir(parents=True, exist_ok=True)
 
-    chrome_exe = browser_cfg.get("chrome_exe", "")
-    if chrome_exe and not Path(chrome_exe).exists():
-        logger.error(f"Chrome executable not found: {chrome_exe}")
-        sys.exit(1)
+    chrome_exe = resolve_browser_executable(browser_cfg)
+    if chrome_exe:
+        logger.info(f"Using browser executable: {chrome_exe}")
+    else:
+        logger.warning("Chrome/Edge executable not found; using Playwright bundled Chromium")
 
     with sync_playwright() as pw:
         logger.info("Launching browser for Gemini")
-        context = pw.chromium.launch_persistent_context(
-            user_data_dir=str(user_data_dir),
-            executable_path=chrome_exe,
-            headless=False,
-            no_viewport=True,
-            args=[
+        launch_options = {
+            "user_data_dir": str(user_data_dir),
+            "headless": False,
+            "no_viewport": True,
+            "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=ImprovedCookieControls",
             ],
-        )
+        }
+        if chrome_exe:
+            launch_options["executable_path"] = chrome_exe
+        context = pw.chromium.launch_persistent_context(**launch_options)
         page = context.pages[0] if context.pages else context.new_page()
         page.goto(config["gemini"]["base_url"], wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(3000)
