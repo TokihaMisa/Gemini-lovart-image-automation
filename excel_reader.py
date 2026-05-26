@@ -18,6 +18,7 @@ class ProductRow:
     language: str
     selling_points: str
     image_paths: List[str]
+    reference_images_are_product: bool = False
 
 
 def _load_sheet(wb: openpyxl.Workbook, sheet_spec):
@@ -95,6 +96,12 @@ def _extract_dispimg_id(cell_value) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def parse_reference_images_are_product(value) -> bool:
+    """Return True when the Excel flag says reference images are the same product."""
+    text = str(value or "").strip().lower()
+    return text in {"是", "yes", "y", "true", "1"}
+
+
 def resolve_image_scan_config(excel_cfg: dict) -> dict:
     """Resolve image column scanning settings to 1-based openpyxl indexes."""
     image_cfg = excel_cfg.get("image_columns", {})
@@ -140,6 +147,8 @@ def read_products(config: dict, logger, limit: int | None = None) -> List[Produc
     name_col = col_letter_to_openpyxl_idx(cols["name_cn"])
     lang_col = col_letter_to_openpyxl_idx(cols["language"])
     sp_col = col_letter_to_openpyxl_idx(cols["selling_points"])
+    ref_flag_col_spec = cols.get("reference_images_are_product")
+    ref_flag_col = col_letter_to_openpyxl_idx(ref_flag_col_spec) if ref_flag_col_spec else None
     scan_cfg = resolve_image_scan_config(excel_cfg)
 
     products: List[ProductRow] = []
@@ -153,6 +162,11 @@ def read_products(config: dict, logger, limit: int | None = None) -> List[Produc
         name_cn = str(ws.cell(row=row_idx, column=name_col).value or "").strip()
         language = str(ws.cell(row=row_idx, column=lang_col).value or "").strip()
         selling_points = str(ws.cell(row=row_idx, column=sp_col).value or "").strip()
+        reference_images_are_product = (
+            parse_reference_images_are_product(ws.cell(row=row_idx, column=ref_flag_col).value)
+            if ref_flag_col
+            else False
+        )
 
         if not name_cn:
             logger.warning(f"Row {row_idx}: empty product name, skipping")
@@ -227,6 +241,7 @@ def read_products(config: dict, logger, limit: int | None = None) -> List[Produc
                 language=language,
                 selling_points=selling_points,
                 image_paths=image_paths,
+                reference_images_are_product=reference_images_are_product,
             )
         )
         if limit is not None and len(products) >= limit:

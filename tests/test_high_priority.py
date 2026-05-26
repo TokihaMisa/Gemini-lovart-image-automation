@@ -102,6 +102,29 @@ class HighPriorityBehaviorTests(unittest.TestCase):
         self.assertIn("最后一张图（图5）才是合并参考图", note)
         self.assertIn("除最后一张参考图以外", note)
 
+    def test_lovart_image_note_allows_same_product_reference_for_shape(self):
+        note = build_lovart_image_note(
+            has_reference_sheet=True,
+            has_accessory_image=False,
+            has_dimension_image=False,
+            reference_images_are_product=True,
+        )
+
+        self.assertIn("同一个产品", note)
+        self.assertIn("外形", note)
+        self.assertIn("其他角度", note)
+
+    def test_lovart_image_note_limits_non_product_reference_to_style(self):
+        note = build_lovart_image_note(
+            has_reference_sheet=True,
+            has_accessory_image=False,
+            has_dimension_image=False,
+            reference_images_are_product=False,
+        )
+
+        self.assertIn("只参考风格", note)
+        self.assertIn("不要把参考图里的产品当成我的产品", note)
+
 
 if __name__ == "__main__":
     unittest.main()

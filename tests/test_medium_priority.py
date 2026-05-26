@@ -391,6 +391,84 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         self.assertIn(("gemini_images", [str(white), str(scene)]), events)
         self.assertIn(("detail_images", [str(white), str(scene)]), events)
 
+    def test_process_products_restarts_when_existing_lovart_project_is_invalid(self):
+        class Product:
+            id = "SKU-INVALID"
+            name_cn = "Product"
+            language = "Portuguese"
+            selling_points = "points"
+            image_paths = ["output/SKU-INVALID/image_1.png"]
+
+        class Gemini:
+            def generate_prompt(self, **kwargs):
+                events.append(("gemini_images", kwargs["image_paths"]))
+                return "generated prompt"
+
+        class Lovart:
+            def validate_project(self, project_id):
+                events.append(("validate_project", project_id))
+                return False
+
+            def create_project(self, product_id):
+                events.append(("create_project", product_id))
+                return "new-project"
+
+            def create_support_image(self, **kwargs):
+                events.append(("support", kwargs["step_name"], kwargs["project_id"], kwargs["image_paths"]))
+                local_path = Path("output") / "SKU-INVALID" / f"{kwargs['step_name']}.png"
+                local_path.write_bytes(kwargs["step_name"].encode("utf-8"))
+                return {"local_path": str(local_path), "project_id": kwargs["project_id"]}
+
+            def create_and_generate(self, **kwargs):
+                events.append(("detail_project", kwargs["project_id"]))
+                events.append(("detail_images", kwargs["image_paths"]))
+                return {"generation_succeeded": True, "project_id": kwargs["project_id"]}
+
+        class Logger:
+            def info(self, message):
+                pass
+
+            def warning(self, message):
+                pass
+
+            def error(self, message):
+                raise AssertionError(message)
+
+        events = []
+        cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                product_dir = Path("output") / "SKU-INVALID"
+                old_white = product_dir / "lovart_steps" / "white_bg" / "old-white.png"
+                old_scene = product_dir / "lovart_steps" / "scene" / "old-scene.png"
+                old_white.parent.mkdir(parents=True, exist_ok=True)
+                old_scene.parent.mkdir(parents=True, exist_ok=True)
+                old_white.write_bytes(b"old-white")
+                old_scene.write_bytes(b"old-scene")
+                product_image = product_dir / "image_1.png"
+                product_image.write_bytes(b"product")
+                update_status(
+                    product_dir,
+                    "failed",
+                    project_id="old-project",
+                    project_url="https://www.lovart.ai/canvas?projectId=old-project",
+                    lovart_final_images=[str(old_white), str(old_scene)],
+                    reason="Gemini failed",
+                )
+
+                result = _process_products([Product()], Gemini(), Lovart(), Logger(), Path("runs") / "run")
+            finally:
+                os.chdir(cwd)
+
+        self.assertEqual(result, (1, 0, 0, 0))
+        self.assertIn(("validate_project", "old-project"), events)
+        self.assertIn(("create_project", "SKU-INVALID"), events)
+        self.assertIn(("detail_project", "new-project"), events)
+        self.assertNotIn(("detail_project", "old-project"), events)
+        self.assertTrue(any(event[0] == "support" and event[2] == "new-project" for event in events))
+        self.assertFalse(any(str(old_white) in str(event) or str(old_scene) in str(event) for event in events))
+
     def test_process_products_marks_support_timeout_as_still_running(self):
         class Product:
             id = "SKU-TIMEOUT"
@@ -441,6 +519,58 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         self.assertEqual(result, (0, 0, 0, 1))
         self.assertEqual(rows[0]["status"], "lovart_still_running")
         self.assertIn("white-background", rows[0]["error"])
+
+    def test_process_products_marks_support_credit_confirmation_as_manual_action(self):
+        class Product:
+            id = "SKU-CREDIT"
+            name_cn = "Product"
+            language = "Portuguese"
+            selling_points = "points"
+            image_paths = ["output/SKU-CREDIT/image_1.png"]
+
+        class Gemini:
+            def generate_prompt(self, **kwargs):
+                raise AssertionError("should stop before Gemini when support image needs confirmation")
+
+        class Lovart:
+            def create_project(self, product_id):
+                return "project-credit"
+
+            def create_support_image(self, **kwargs):
+                return {
+                    "final_status": "pending_confirmation",
+                    "project_id": kwargs["project_id"],
+                    "generation_succeeded": False,
+                    "warning": "Lovart showed a 52-credit confirmation in unlimited mode.",
+                }
+
+        class Logger:
+            def info(self, message):
+                pass
+
+            def warning(self, message):
+                pass
+
+            def error(self, message):
+                raise AssertionError(message)
+
+        cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                product_dir = Path("output") / "SKU-CREDIT"
+                product_dir.mkdir(parents=True)
+                (product_dir / "image_1.png").write_bytes(b"product")
+
+                result = _process_products([Product()], Gemini(), Lovart(), Logger(), Path("runs") / "run")
+                with (Path("runs") / "run" / "summary.csv").open(encoding="utf-8", newline="") as fh:
+                    rows = list(csv.DictReader(fh))
+            finally:
+                os.chdir(cwd)
+
+        self.assertEqual(result, (0, 1, 0, 0))
+        self.assertEqual(rows[0]["status"], "needs_manual_action")
+        self.assertIn("credit confirmation", rows[0]["error"])
 
 
 if __name__ == "__main__":
