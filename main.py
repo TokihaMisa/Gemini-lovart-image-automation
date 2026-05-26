@@ -15,6 +15,7 @@ from nvidia_api import NvidiaAPI, resolve_nvidia_model
 from utils import (
     SCENE_PROMPT,
     WHITE_BACKGROUND_PROMPT,
+    _read_csv_dict_rows_with_fallback,
     append_result,
     build_final_lovart_images,
     build_lovart_prompt,
@@ -337,10 +338,7 @@ def _backfill_result_project_urls(results_path: str | Path = "output/results.csv
     if not path.exists() or path.stat().st_size == 0:
         return 0
 
-    with path.open("r", encoding="utf-8", newline="") as fh:
-        reader = csv.DictReader(fh)
-        fieldnames = reader.fieldnames or []
-        rows = list(reader)
+    fieldnames, rows = _read_csv_dict_rows_with_fallback(path)
 
     if not rows:
         return 0
@@ -430,14 +428,16 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
         if resume and is_product_completed(product_dir):
             skipped += 1
             status = read_status(product_dir)
+            project_url = status.get("project_url", "")
+            append_result("output/results.csv", product.id, product.name_cn, project_url, status="success")
             logger.info(f"SKIP [{idx}/{len(products)}] {product.id} already completed")
-            if status.get("project_url"):
-                print(f"\n  SKIP {product.id} already completed: {status['project_url']}")
+            if project_url:
+                print(f"\n  SKIP {product.id} already completed: {project_url}")
             summary_rows.append({
                 "product_id": product.id,
                 "product_name": product.name_cn,
                 "status": "skipped",
-                "project_url": status.get("project_url", ""),
+                "project_url": project_url,
                 "gemini_chars": status.get("gemini_chars", ""),
                 "artifact_count": status.get("artifact_count", ""),
                 "duration_seconds": 0,

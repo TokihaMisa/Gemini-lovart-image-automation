@@ -7,11 +7,82 @@ from pathlib import Path
 
 from excel_reader import resolve_image_scan_config
 from gemini_bot import GeminiBot
-from main import _process_products
+from main import _backfill_result_project_urls, _process_products
 from utils import update_status, write_run_summary
 
 
 class MediumPriorityBehaviorTests(unittest.TestCase):
+    def test_backfill_result_project_urls_reads_gbk_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            results = root / "output" / "results.csv"
+            product_dir = root / "output" / "SKU-GBK"
+            results.parent.mkdir(parents=True, exist_ok=True)
+            product_dir.mkdir(parents=True, exist_ok=True)
+            results.write_bytes(
+                "product_id,product_name,status,project_url,error\nSKU-GBK,测试商品,success,,\n".encode("gbk")
+            )
+            update_status(product_dir, "lovart_project_created", project_id="project-123")
+
+            cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                changed = _backfill_result_project_urls(results)
+            finally:
+                os.chdir(cwd)
+
+            self.assertEqual(changed, 1)
+            self.assertIn("projectId=project-123", results.read_text(encoding="utf-8"))
+
+    def test_process_products_records_resumed_completed_product_in_results_csv(self):
+        class Product:
+            id = "SKU-COMPLETED"
+            name_cn = "\u5df2\u5b8c\u6210\u5546\u54c1"
+            language = "Portuguese"
+            selling_points = "points"
+            image_paths = ["output/SKU-COMPLETED/image_1.png"]
+
+        class Gemini:
+            def generate_prompt(self, **kwargs):
+                raise AssertionError("completed product should be skipped")
+
+        class Lovart:
+            pass
+
+        class Logger:
+            def info(self, message):
+                pass
+
+            def warning(self, message):
+                pass
+
+            def error(self, message):
+                raise AssertionError(message)
+
+        cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            try:
+                product_dir = Path("output") / "SKU-COMPLETED"
+                product_dir.mkdir(parents=True, exist_ok=True)
+                update_status(
+                    product_dir,
+                    "lovart_done",
+                    project_url="https://www.lovart.ai/canvas?projectId=project-completed",
+                )
+
+                result = _process_products([Product()], Gemini(), Lovart(), Logger(), Path("runs") / "run")
+
+                with (Path("output") / "results.csv").open("r", encoding="utf-8", newline="") as fh:
+                    rows = list(csv.DictReader(fh))
+            finally:
+                os.chdir(cwd)
+
+        self.assertEqual(result, (0, 0, 1, 0))
+        self.assertEqual(rows[0]["product_id"], "SKU-COMPLETED")
+        self.assertEqual(rows[0]["status"], "success")
+        self.assertEqual(rows[0]["project_url"], "https://www.lovart.ai/canvas?projectId=project-completed")
+
     def test_resolve_image_scan_config_supports_end_column(self):
         cfg = {"image_columns": {"start": "E", "end": "H", "empty_streak": 3}}
         result = resolve_image_scan_config(cfg)

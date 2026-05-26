@@ -67,6 +67,24 @@ class HighPriorityBehaviorTests(unittest.TestCase):
         self.assertEqual(rows[2], ["SKU-456", "Recovered item", "success", "https://example.test/2", ""])
         self.assertEqual(len(rows), 3)
 
+    def test_append_result_reads_existing_gbk_results_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "results.csv"
+            content = (
+                "product_id,product_name,status,project_url,error\n"
+                "SKU-OLD,\u6d4b\u8bd5\u5546\u54c1,success,https://example.test/old,\n"
+            )
+            path.write_bytes(content.encode("gbk"))
+
+            append_result(path, "SKU-NEW", "\u65b0\u5546\u54c1", "https://example.test/new")
+
+            with path.open("r", encoding="utf-8", newline="") as fh:
+                rows = list(csv.DictReader(fh))
+
+        self.assertEqual(rows[0]["product_name"], "\u6d4b\u8bd5\u5546\u54c1")
+        self.assertEqual(rows[1]["product_id"], "SKU-NEW")
+        self.assertEqual(rows[1]["project_url"], "https://example.test/new")
+
     def test_split_image_roles_preserves_empty_accessory_and_dimension_slots(self):
         roles = split_image_roles(["product.png", "", "", "ref1.png", "", "ref2.png"])
 
