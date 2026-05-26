@@ -4,7 +4,15 @@ This project reads product data and images from an Excel workbook, sends the pro
 
 ## First-Time Setup
 
-Clone the repository, then run these commands from the project root:
+Clone the repository, then run the Windows setup helper from the project root:
+
+```powershell
+setup_windows.bat
+```
+
+If Python 3.12 or newer is not installed, the script will stop and show the Python install command. After installing Python, run `setup_windows.bat` again. It will install Python dependencies, install Playwright Chromium, create `.env`, create `config.yaml`, and create the `data/` folder.
+
+Manual setup:
 
 ```powershell
 copy .env.example .env
