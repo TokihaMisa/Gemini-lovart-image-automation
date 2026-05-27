@@ -8,6 +8,14 @@ from lovart_api import AgentSkill, AgentSkillError
 from utils import env_or_config, product_output_dir, update_status
 
 
+def build_lovart_project_name(product_id: str, product_name_cn: str = "") -> str:
+    product_id = (product_id or "").strip()
+    product_name_cn = " ".join((product_name_cn or "").split())
+    if product_id and product_name_cn:
+        return f"{product_id}-{product_name_cn}"
+    return product_id or product_name_cn
+
+
 LOVART_IMAGE_MODELS = {
     "auto": None,
     "gpt_image_2": "generate_image_gpt_image_2",
@@ -114,12 +122,13 @@ class LovartBot:
         if self.tool_config["mode"]:
             self.logger.info(f"Lovart reasoning mode: {self.tool_config['mode']}")
 
-    def create_project(self, product_id: str = "") -> str:
+    def create_project(self, product_id: str = "", product_name_cn: str = "") -> str:
         """Create one Lovart project that can be reused across all product steps."""
         project_id = self.skill.create_project()
         self.logger.info(f"Lovart API: created project={project_id} for '{product_id}'")
-        if product_id:
-            self._rename_project(project_id, product_id)
+        project_name = build_lovart_project_name(product_id, product_name_cn)
+        if project_name:
+            self._rename_project(project_id, project_name)
         return project_id
 
     def validate_project(self, project_id: str) -> bool:
@@ -207,7 +216,7 @@ class LovartBot:
                 )
 
             if project_id:
-                self._rename_project(project_id, product_id)
+                self._rename_project(project_id, build_lovart_project_name(product_id, product_name_cn))
 
             return result
 
@@ -306,7 +315,7 @@ class LovartBot:
         selling_points: str,
         project_id: str = "",
     ) -> tuple[dict, str, str]:
-        project_id = project_id or self.create_project(product_id)
+        project_id = project_id or self.create_project(product_id, product_name_cn)
         return self._submit_and_poll_once(
             product_dir=product_dir,
             product_id=product_id,

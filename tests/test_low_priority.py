@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from excel_reader import _build_dispimg_map, parse_reference_images_are_product
-from lovart_bot import LovartBot, resolve_lovart_tool_config
+from lovart_bot import LovartBot, build_lovart_project_name, resolve_lovart_tool_config
 from main import _dry_run_products, _choose_lovart_tool_options, parse_args
 from utils import read_status
 
@@ -260,13 +260,17 @@ class LowPriorityBehaviorTests(unittest.TestCase):
         bot.logger = Logger()
         bot.skill = Skill()
 
-        project_id = bot.create_project("SKU-123")
+        project_id = bot.create_project("SKU-123", "测试商品")
 
         self.assertEqual(project_id, "project-1")
         self.assertEqual(calls, [
             ("create_project",),
-            ("rename_project", "project-1", "SKU-123"),
+            ("rename_project", "project-1", "SKU-123-测试商品"),
         ])
+
+    def test_build_lovart_project_name_uses_sku_and_chinese_name(self):
+        self.assertEqual(build_lovart_project_name("SKU-123", "  测试   商品  "), "SKU-123-测试 商品")
+        self.assertEqual(build_lovart_project_name("SKU-123", ""), "SKU-123")
 
     def test_build_dispimg_map_reads_wps_cellimages_relationships(self):
         cellimages = """<?xml version="1.0" encoding="UTF-8"?>
