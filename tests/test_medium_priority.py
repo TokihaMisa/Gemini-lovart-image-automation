@@ -380,7 +380,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 return "generated prompt"
 
         class Lovart:
-            def create_project(self, product_id):
+            def create_project(self, product_id, product_name_cn=""):
                 raise AssertionError("should reuse existing project")
 
             def create_support_image(self, **kwargs):
@@ -451,8 +451,8 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 events.append(("validate_project", project_id))
                 return False
 
-            def create_project(self, product_id):
-                events.append(("create_project", product_id))
+            def create_project(self, product_id, product_name_cn=""):
+                events.append(("create_project", product_id, product_name_cn))
                 return "new-project"
 
             def create_support_image(self, **kwargs):
@@ -505,7 +505,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
 
         self.assertEqual(result, (1, 0, 0, 0))
         self.assertIn(("validate_project", "old-project"), events)
-        self.assertIn(("create_project", "SKU-INVALID"), events)
+        self.assertIn(("create_project", "SKU-INVALID", "Product"), events)
         self.assertIn(("detail_project", "new-project"), events)
         self.assertNotIn(("detail_project", "old-project"), events)
         self.assertTrue(any(event[0] == "support" and event[2] == "new-project" for event in events))
@@ -524,7 +524,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 raise AssertionError("should stop before Gemini when support image is still running")
 
         class Lovart:
-            def create_project(self, product_id):
+            def create_project(self, product_id, product_name_cn=""):
                 return "project-timeout"
 
             def create_support_image(self, **kwargs):
@@ -575,7 +575,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 raise AssertionError("should stop before Gemini when support image needs confirmation")
 
         class Lovart:
-            def create_project(self, product_id):
+            def create_project(self, product_id, product_name_cn=""):
                 return "project-credit"
 
             def create_support_image(self, **kwargs):

@@ -494,7 +494,7 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                         previous_project_id=previous_lovart_project_id,
                         previous_project_url=_lovart_project_url(previous_lovart_project_id),
                     )
-                lovart_project_id = lovart.create_project(product.id)
+                lovart_project_id = lovart.create_project(product.id, product.name_cn)
                 update_status(
                     product_dir,
                     "lovart_project_created",
