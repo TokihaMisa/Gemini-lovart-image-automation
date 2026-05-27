@@ -7,7 +7,12 @@ from pathlib import Path
 
 from excel_reader import resolve_image_scan_config
 from gemini_bot import GeminiBot
-from main import _backfill_result_project_urls, _process_products
+from main import (
+    _backfill_result_project_urls,
+    _process_products,
+    _resolve_browser_executable_for_run,
+    resolve_browser_executable,
+)
 from utils import update_status, write_run_summary
 
 
@@ -82,6 +87,48 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         self.assertEqual(rows[0]["product_id"], "SKU-COMPLETED")
         self.assertEqual(rows[0]["status"], "success")
         self.assertEqual(rows[0]["project_url"], "https://www.lovart.ai/canvas?projectId=project-completed")
+
+    def test_resolve_browser_executable_uses_configured_existing_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            chrome = Path(tmp) / "chrome.exe"
+            chrome.write_text("", encoding="utf-8")
+
+            result = resolve_browser_executable({"chrome_exe": str(chrome)})
+
+        self.assertEqual(result, str(chrome))
+
+    def test_resolve_browser_executable_falls_back_to_bundled_chromium(self):
+        result = resolve_browser_executable(
+            {"chrome_exe": "C:\\missing\\chrome.exe"},
+            candidate_paths=[],
+        )
+
+        self.assertIsNone(result)
+
+    def test_resolve_browser_executable_for_run_accepts_manual_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            chrome = Path(tmp) / "chrome.exe"
+            chrome.write_text("", encoding="utf-8")
+            answers = iter([str(chrome)])
+
+            result = _resolve_browser_executable_for_run(
+                {"chrome_exe": "C:\\missing\\chrome.exe"},
+                interactive=True,
+                candidate_paths=[],
+                input_func=lambda prompt="": next(answers),
+            )
+
+        self.assertEqual(result, str(chrome))
+
+    def test_resolve_browser_executable_for_run_uses_bundled_chromium_when_manual_path_blank(self):
+        result = _resolve_browser_executable_for_run(
+            {"chrome_exe": "C:\\missing\\chrome.exe"},
+            interactive=True,
+            candidate_paths=[],
+            input_func=lambda prompt="": "",
+        )
+
+        self.assertIsNone(result)
 
     def test_resolve_image_scan_config_supports_end_column(self):
         cfg = {"image_columns": {"start": "E", "end": "H", "empty_streak": 3}}
@@ -409,7 +456,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 return "generated prompt"
 
         class Lovart:
-            def create_project(self, product_id):
+            def create_project(self, product_id, product_name_cn=""):
                 raise AssertionError("should reuse existing project")
 
             def create_support_image(self, **kwargs):
@@ -480,8 +527,8 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 events.append(("validate_project", project_id))
                 return False
 
-            def create_project(self, product_id):
-                events.append(("create_project", product_id))
+            def create_project(self, product_id, product_name_cn=""):
+                events.append(("create_project", product_id, product_name_cn))
                 return "new-project"
 
             def create_support_image(self, **kwargs):
@@ -534,7 +581,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
 
         self.assertEqual(result, (1, 0, 0, 0))
         self.assertIn(("validate_project", "old-project"), events)
-        self.assertIn(("create_project", "SKU-INVALID"), events)
+        self.assertIn(("create_project", "SKU-INVALID", "Product"), events)
         self.assertIn(("detail_project", "new-project"), events)
         self.assertNotIn(("detail_project", "old-project"), events)
         self.assertTrue(any(event[0] == "support" and event[2] == "new-project" for event in events))
@@ -553,7 +600,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 raise AssertionError("should stop before Gemini when support image is still running")
 
         class Lovart:
-            def create_project(self, product_id):
+            def create_project(self, product_id, product_name_cn=""):
                 return "project-timeout"
 
             def create_support_image(self, **kwargs):
@@ -604,7 +651,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 raise AssertionError("should stop before Gemini when support image needs confirmation")
 
         class Lovart:
-            def create_project(self, product_id):
+            def create_project(self, product_id, product_name_cn=""):
                 return "project-credit"
 
             def create_support_image(self, **kwargs):

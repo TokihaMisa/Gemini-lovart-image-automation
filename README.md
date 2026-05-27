@@ -96,6 +96,8 @@ Do not upload real API keys, browser profiles, generated images, run logs, or lo
 
 The first time you use the Gemini browser flow, you may need to log in manually. After that, the login state is stored in `browser_profile/`.
 
+For browser mode, `config.yaml` can leave `browser.chrome_exe` empty. The program will try common Chrome and Edge install paths first. If it cannot find one during an interactive run, it will ask you to paste the `chrome.exe` or `msedge.exe` path; pressing Enter uses Playwright's bundled Chromium.
+
 If the Excel path in `config.yaml` points to `data/products.xlsx`, create the `data/` folder locally and put your workbook there.
 
 By default, column `H` is `reference_images_are_product`. Fill `是` when the later reference images are the same product/spec/color/style, or `否` when they should only be used as style references.
