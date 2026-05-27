@@ -118,6 +118,7 @@ def is_product_completed(product_dir: str | Path) -> bool:
 
 
 RESULT_FIELDNAMES = ["product_id", "product_name", "status", "project_url", "error"]
+CSV_READ_ENCODINGS = ("utf-8-sig", "utf-8", "gbk", "mbcs")
 
 
 def append_result(
@@ -165,17 +166,15 @@ def _read_result_rows(path: Path) -> list[dict]:
     if not path.exists() or path.stat().st_size == 0:
         return []
     _upgrade_results_csv_header(path)
-    with path.open("r", encoding="utf-8", newline="") as fh:
-        reader = csv.DictReader(fh)
-        if reader.fieldnames != RESULT_FIELDNAMES:
-            return []
-        return list(reader)
+    fieldnames, rows = _read_csv_dict_rows_with_fallback(path)
+    if fieldnames != RESULT_FIELDNAMES:
+        return []
+    return rows
 
 
 def _upgrade_results_csv_header(path: Path) -> None:
     """Upgrade legacy 3-column results.csv files before appending new rows."""
-    with path.open("r", encoding="utf-8", newline="") as fh:
-        rows = list(csv.reader(fh))
+    rows = _read_csv_rows_with_fallback(path)
     if not rows or rows[0] == RESULT_FIELDNAMES:
         return
     if rows[0] != ["product_id", "product_name", "project_url"]:
@@ -191,6 +190,41 @@ def _upgrade_results_csv_header(path: Path) -> None:
     with path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerows(upgraded_rows)
+
+
+def _read_csv_rows_with_fallback(path: Path) -> list[list[str]]:
+    last_error = None
+    for encoding in CSV_READ_ENCODINGS:
+        try:
+            with path.open("r", encoding=encoding, newline="") as fh:
+                return list(csv.reader(fh))
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+        except LookupError:
+            continue
+    if last_error:
+        raise last_error
+    return []
+
+
+def _read_csv_dict_rows_with_fallback(path: Path) -> tuple[list[str], list[dict]]:
+    last_error = None
+    for encoding in CSV_READ_ENCODINGS:
+        try:
+            with path.open("r", encoding=encoding, newline="") as fh:
+                reader = csv.DictReader(fh)
+                fieldnames = reader.fieldnames or []
+                rows = list(reader)
+            return fieldnames, rows
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+        except LookupError:
+            continue
+    if last_error:
+        raise last_error
+    return [], []
 
 
 def split_image_roles(image_paths: list[str]) -> dict:
