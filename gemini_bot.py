@@ -28,6 +28,7 @@ class GeminiBot:
         selling_points: str,
         image_paths: list[str],
         product_id: str | None = None,
+        image_size: str = "",
     ) -> str:
         product_id = product_id or product_name_cn
         self.logger.info(f"Gemini: starting for '{product_name_cn}'")
@@ -53,7 +54,7 @@ class GeminiBot:
                 self._save_debug_snapshot(product_id, "image-upload-failed")
                 raise RuntimeError("Gemini image upload did not complete")
 
-            prompt = build_design_prompt(product_name_cn, language, selling_points)
+            prompt = build_design_prompt(product_name_cn, language, selling_points, image_size=image_size)
             previous_response_count = self._response_count()
             self._send_message(prompt)
             self.logger.info("Gemini: product prompt sent, waiting for reply")

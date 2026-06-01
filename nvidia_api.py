@@ -48,10 +48,11 @@ class NvidiaAPI:
         selling_points: str,
         image_paths: list[str],
         product_id: str | None = None,
+        image_size: str = "",
     ) -> str:
         product_id = product_id or product_name_cn
         preamble = Path("preamble.txt").read_text(encoding="utf-8")
-        prompt = f"{preamble}\n\n---\n\n{build_design_prompt(product_name_cn, language, selling_points)}"
+        prompt = f"{preamble}\n\n---\n\n{build_design_prompt(product_name_cn, language, selling_points, image_size=image_size)}"
         images = image_paths if self.send_images else []
 
         if self.logger:

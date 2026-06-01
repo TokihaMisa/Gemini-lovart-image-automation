@@ -4,14 +4,15 @@ excel:
   columns:
     id: "A"
     name_cn: "B"
-    language: "C"
-    selling_points: "D"
+    image_size: "C"
+    language: "D"
+    selling_points: "E"
     # Fill 是/否. 是 = later reference images are the same product/spec/color/style.
-    reference_images_are_product: "H"
+    reference_images_are_product: "I"
   image_columns:
-    start: "E"
+    start: "F"
     # Optional: stop at a fixed column.
-    # end: "H"
+    # end: "J"
     # Optional: scan at most N columns from start if end is not set.
     max_columns: 20
     # Optional: stop after N consecutive empty image cells if neither end nor max_columns stops first.

@@ -100,4 +100,4 @@ For browser mode, `config.yaml` can leave `browser.chrome_exe` empty. The progra
 
 If the Excel path in `config.yaml` points to `data/products.xlsx`, create the `data/` folder locally and put your workbook there.
 
-By default, column `H` is `reference_images_are_product`. Fill `是` when the later reference images are the same product/spec/color/style, or `否` when they should only be used as style references.
+By default, column `C` is `image_size`, column `D` is `language`, and column `I` is `reference_images_are_product`. Fill `是` when the later reference images are the same product/spec/color/style, or `否` when they should only be used as style references.

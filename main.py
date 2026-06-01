@@ -13,11 +13,11 @@ from gemini_bot import GeminiBot
 from lovart_bot import LOVART_IMAGE_MODELS, LovartBot
 from nvidia_api import NvidiaAPI, resolve_nvidia_model
 from utils import (
-    SCENE_PROMPT,
-    WHITE_BACKGROUND_PROMPT,
     _read_csv_dict_rows_with_fallback,
     append_result,
     build_final_lovart_images,
+    build_scene_prompt,
+    build_white_background_prompt,
     build_lovart_prompt,
     build_lovart_image_note,
     create_run_dir,
@@ -385,10 +385,14 @@ def _dry_run_products(products, logger, run_dir, output_dir="output"):
             "dry_run",
             product_id=product.id,
             product_name=product.name_cn,
+            image_size=getattr(product, "image_size", ""),
             language=product.language,
             image_count=len(product.image_paths),
         )
-        logger.info(f"DRY-RUN {product.id} - {product.name_cn} ({len(product.image_paths)} image(s))")
+        logger.info(
+            f"DRY-RUN {product.id} - {product.name_cn} "
+            f"size={getattr(product, 'image_size', '') or '-'} ({len(product.image_paths)} image(s))"
+        )
         summary_rows.append({
             "product_id": product.id,
             "product_name": product.name_cn,
@@ -421,6 +425,7 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
             "parsed",
             product_id=product.id,
             product_name=product.name_cn,
+            image_size=getattr(product, "image_size", ""),
             language=product.language,
             image_count=len(product.image_paths),
         )
@@ -510,7 +515,7 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 white_result = lovart.create_support_image(
                     product_id=product.id,
                     step_name="white_bg",
-                    prompt=WHITE_BACKGROUND_PROMPT,
+                    prompt=build_white_background_prompt(getattr(product, "image_size", "")),
                     image_paths=[product_image],
                     project_id=lovart_project_id,
                     confirmation_advisor=gemini,
@@ -566,7 +571,7 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 scene_result = lovart.create_support_image(
                     product_id=product.id,
                     step_name="scene",
-                    prompt=SCENE_PROMPT,
+                    prompt=build_scene_prompt(getattr(product, "image_size", "")),
                     image_paths=[white_image],
                     project_id=lovart_project_id,
                     confirmation_advisor=gemini,
@@ -647,6 +652,7 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 language=product.language,
                 selling_points=product.selling_points,
                 image_paths=gemini_images,
+                image_size=getattr(product, "image_size", ""),
             )
             logger.info(f"Gemini done ({len(prompt)} chars)")
             if _shutdown_requested:
@@ -658,6 +664,7 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 selling_points=product.selling_points,
                 generated_prompt=prompt,
                 image_note=image_note,
+                image_size=getattr(product, "image_size", ""),
             )
             (product_dir / "lovart_prompt.txt").write_text(lovart_prompt, encoding="utf-8")
             update_status(product_dir, "lovart_prompt_ready", lovart_prompt_chars=len(lovart_prompt))
@@ -926,7 +933,11 @@ def main(argv=None):
         sys.exit(1)
 
     for idx, product in enumerate(products, 1):
-        print(f"  [{idx}] {product.id} | {product.name_cn} | lang={product.language} | {len(product.image_paths)} image(s)")
+        print(
+            f"  [{idx}] {product.id} | {product.name_cn} | "
+            f"size={getattr(product, 'image_size', '') or '-'} | "
+            f"lang={product.language} | {len(product.image_paths)} image(s)"
+        )
 
     if args.dry_run:
         success, fail, skipped, still_running = _dry_run_products(products, logger, run_dir)

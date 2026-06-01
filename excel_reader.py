@@ -15,6 +15,7 @@ from utils import col_letter_to_openpyxl_idx, ensure_output_dir
 class ProductRow:
     id: str
     name_cn: str
+    image_size: str
     language: str
     selling_points: str
     image_paths: List[str]
@@ -145,6 +146,8 @@ def read_products(config: dict, logger, limit: int | None = None) -> List[Produc
     cols = excel_cfg["columns"]
     id_col = col_letter_to_openpyxl_idx(cols["id"])
     name_col = col_letter_to_openpyxl_idx(cols["name_cn"])
+    image_size_col_spec = cols.get("image_size")
+    image_size_col = col_letter_to_openpyxl_idx(image_size_col_spec) if image_size_col_spec else None
     lang_col = col_letter_to_openpyxl_idx(cols["language"])
     sp_col = col_letter_to_openpyxl_idx(cols["selling_points"])
     ref_flag_col_spec = cols.get("reference_images_are_product")
@@ -160,6 +163,7 @@ def read_products(config: dict, logger, limit: int | None = None) -> List[Produc
             continue
 
         name_cn = str(ws.cell(row=row_idx, column=name_col).value or "").strip()
+        image_size = str(ws.cell(row=row_idx, column=image_size_col).value or "").strip() if image_size_col else ""
         language = str(ws.cell(row=row_idx, column=lang_col).value or "").strip()
         selling_points = str(ws.cell(row=row_idx, column=sp_col).value or "").strip()
         reference_images_are_product = (
@@ -238,6 +242,7 @@ def read_products(config: dict, logger, limit: int | None = None) -> List[Produc
             ProductRow(
                 id=product_id,
                 name_cn=name_cn,
+                image_size=image_size,
                 language=language,
                 selling_points=selling_points,
                 image_paths=image_paths,

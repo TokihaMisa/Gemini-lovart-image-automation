@@ -1,11 +1,15 @@
 import json
+import os
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from excel_reader import _build_dispimg_map, parse_reference_images_are_product
+import openpyxl
+from PIL import Image
+
+from excel_reader import _build_dispimg_map, parse_reference_images_are_product, read_products
 from lovart_bot import LovartBot, build_lovart_project_name, resolve_lovart_tool_config
 from main import _dry_run_products, _choose_lovart_tool_options, parse_args
 from utils import read_status
@@ -308,6 +312,54 @@ class LowPriorityBehaviorTests(unittest.TestCase):
             mapping = _build_dispimg_map(str(xlsx), Logger())
 
         self.assertEqual(mapping, {"ID_ABC": "xl/media/image1.jpeg"})
+
+    def test_read_products_reads_image_size_column_before_language(self):
+        class Logger:
+            def info(self, message):
+                pass
+
+            def warning(self, message):
+                raise AssertionError(message)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image_path = root / "product.png"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+
+            workbook_path = root / "products.xlsx"
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.append(["产品ID", "中文名", "图片尺寸", "语言", "卖点", "产品图"])
+            ws.append(["SKU-1", "产品", "4:5", "Portuguese", "卖点", None])
+            ws.add_image(openpyxl.drawing.image.Image(str(image_path)), "F2")
+            wb.save(workbook_path)
+
+            config = {
+                "excel": {
+                    "path": str(workbook_path),
+                    "sheet": 0,
+                    "columns": {
+                        "id": "A",
+                        "name_cn": "B",
+                        "image_size": "C",
+                        "language": "D",
+                        "selling_points": "E",
+                    },
+                    "image_columns": {"start": "F", "max_columns": 1},
+                }
+            }
+
+            cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                products = read_products(config, Logger())
+            finally:
+                os.chdir(cwd)
+
+        self.assertEqual(len(products), 1)
+        self.assertEqual(products[0].image_size, "4:5")
+        self.assertEqual(products[0].language, "Portuguese")
+        self.assertEqual(products[0].selling_points, "卖点")
 
 
 if __name__ == "__main__":

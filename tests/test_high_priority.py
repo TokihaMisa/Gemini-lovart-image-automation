@@ -8,8 +8,10 @@ from unittest.mock import patch
 
 from utils import (
     append_result,
+    build_design_prompt,
     build_final_lovart_images,
     build_lovart_image_note,
+    build_lovart_prompt,
     env_or_config,
     is_product_completed,
     load_dotenv,
@@ -142,6 +144,21 @@ class HighPriorityBehaviorTests(unittest.TestCase):
 
         self.assertIn("只参考风格", note)
         self.assertIn("不要把参考图里的产品当成我的产品", note)
+
+    def test_prompts_use_source_image_size_instead_of_default_square_ratio(self):
+        design_prompt = build_design_prompt("Product", "Portuguese", "points", image_size="4:5")
+        lovart_prompt = build_lovart_prompt(
+            product_name_cn="Product",
+            language="Portuguese",
+            selling_points="points",
+            generated_prompt="generated detail prompt",
+            image_size="4:5",
+        )
+
+        self.assertIn("4:5", design_prompt)
+        self.assertNotIn("1:1", design_prompt)
+        self.assertIn("4:5", lovart_prompt)
+        self.assertNotIn("1:1", lovart_prompt)
 
 
 if __name__ == "__main__":

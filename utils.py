@@ -289,18 +289,36 @@ def merge_reference_images(reference_paths: list[str], output_path: str | Path, 
     return str(output)
 
 
-WHITE_BACKGROUND_PROMPT = (
+WHITE_BACKGROUND_PROMPT_BASE = (
     "请帮我把这张产品图精修一下，要求突出产品的高级感，超清摄影，1k画质，"
-    "产品造型要和原图保持一致，比例1:1，白底图"
+    "产品造型要和原图保持一致，白底图"
 )
 
 
-SCENE_PROMPT = (
-    "根据这个产品设计一张场景图，其他均保持不变，产品的特征要保持一致，图片比例1：1，超清摄影，1k画质"
+SCENE_PROMPT_BASE = (
+    "根据这个产品设计一张场景图，其他均保持不变，产品的特征要保持一致，超清摄影，1k画质"
 )
 
 
-def build_design_prompt(product_name_cn: str, language: str, selling_points: str) -> str:
+def image_size_instruction(image_size: str = "") -> str:
+    """Return an image-size instruction only when the workbook provides one."""
+    cleaned = str(image_size or "").strip()
+    return f"图片尺寸/比例: {cleaned}\n" if cleaned else ""
+
+
+def build_white_background_prompt(image_size: str = "") -> str:
+    return f"{WHITE_BACKGROUND_PROMPT_BASE}\n{image_size_instruction(image_size)}"
+
+
+def build_scene_prompt(image_size: str = "") -> str:
+    return f"{SCENE_PROMPT_BASE}\n{image_size_instruction(image_size)}"
+
+
+WHITE_BACKGROUND_PROMPT = build_white_background_prompt()
+SCENE_PROMPT = build_scene_prompt()
+
+
+def build_design_prompt(product_name_cn: str, language: str, selling_points: str, image_size: str = "") -> str:
     """Build the product-specific Gemini prompt in UTF-8 Chinese."""
     output_language = language or "巴西葡萄牙语"
     return (
@@ -310,7 +328,7 @@ def build_design_prompt(product_name_cn: str, language: str, selling_points: str
         "要求设计风格有温馨感，高级感，可以参考 图3 这个设计风格。\n"
         "输出的每一屏内容都包括（主标题，副标题，信息布局，排版形式）以便我在其他工具中直接生成这些素材。请不要反问，直接根据现有信息生成最优的prompt。\n\n"
         "图片要求：\n"
-        "图片比例1:1\n"
+        f"{image_size_instruction(image_size)}"
         f"语言: {output_language}\n"
         "无logo\n\n"
         f"产品信息：\n{selling_points}\n\n"
@@ -359,8 +377,15 @@ def build_lovart_prompt(
     selling_points: str,
     generated_prompt: str,
     image_note: str = "",
+    image_size: str = "",
 ) -> str:
     """Prepend product guardrails before sending Gemini's generated prompt to Lovart."""
+    image_size_requirement = image_size_instruction(image_size).strip()
+    image_size_line = (
+        f"- {image_size_requirement}，1K画质。\n"
+        if image_size_requirement
+        else "- 不要使用默认固定图片比例，1K画质。\n"
+    )
     prefix = (
         f"我的产品是：{product_name_cn}\n\n"
         f"{image_note}"
@@ -370,7 +395,7 @@ def build_lovart_prompt(
         "我需要你为这个产品设计一套完整的电商详情页\n"
         "设计要求：\n"
         "- 画面要有高级感、商业感和清晰的信息层级。\n"
-        "- 图片比例为 1:1，1K画质。\n"
+        f"{image_size_line}"
         f"- 图片语言：{language}\n"
         "- 不要出现 logo。\n"
         "- 文案要适合跨境电商详情页，不要空泛。\n\n"
