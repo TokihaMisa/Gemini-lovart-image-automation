@@ -28,14 +28,14 @@ class HighPriorityBehaviorTests(unittest.TestCase):
             value = env_or_config({"api_key": "from-config"}, "api_key", "GEMINI_API_KEY")
         self.assertEqual(value, "from-env")
 
-    def test_load_dotenv_sets_missing_values_only(self):
+    def test_load_dotenv_overrides_stale_environment_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / ".env"
             path.write_text("GEMINI_API_KEY=from-file\nLOVART_ACCESS_KEY='ak_test'\n", encoding="utf-8")
 
             with patch.dict(os.environ, {"GEMINI_API_KEY": "from-env"}, clear=False):
                 load_dotenv(path)
-                self.assertEqual(os.environ["GEMINI_API_KEY"], "from-env")
+                self.assertEqual(os.environ["GEMINI_API_KEY"], "from-file")
                 self.assertEqual(os.environ["LOVART_ACCESS_KEY"], "ak_test")
 
     def test_product_output_dir_uses_product_id(self):

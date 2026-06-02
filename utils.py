@@ -18,7 +18,7 @@ def load_config(path: str = "config.yaml") -> dict:
 
 
 def load_dotenv(path: str | Path = ".env") -> None:
-    """Load simple KEY=VALUE lines into os.environ without overwriting existing values."""
+    """Load simple KEY=VALUE lines into os.environ, treating .env as project-local truth."""
     env_path = Path(path)
     if not env_path.exists():
         return
@@ -30,7 +30,7 @@ def load_dotenv(path: str | Path = ".env") -> None:
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+        if key:
             os.environ[key] = value
 
 
