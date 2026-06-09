@@ -121,8 +121,19 @@ def run_process(excel_file, custom_output_dir, prompt_source, lovart_mode, lovar
             for pid, pdata in products_dict.items():
                 img_tag = ""
                 if pdata.get("image"):
-                    safe_path = str(pdata['image']).replace('\\', '/')
-                    img_tag = f"<img src='/file={safe_path}' style='width: 60px; height: 60px; object-fit: cover; border-radius: 8px; flex-shrink: 0; box-shadow: 0 2px 5px rgba(0,0,0,0.1);'>"
+                    try:
+                        import base64
+                        import os
+                        img_path = pdata["image"]
+                        if os.path.exists(img_path):
+                            with open(img_path, "rb") as f:
+                                encoded = base64.b64encode(f.read()).decode('utf-8')
+                            ext = os.path.splitext(img_path)[1].lower().replace('.', '')
+                            if ext == 'jpg': ext = 'jpeg'
+                            b64_src = f"data:image/{ext};base64,{encoded}"
+                            img_tag = f"<img src='{b64_src}' style='width: 60px; height: 60px; object-fit: cover; border-radius: 8px; flex-shrink: 0; box-shadow: 0 2px 5px rgba(0,0,0,0.1);'>"
+                    except Exception:
+                        pass
                 
                 link_tag = ""
                 if pdata.get("url"):
