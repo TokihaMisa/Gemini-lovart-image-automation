@@ -165,8 +165,8 @@ def run_process(excel_file, custom_output_dir, prompt_source, lovart_mode, lovar
             
         safe_logs = [html.escape(l) for l in logs]
         return f"""
-        <div class='glass-panel' style='margin-top: 15px;'>
-            <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 1px solid #334155; padding-bottom: 16px;'>
+        <div style='margin-top: 15px;'>
+            <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid #334155; padding-bottom: 16px;'>
                 <h3 style='margin: 0; display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 1.25em; color: #f8fafc;'>
                     <span>⚡</span> AI 策略指挥中心
                 </h3>
@@ -184,16 +184,17 @@ def run_process(excel_file, custom_output_dir, prompt_source, lovart_mode, lovar
                 </div>
             </div>
 
+            <div style="margin-bottom: 24px; background: #0f172a; color: #cbd5e1; padding: 12px 16px; border-radius: 8px; border: 1px solid #334155; font-family: 'Cascadia Code', monospace; font-size: 0.85em;">
+                <div style="font-weight: 600; color: #94a3b8; margin-bottom: 8px; border-bottom: 1px solid #334155; padding-bottom: 8px;">
+                    ▶ 全局底层运行日志 (Console)
+                </div>
+                <div style="max-height: 200px; overflow-y: auto; display: flex; flex-direction: column-reverse;">
+                    <div>{"<br>".join(safe_logs)}</div>
+                </div>
+            </div>
+
             {cards_html}
 
-            <details style="margin-top: 24px; background: #0f172a; color: #cbd5e1; padding: 12px 16px; border-radius: 8px; border: 1px solid #334155; font-family: 'Cascadia Code', monospace; font-size: 0.85em;">
-                <summary style="cursor: pointer; font-weight: 600; color: #94a3b8; outline: none; user-select: none;">
-                    ▶ 查看全局底层运行日志 (Console)
-                </summary>
-                <div style="margin-top: 12px; max-height: 250px; overflow-y: auto; padding-top: 12px; border-top: 1px solid #334155;">
-                    {"<br>".join(safe_logs)}
-                </div>
-            </details>
         </div>
         """
         
