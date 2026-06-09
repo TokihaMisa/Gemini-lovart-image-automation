@@ -33,3 +33,6 @@ if __name__ == "__main__":
     # 启动原生窗口并加载该 URL
     webview.create_window('Lovart自动化助手', 'http://127.0.0.1:7860', width=1024, height=768)
     webview.start()
+    
+    # 强制结束所有残留的 Gradio 后台线程，防止产生幽灵进程
+    os._exit(0)
