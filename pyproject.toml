@@ -5,7 +5,7 @@ description = "Local Excel to Gemini to Lovart product image automation"
 requires-python = ">=3.12,<3.15"
 dependencies = [
   "openpyxl==3.1.5",
-  "Pillow==12.0.0",
+  "Pillow<12.0.0",
   "PyYAML==6.0.3",
   "playwright==1.59.0",
   "tenacity>=9.1.4",
