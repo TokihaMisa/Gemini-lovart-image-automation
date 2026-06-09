@@ -4,6 +4,16 @@ import threading
 import time
 from pathlib import Path
 
+import sys
+
+# --- PyInstaller Fix for Gradio ---
+if getattr(sys, 'frozen', False):
+    import gradio.component_meta
+    # Gradio tries to dynamically generate .pyi files for components at runtime.
+    # In PyInstaller, the .py files are not available, leading to FileNotFoundError.
+    # We bypass this function to prevent the crash.
+    gradio.component_meta.create_or_modify_pyi = lambda *args, **kwargs: None
+
 import gradio as gr
 import yaml
 
