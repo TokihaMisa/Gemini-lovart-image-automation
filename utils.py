@@ -69,12 +69,21 @@ def col_letter_to_openpyxl_idx(letter: str) -> int:
     return col_letter_to_index(letter) + 1
 
 
-def ensure_output_dir(product_id: str, base_dir: str = "output") -> Path:
+def get_output_dir() -> str:
+    import os
+    return os.environ.get("LOVART_OUTPUT_DIR", "output")
+
+
+def ensure_output_dir(product_id: str, base_dir: str = None) -> Path:
+    if base_dir is None:
+        base_dir = get_output_dir()
     return product_output_dir(product_id, base_dir)
 
 
-def product_output_dir(product_id: str, base_dir: str = "output") -> Path:
+def product_output_dir(product_id: str, base_dir: str = None) -> Path:
     """Return the canonical output directory for a product, searching subdirectories if categorized."""
+    if base_dir is None:
+        base_dir = get_output_dir()
     base = Path(base_dir)
     direct = base / str(product_id)
     if direct.exists():
@@ -136,7 +145,7 @@ def is_product_completed(product_dir: str | Path) -> bool:
     return bool(read_status(product_dir).get("lovart_done"))
 
 
-RESULT_FIELDNAMES = ["product_id", "product_name", "status", "project_url", "error"]
+RESULT_FIELDNAMES = ["product_id", "product_name", "status", "project_url", "error", "used_model"]
 CSV_READ_ENCODINGS = ("utf-8-sig", "utf-8", "gbk", "mbcs")
 
 
@@ -147,6 +156,7 @@ def append_result(
     project_url: str = "",
     status: str = "success",
     error: str = "",
+    used_model: str = "",
 ) -> None:
     """Upsert one product outcome to results.csv using real CSV escaping."""
     path = Path(results_path)
@@ -158,6 +168,7 @@ def append_result(
         "status": status,
         "project_url": project_url,
         "error": error,
+        "used_model": used_model,
     }
 
     by_id = {}
@@ -558,7 +569,9 @@ def _fix_status_paths(status_file_dir: Path, old_base: str, new_base: str):
     status_file.write_text(content, encoding="utf-8")
 
 
-def organize_output_folders(base_dir: str = "output"):
+def organize_output_folders(base_dir: str = None):
+    if base_dir is None:
+        base_dir = get_output_dir()
     """Move product directories into categorized subfolders based on completion status."""
     import shutil
     base = Path(base_dir)

@@ -1,5 +1,6 @@
 import argparse
 import csv
+import os
 import signal
 import sys
 import time
@@ -261,12 +262,18 @@ def _resolve_lovart_mode(choice: str) -> bool:
 def _record_success(product, result: dict) -> str:
     project_id = result.get("project_id", "")
     project_url = f"https://www.lovart.ai/canvas?projectId={project_id}" if project_id else ""
-    append_result("output/results.csv", product.id, product.name_cn, project_url, status="success")
+    from utils import get_output_dir
+    append_result(f"{get_output_dir()}/results.csv", product.id, product.name_cn, project_url, status="success", used_model=result.get("used_model", ""))
     return project_url
 
 
 def _record_failure(product, status: str, error: str = "", project_url: str = "") -> None:
-    append_result("output/results.csv", product.id, product.name_cn, project_url, status=status, error=error)
+    from utils import get_output_dir
+    append_result(f"{get_output_dir()}/results.csv", product.id, product.name_cn, project_url, status=status, error=error)
+    if os.environ.get("UI_MODE") == "1":
+        import json
+        is_manual = (status == "needs_manual_action")
+        print(f"[UI_FAIL] {json.dumps({'id': product.id, 'reason': error, 'is_manual': is_manual}, ensure_ascii=False)}")
 
 
 def _lovart_project_url(project_id: str = "") -> str:
@@ -338,12 +345,15 @@ def _find_support_image(product_dir: Path, status: dict, step_name: str, final_i
     return ""
 
 
-def _backfill_result_project_urls(results_path: str | Path = "output/results.csv") -> int:
-    path = Path(results_path)
-    if not path.exists() or path.stat().st_size == 0:
+def _backfill_result_project_urls(results_path: str | Path = None) -> int:
+    from utils import get_output_dir
+    if results_path is None:
+        results_path = f"{get_output_dir()}/results.csv"
+    results_path = Path(results_path)
+    if not results_path.exists() or results_path.stat().st_size == 0:
         return 0
 
-    fieldnames, rows = _read_csv_dict_rows_with_fallback(path)
+    fieldnames, rows = _read_csv_dict_rows_with_fallback(results_path)
 
     if not rows:
         return 0
@@ -381,7 +391,10 @@ def _backfill_result_project_urls(results_path: str | Path = "output/results.csv
     return changed
 
 
-def _dry_run_products(products, logger, run_dir, output_dir="output"):
+def _dry_run_products(products, logger, run_dir, output_dir=None):
+    from utils import get_output_dir
+    if output_dir is None:
+        output_dir = get_output_dir()
     summary_rows = []
     for product in products:
         product_dir = product_output_dir(product.id, output_dir)
@@ -440,7 +453,8 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
             skipped += 1
             status = read_status(product_dir)
             project_url = status.get("project_url", "")
-            append_result("output/results.csv", product.id, product.name_cn, project_url, status="success")
+            from utils import get_output_dir
+            append_result(f"{get_output_dir()}/results.csv", product.id, product.name_cn, project_url, status="success")
             logger.info(f"SKIP [{idx}/{len(products)}] {product.id} already completed")
             if project_url:
                 console.print(f"  [green]SKIP[/green] {product.id} already completed: [link={project_url}]{project_url}[/link]")
@@ -466,6 +480,11 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
         try:
             image_roles = split_image_roles(product.image_paths)
             product_image = image_roles["product_image"]
+            if not product_image:
+                logger.error(f"Skipping '{product.id}': no main product image found in Excel.")
+                update_status(product_dir, "failed", reason="No main product image found in Excel.")
+                _record_failure(product, "failed", error="No main product image found in Excel")
+                continue
             accessory_image = image_roles["accessory_image"]
             dimension_image = image_roles["dimension_image"]
             reference_images = image_roles["reference_images"]
@@ -575,7 +594,8 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                             "error": reason,
                         })
                         continue
-                    raise RuntimeError("Lovart white-background image generation did not return a local image")
+                    error_msg = (white_result or {}).get("warning") or (white_result or {}).get("error") or "Unknown API error"
+                    raise RuntimeError(f"Lovart API 失败: {error_msg}")
 
             status = read_status(product_dir)
             scene_image = "" if restart_lovart_project else _find_support_image(product_dir, status, "scene", 1)
@@ -635,7 +655,8 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                             "error": reason,
                         })
                         continue
-                    raise RuntimeError("Lovart scene image generation did not return a local image")
+                    error_msg = (scene_result or {}).get("warning") or (scene_result or {}).get("error") or "Unknown API error"
+                    raise RuntimeError(f"Lovart API 失败: {error_msg}")
 
             gemini_images = [white_image, scene_image]
             if reference_sheet:
@@ -688,6 +709,9 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
             update_status(product_dir, "lovart_prompt_ready", lovart_prompt_chars=len(lovart_prompt))
             logger.info(f"Lovart prompt ready ({len(lovart_prompt)} chars)")
 
+            if os.environ.get("UI_MODE") == "1":
+                print(f"[UI_MODEL] {lovart.tool_config.get('image_model', 'auto')}", flush=True)
+
             result = lovart.create_and_generate(
                 product_id=product.id,
                 prompt=lovart_prompt,
@@ -704,6 +728,9 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 logger.info(f"OK [{idx}/{len(products)}] {product.id} completed")
                 if url:
                     print(f"\n  >>> {url}")
+                if os.environ.get("UI_MODE") == "1":
+                    import json
+                    print(f"[UI_SUCCESS] {json.dumps({'id': product.id, 'url': url or '', 'used_model': result.get('used_model', 'unknown')}, ensure_ascii=False)}")
                 success += 1
                 status = read_status(product_dir)
                 summary_rows.append({
@@ -715,13 +742,14 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                     "artifact_count": status.get("artifact_count", ""),
                     "duration_seconds": round(time.time() - started, 2),
                     "error": "",
+                    "used_model": result.get("used_model", "unknown")
                 })
             elif result and result.get("final_status") == "pending_confirmation":
                 logger.warning(f"NEEDS MANUAL ACTION [{idx}/{len(products)}] {product.id}")
                 fail += 1
                 status = read_status(product_dir)
                 project_url = _project_url_from_status(status)
-                _record_failure(product, "needs_manual_action", "Lovart pending confirmation", project_url)
+                _record_failure(product, "needs_manual_action", "Lovart pending confirmation on all fallback models", project_url)
                 summary_rows.append({
                     "product_id": product.id,
                     "product_name": product.name_cn,
@@ -730,7 +758,7 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                     "gemini_chars": len(prompt),
                     "artifact_count": "",
                     "duration_seconds": round(time.time() - started, 2),
-                    "error": "Lovart pending confirmation",
+                    "error": "Lovart pending confirmation on all fallback models",
                 })
             elif result and result.get("final_status") == "timeout":
                 status = read_status(product_dir)
@@ -988,6 +1016,12 @@ def main(argv=None):
             f"size={getattr(product, 'image_size', '') or '-'} | "
             f"lang={product.language} | {len(product.image_paths)} image(s)"
         )
+        if os.environ.get("UI_MODE") == "1":
+            import json
+            from utils import split_image_roles
+            roles = split_image_roles(product.image_paths)
+            img = str(roles["product_image"]).replace("\\", "/") if roles["product_image"] else ""
+            print(f"[UI_PRODUCT] {json.dumps({'id': product.id, 'name': product.name_cn, 'image': img}, ensure_ascii=False)}")
 
     if args.dry_run:
         success, fail, skipped, still_running = _dry_run_products(products, logger, run_dir)

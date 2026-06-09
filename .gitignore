@@ -25,3 +25,7 @@ dist/
 temp_update/
 update.zip
 install_update.bat
+
+# Data & Uploads
+*.xlsx
+!template.xlsx

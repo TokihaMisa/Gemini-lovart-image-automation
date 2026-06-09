@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from lovart_api import AgentSkill, AgentSkillError
-from utils import env_or_config, product_output_dir, update_status
+from utils import env_or_config, product_output_dir, update_status, read_status
 
 
 def build_lovart_project_name(product_id: str, product_name_cn: str = "") -> str:
@@ -122,6 +122,46 @@ class LovartBot:
         if self.tool_config["mode"]:
             self.logger.info(f"Lovart reasoning mode: {self.tool_config['mode']}")
 
+    def set_image_model(self, model_name: str) -> None:
+        """Override the current image model dynamically (e.g. for fallback)."""
+        temp_cfg = {"image_model": model_name, "model_selection": "prefer"}
+        self.tool_config = resolve_lovart_tool_config(temp_cfg)
+        self.logger.info(f"Lovart model dynamically overridden to: {model_name}")
+
+    def _execute_with_fallback(self, func, *args, **kwargs):
+        import os
+        fallback_models = ["nano_banana_pro", "nano_banana_2", "gpt_image_2"]
+        attempted_models = []
+        
+        # Initial execution
+        initial_model = self.tool_config.get('image_model', 'auto')
+        attempted_models.append(initial_model)
+        if os.environ.get("UI_MODE") == "1":
+            print(f"[UI_MODEL] {initial_model}", flush=True)
+            
+        result, project_id, thread_id = func(*args, **kwargs)
+        
+        # Fallback logic
+        if result and result.get("final_status") == "pending_confirmation":
+            for fb_model in fallback_models:
+                attempted_models.append(fb_model)
+                self.logger.info(f"Lovart pending confirmation. Falling back to free model: {fb_model}")
+                if os.environ.get("UI_MODE") == "1":
+                    print(f"[UI_MODEL] {fb_model}", flush=True)
+                self.set_image_model(fb_model)
+                
+                # Update project_id to reuse the project if one was created
+                kwargs['project_id'] = project_id or kwargs.get('project_id', '')
+                
+                result, project_id, thread_id = func(*args, **kwargs)
+                if result and result.get("final_status") != "pending_confirmation":
+                    break
+        
+        if result:
+            result["used_model"] = " ➔ ".join(attempted_models)
+            
+        return result, project_id, thread_id
+
     def create_project(self, product_id: str = "", product_name_cn: str = "") -> str:
         """Create one Lovart project that can be reused across all product steps."""
         project_id = self.skill.create_project()
@@ -151,7 +191,8 @@ class LovartBot:
         product_dir = product_output_dir(product_id)
 
         try:
-            result, project_id, thread_id = self._submit_and_poll(
+            result, project_id, thread_id = self._execute_with_fallback(
+                self._submit_and_poll,
                 product_dir=product_dir,
                 product_id=product_id,
                 step_name="detail",
@@ -223,11 +264,11 @@ class LovartBot:
         except AgentSkillError as exc:
             update_status(product_dir, "failed", reason=str(exc))
             self.logger.error(f"Lovart API error: {exc}")
-            return None
+            return {"generation_succeeded": False, "error": str(exc), "warning": str(exc)}
         except Exception as exc:
             update_status(product_dir, "failed", reason=str(exc))
             self.logger.error(f"Lovart unexpected error: {exc}")
-            return None
+            return {"generation_succeeded": False, "error": str(exc), "warning": str(exc)}
 
     def create_support_image(
         self,
@@ -245,7 +286,8 @@ class LovartBot:
         self.logger.info(f"Lovart API: starting support step '{step_name}' for '{product_id}'")
         product_dir = product_output_dir(product_id)
         try:
-            result, project_id, thread_id = self._submit_and_poll(
+            result, project_id, thread_id = self._execute_with_fallback(
+                self._submit_and_poll,
                 product_dir=product_dir,
                 product_id=product_id,
                 step_name=step_name,
@@ -296,11 +338,11 @@ class LovartBot:
         except AgentSkillError as exc:
             update_status(product_dir, f"lovart_{step_name}_failed", reason=str(exc))
             self.logger.error(f"Lovart API error in {step_name}: {exc}")
-            return None
+            return {"generation_succeeded": False, "error": str(exc), "warning": str(exc)}
         except Exception as exc:
             update_status(product_dir, f"lovart_{step_name}_failed", reason=str(exc))
             self.logger.error(f"Lovart unexpected error in {step_name}: {exc}")
-            return None
+            return {"generation_succeeded": False, "error": str(exc), "warning": str(exc)}
 
     def _submit_and_poll(
         self,
@@ -705,7 +747,11 @@ class LovartBot:
                     self.logger.warning("Lovart API: aborted")
                     return self._normalize_result(result, "abort", project_id)
 
-                print(f"\r  [{elapsed}s] {status_names.get(status, status)}{dots}   ", end="", flush=True)
+                ui_mode = os.environ.get("UI_MODE") == "1"
+                if ui_mode:
+                    print(f"[UI_PROGRESS] {elapsed}s | {status_names.get(status, status)}", flush=True)
+                else:
+                    print(f"\r  [{elapsed}s] {status_names.get(status, status)}{dots}   ", end="", flush=True)
             except Exception as exc:
                 self.logger.warning(f"Lovart poll error: {exc}")
 
@@ -733,7 +779,17 @@ class LovartBot:
             result["generation_succeeded"] = False
             return result
 
-        has_artifact = any((item.get("artifacts") or []) for item in (result.get("items") or []))
+        has_artifact = False
+        used_model = "unknown"
+        for item in (result.get("items") or []):
+            if item.get("artifacts"):
+                has_artifact = True
+            for tc in item.get("tool_calls") or []:
+                name = tc.get("function", {}).get("name") or tc.get("name", "")
+                if name.startswith("generate_image_"):
+                    used_model = name.replace("generate_image_", "")
+        
+        result["used_model"] = used_model
         result["generation_succeeded"] = final_status == "done" and has_artifact
         if final_status == "done" and not has_artifact:
             result["warning"] = "Lovart finished without returning image artifacts."
