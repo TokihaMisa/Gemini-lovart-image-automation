@@ -607,11 +607,16 @@ def manual_save_keys(gemini, nvidia, access, secret):
 def pick_directory(current_dir):
     import subprocess
     import sys
+    import os
     # Use a subprocess to run tkinter, avoiding Gradio background thread deadlocks
     script = "import tkinter as tk; from tkinter import filedialog; root = tk.Tk(); root.attributes('-topmost', True); root.withdraw(); print(filedialog.askdirectory())"
     try:
+        kwargs = {}
+        if os.name == 'nt':
+            kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            
         # Use sys.executable to ensure we use the same Python environment
-        result = subprocess.check_output([sys.executable, "-c", script], text=True, creationflags=subprocess.CREATE_NO_WINDOW).strip()
+        result = subprocess.check_output([sys.executable, "-c", script], text=True, **kwargs).strip()
         if result:
             return result
     except Exception:
