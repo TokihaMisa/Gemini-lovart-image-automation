@@ -90,7 +90,7 @@ def install_dependencies(root: Path, python_exe: str = sys.executable) -> None:
     requirements = root / "requirements.txt"
     if not requirements.exists():
         raise FileNotFoundError("requirements.txt not found")
-    subprocess.check_call([python_exe, "-m", "pip", "install", "-r", str(requirements)])
+    subprocess.check_call([python_exe, "-m", "pip", "install", "-i", "https://pypi.tuna.tsinghua.edu.cn/simple", "-r", str(requirements)])
     subprocess.check_call([python_exe, "-m", "playwright", "install", "chromium"])
 
 
