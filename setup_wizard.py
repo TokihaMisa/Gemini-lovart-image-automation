@@ -128,11 +128,11 @@ def main(argv=None) -> int:
     bat_path = root / "启动桌面客户端.bat"
     
     if vbs_path.exists():
-        vbs_content = f'Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "cmd.exe /c chcp 65001 >nul & ""{sys.executable}"" webui.py", 0, False\n'
+        vbs_content = f'Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "cmd.exe /c chcp 65001 >nul & ""{sys.executable}"" app.py", 0, False\n'
         vbs_path.write_text(vbs_content, encoding="utf-8")
         
     if bat_path.exists():
-        bat_content = f'@echo off\nchcp 65001 >nul\necho ==============================================\necho 正在为您启动 Lovart 原生桌面客户端...\necho ==============================================\necho (请勿关闭此黑色窗口，客户端界面即将弹出)\n"{sys.executable}" webui.py\npause\n'
+        bat_content = f'@echo off\nchcp 65001 >nul\necho ==============================================\necho 正在为您启动 Lovart 原生桌面客户端...\necho ==============================================\necho (请勿关闭此黑色窗口，客户端界面即将弹出)\n"{sys.executable}" app.py\npause\n'
         bat_path.write_text(bat_content, encoding="utf-8")
     print("- startup scripts correctly bound to current Python environment")
 

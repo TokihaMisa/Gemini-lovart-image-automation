@@ -6,8 +6,8 @@ echo ==============================================
 echo (请勿关闭此黑色窗口，客户端界面即将弹出)
 where uv >nul 2>nul
 if %ERRORLEVEL% equ 0 (
-    uv run python webui.py
+    uv run python app.py
 ) else (
-    python webui.py
+    python app.py
 )
 pause
