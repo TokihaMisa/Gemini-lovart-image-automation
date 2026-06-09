@@ -346,37 +346,48 @@ class LovartBot:
         selling_points: str,
         tool_config: dict,
     ) -> tuple[dict, str, str]:
-        file_suffix = step_name if attempt_name == "primary" else f"{step_name}_{attempt_name}"
-        attachment_records = self._upload_images(image_paths)
-        attachment_urls = [item["url"] for item in attachment_records]
-        attachment_file = product_dir / f"lovart_attachments_{file_suffix}.json"
-        attachment_file.write_text(
-            json.dumps(attachment_records, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        update_status(
-            product_dir,
-            f"lovart_{step_name}_uploaded",
-            attachment_count=len(attachment_urls),
-            attachment_file=str(attachment_file),
-            attempt=attempt_name,
-        )
-
-        prompt_file = product_dir / f"lovart_prompt_{file_suffix}.txt"
-        prompt_file.write_text(prompt, encoding="utf-8")
-        self.logger.info(
-            f"Lovart API: sending {step_name} prompt ({len(prompt)} chars), "
-            f"attempt={attempt_name}, model={tool_config['image_model']} ({tool_config['model_selection']})"
-        )
-        thread_id = self.skill.send(
-            prompt=prompt,
-            project_id=project_id,
-            attachments=attachment_urls if attachment_urls else None,
-            prefer_models=tool_config["prefer_models"],
-            include_tools=tool_config["include_tools"],
-            mode=tool_config["mode"],
-        )
-        self.logger.info(f"Lovart API: sent {step_name} project={project_id}, thread={thread_id}")
+        status = read_status(product_dir)
+        is_still_running = status.get("lovart_still_running")
+        last_submitted = status.get(f"lovart_{step_name}_submitted")
+        thread_id = status.get("thread_id")
+        
+        if is_still_running and last_submitted and thread_id:
+            self.logger.info(f"Lovart API: Resuming previously timed out {step_name} thread={thread_id} in project={project_id}")
+            # Clear the still_running flag locally so we don't accidentally get stuck in resume loops if it fails now
+            update_status(product_dir, "lovart_still_running_resumed", lovart_still_running=False)
+        else:
+            file_suffix = step_name if attempt_name == "primary" else f"{step_name}_{attempt_name}"
+            attachment_records = self._upload_images(image_paths)
+            attachment_urls = [item["url"] for item in attachment_records]
+            attachment_file = product_dir / f"lovart_attachments_{file_suffix}.json"
+            attachment_file.write_text(
+                json.dumps(attachment_records, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            update_status(
+                product_dir,
+                f"lovart_{step_name}_uploaded",
+                attachment_count=len(attachment_urls),
+                attachment_file=str(attachment_file),
+                attempt=attempt_name,
+            )
+    
+            prompt_file = product_dir / f"lovart_prompt_{file_suffix}.txt"
+            prompt_file.write_text(prompt, encoding="utf-8")
+            self.logger.info(
+                f"Lovart API: sending {step_name} prompt ({len(prompt)} chars), "
+                f"attempt={attempt_name}, model={tool_config['image_model']} ({tool_config['model_selection']})"
+            )
+            thread_id = self.skill.send(
+                prompt=prompt,
+                project_id=project_id,
+                attachments=attachment_urls if attachment_urls else None,
+                prefer_models=tool_config["prefer_models"],
+                include_tools=tool_config["include_tools"],
+                mode=tool_config["mode"],
+            )
+            self.logger.info(f"Lovart API: sent {step_name} project={project_id}, thread={thread_id}")
+            
         update_status(
             product_dir,
             f"lovart_{step_name}_submitted",

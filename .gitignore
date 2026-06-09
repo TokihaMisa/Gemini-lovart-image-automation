@@ -14,3 +14,14 @@ lovart-skill.zip
 .claude/
 .playwright-mcp/
 .tmp.driveupload/
+.tmp.drivedownload/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# OTA Updater
+temp_update/
+update.zip
+install_update.bat

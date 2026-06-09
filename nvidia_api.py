@@ -3,6 +3,8 @@ import json
 import urllib.request
 from pathlib import Path
 
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from utils import (
     build_design_prompt,
     build_lovart_confirmation_prompt,
@@ -132,6 +134,7 @@ class NvidiaAPI:
             "max_tokens": 8192,
         }
 
+    @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=2, max=10))
     def _call(self, text: str, image_paths: list[str] | None = None) -> str:
         payload = self._build_payload(text, image_paths)
         body = json.dumps(payload).encode("utf-8")
@@ -149,8 +152,12 @@ class NvidiaAPI:
             with urllib.request.urlopen(req, timeout=180) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except Exception as exc:
+            if hasattr(exc, "code") and exc.code in (400, 401, 403, 404):
+                if self.logger:
+                    self.logger.error(f"NVIDIA API client error {exc.code}: {exc}")
+                raise
             if self.logger:
-                self.logger.error(f"NVIDIA API call failed: {exc}")
+                self.logger.warning(f"NVIDIA API call failed, will retry: {exc}")
             raise
 
         result = self._extract_text(data)

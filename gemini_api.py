@@ -3,6 +3,8 @@ import json
 import urllib.request
 from pathlib import Path
 
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 from utils import (
     build_design_prompt,
     build_lovart_confirmation_prompt,
@@ -90,6 +92,7 @@ class GeminiAPI:
         )
         return decision
 
+    @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=2, max=10))
     def _call(self, text: str, image_paths: list[str] | None = None) -> str:
         """Send a request to Gemini API. Returns the text response."""
         url = f"{self.BASE}/{self.model}:generateContent?key={self.api_key}"
@@ -119,8 +122,13 @@ class GeminiAPI:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except Exception as exc:
+            if hasattr(exc, "code") and exc.code in (400, 401, 403, 404):
+                # Don't retry on client errors
+                if self.logger:
+                    self.logger.error(f"Gemini API client error {exc.code}: {exc}")
+                raise
             if self.logger:
-                self.logger.error(f"Gemini API call failed: {exc}")
+                self.logger.warning(f"Gemini API call failed, will retry: {exc}")
             raise
 
         candidates = data.get("candidates", [])

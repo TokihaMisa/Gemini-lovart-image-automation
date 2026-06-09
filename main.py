@@ -7,6 +7,10 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+from playwright.sync_api import sync_playwright
+from rich.console import Console
+from rich.panel import Panel
+
 from excel_reader import read_products
 from gemini_api import GeminiAPI
 from gemini_bot import GeminiBot
@@ -71,6 +75,7 @@ def parse_args(argv=None):
     )
     parser.add_argument("--limit", type=int, default=None, help="Process at most N parsed products")
     parser.add_argument("--dry-run", action="store_true", help="Parse Excel and write run summary without Gemini/Lovart calls")
+    parser.add_argument("--generate-template", action="store_true", help="Generate a standard Excel template")
     parser.add_argument("--resume", dest="resume", action="store_true", default=True, help="Skip products already marked lovart_done")
     parser.add_argument("--no-resume", dest="resume", action="store_false", help="Reprocess products even if status.json says done")
     parser.add_argument(
@@ -408,6 +413,7 @@ def _dry_run_products(products, logger, run_dir, output_dir="output"):
 
 
 def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
+    console = Console()
     success = fail = skipped = still_running = 0
     summary_rows = []
     backfilled = _backfill_result_project_urls()
@@ -437,7 +443,7 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
             append_result("output/results.csv", product.id, product.name_cn, project_url, status="success")
             logger.info(f"SKIP [{idx}/{len(products)}] {product.id} already completed")
             if project_url:
-                print(f"\n  SKIP {product.id} already completed: {project_url}")
+                console.print(f"  [green]SKIP[/green] {product.id} already completed: [link={project_url}]{project_url}[/link]")
             summary_rows.append({
                 "product_id": product.id,
                 "product_name": product.name_cn,
@@ -451,7 +457,11 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
             continue
 
         logger.info(f"[{idx}/{len(products)}] {product.id} - {product.name_cn}")
-        print(f"\n{'-' * 50}\n[{idx}/{len(products)}] {product.id} | {product.name_cn}\n{'-' * 50}")
+        console.print(Panel(
+            f"[bold cyan]Product ID:[/bold cyan] {product.id}\n[bold cyan]Name:[/bold cyan] {product.name_cn}",
+            title=f"[bold green]Processing [{idx}/{len(products)}][/bold green]",
+            border_style="blue",
+        ))
 
         try:
             image_roles = split_image_roles(product.image_paths)
@@ -548,6 +558,10 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                         project_url = _project_url_from_status(status)
                         reason = white_result.get("warning") or "Lovart white-background image needs credit confirmation"
                         logger.warning(f"NEEDS MANUAL ACTION [{idx}/{len(products)}] {product.id} white_bg")
+                        console.print(Panel(
+                            f"[bold yellow]Manual Action Required for {product.id} (White BG)[/bold yellow]\n{reason}\nURL: {project_url}",
+                            border_style="yellow"
+                        ))
                         fail += 1
                         _record_failure(product, "needs_manual_action", reason, project_url)
                         summary_rows.append({
@@ -604,6 +618,10 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                         project_url = _project_url_from_status(status)
                         reason = scene_result.get("warning") or "Lovart scene image needs credit confirmation"
                         logger.warning(f"NEEDS MANUAL ACTION [{idx}/{len(products)}] {product.id} scene")
+                        console.print(Panel(
+                            f"[bold yellow]Manual Action Required for {product.id} (Scene)[/bold yellow]\n{reason}\nURL: {project_url}",
+                            border_style="yellow"
+                        ))
                         fail += 1
                         _record_failure(product, "needs_manual_action", reason, project_url)
                         summary_rows.append({
@@ -910,8 +928,40 @@ def _run_browser_flow(config, products, lovart, logger, run_dir, resume=True, wa
         return result
 
 
+def _generate_excel_template():
+    import openpyxl
+    target = Path("data/标准测试模板.xlsx")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "商品测试"
+    headers = ["商品ID", "商品名称", "尺寸要求", "多语言", "卖点描述", "商品图1(产品图)", "商品图2(配件图)", "参考图是否是同产品", "参考图1"]
+    ws.append(headers)
+    ws.append(["T001", "测试商品", "11:15", "英文", "防水防刮，多色可选", "", "", "否", ""])
+    wb.save(target)
+    print(f"\n✅ 成功生成标准 Excel 模板: {target.absolute()}\n  请填入您的商品信息并在图片列嵌入(或DISPIMG)真实图片。")
+    sys.exit(0)
+
+
 def main(argv=None):
     args = parse_args(argv)
+    
+    if args.generate_template:
+        _generate_excel_template()
+
+    # Auto-diagnostic: Check required .env keys before doing anything else
+    try:
+        from setup_wizard import missing_or_placeholder_env_keys
+        missing_keys = missing_or_placeholder_env_keys(Path(".env"))
+        if missing_keys:
+            print("\n[!] Auto-Diagnostic Failed: Required environment variables are missing or invalid:")
+            for key in missing_keys:
+                print(f"  - {key}")
+            print("\nPlease fill them in `.env` before running.")
+            sys.exit(1)
+    except ImportError:
+        pass
+
     config = load_config(args.config)
     logger = setup_logging()
     run_dir = create_run_dir()
@@ -986,6 +1036,9 @@ def main(argv=None):
         f"Session complete. Success={success}, Failed={fail}, "
         f"StillRunning={still_running}, Skipped={skipped}"
     )
+    
+    from utils import organize_output_folders
+    organize_output_folders()
 
 
 if __name__ == "__main__":

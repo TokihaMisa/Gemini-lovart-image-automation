@@ -572,27 +572,41 @@ class GeminiBot:
         return False
 
     def _upload_images_once(self, image_paths: list[str]) -> bool:
+        # Strategy 1: Direct set_input_files on any file input on the page.
+        # Playwright can interact with hidden file inputs directly, avoiding UI clicks entirely.
+        try:
+            file_inputs = self.page.locator('input[type="file"]')
+            if file_inputs.count() > 0:
+                # Often the last one is the chat box's file input, but we can try the first visible/enabled one, or just the last.
+                file_inputs.last.set_input_files(image_paths)
+                if self._wait_for_uploads_complete(len(image_paths)):
+                    self.logger.info(f"Gemini: uploaded {len(image_paths)} image(s) via direct input")
+                    return True
+        except Exception as exc:
+            self.logger.warning(f"Gemini: direct file input upload failed: {exc}")
+
+        # Strategy 2: Click the add/upload button robustly, then expect a file chooser
         clicked = False
-        for selector in [
+        selectors = [
             'button:has(img[alt="add_2"])',
             'button[aria-label*="上传和工具"]',
             'button[aria-label*="上传"]',
             'button[aria-label*="添加"]',
             'button[aria-label*="附件"]',
             'button[aria-label*="Upload"]',
-            'button[aria-label*="upload"]',
-            'button[aria-label*="Open file"]',
             'button[aria-label*="attach"]',
             'button[aria-label*="Attach"]',
             '[role="button"][aria-label*="上传和工具"]',
-        ]:
+        ]
+        
+        for selector in selectors:
             try:
-                locator = self.page.locator(selector)
-                if locator.count() > 0:
+                locator = self.page.locator(selector).first
+                if locator.is_visible(timeout=1000):
                     try:
-                        locator.first.click(timeout=3000, force=True)
+                        locator.click(timeout=3000, force=True)
                     except TypeError:
-                        locator.first.click(timeout=3000)
+                        locator.click(timeout=3000)
                     self.page.wait_for_timeout(1000)
                     self.logger.info(f"Gemini: clicked add button via {selector}")
                     clicked = True
@@ -639,31 +653,19 @@ class GeminiBot:
             except Exception as exc:
                 self.logger.warning(f"Gemini: add/upload DOM scan failed: {exc}")
 
-        if not clicked:
-            self.logger.warning("Gemini: add/upload button not found")
-            return False
-
-        file_inputs = self.page.locator('input[type="file"]')
-        if file_inputs.count() > 0:
-            try:
-                file_inputs.first.set_input_files(image_paths)
-                if self._wait_for_uploads_complete(len(image_paths)):
-                    self.logger.info(f"Gemini: uploaded {len(image_paths)} image(s)")
-                    return True
-            except Exception as exc:
-                self.logger.warning(f"Gemini: file input upload failed: {exc}")
-
+        # Try to find the file chooser trigger in the menu
         for selector in [
             'li:has-text("Upload")',
             'li:has-text("上传")',
-            'button[role="menuitem"]:has-text("上传文件")',
-            '[role="menuitem"]:has-text("上传文件")',
+            'li:has-text("从计算机")',
+            '[role="menuitem"]:has-text("上传")',
+            '[role="menuitem"]:has-text("Upload")',
+            '[role="menuitem"]:has-text("从电脑")',
             'div[role="menuitem"]:has-text("file")',
             'button:has-text("Upload file")',
-            '[role="menuitem"]:has-text("Upload file")',
-            'button:has-text("上传文件")',
             'gem-menu-item:has-text("上传文件")',
             'button:has-text("file")',
+            'div:has-text("从您的计算机")',
         ]:
             try:
                 item = self.page.locator(selector).first
@@ -672,10 +674,21 @@ class GeminiBot:
                         item.click()
                     chooser.value.set_files(image_paths)
                     if self._wait_for_uploads_complete(len(image_paths)):
-                        self.logger.info(f"Gemini: uploaded {len(image_paths)} image(s) via menu")
+                        self.logger.info(f"Gemini: uploaded {len(image_paths)} image(s) via menu file chooser")
                         return True
             except Exception:
                 continue
+
+        # If expect_file_chooser didn't work, maybe the input[type="file"] appeared in DOM now
+        try:
+            file_inputs = self.page.locator('input[type="file"]')
+            if file_inputs.count() > 0:
+                file_inputs.last.set_input_files(image_paths)
+                if self._wait_for_uploads_complete(len(image_paths)):
+                    self.logger.info(f"Gemini: uploaded {len(image_paths)} image(s) via post-click direct input")
+                    return True
+        except Exception as exc:
+            pass
 
         self.logger.warning("Gemini: all upload methods failed")
         return False

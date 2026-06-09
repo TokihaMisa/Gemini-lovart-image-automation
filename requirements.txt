@@ -2,3 +2,7 @@ openpyxl==3.1.5
 Pillow==12.0.0
 PyYAML==6.0.3
 playwright==1.59.0
+tenacity==9.0.0
+rich==13.9.4
+gradio==5.6.0
+pydantic==2.10.3

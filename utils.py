@@ -74,10 +74,21 @@ def ensure_output_dir(product_id: str, base_dir: str = "output") -> Path:
 
 
 def product_output_dir(product_id: str, base_dir: str = "output") -> Path:
-    """Return the canonical output directory for a product."""
-    path = Path(base_dir) / str(product_id)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    """Return the canonical output directory for a product, searching subdirectories if categorized."""
+    base = Path(base_dir)
+    direct = base / str(product_id)
+    if direct.exists():
+        return direct
+    
+    if base.exists():
+        for sub in base.iterdir():
+            if sub.is_dir() and sub.name in ["1_完全做好", "2_待确认", "3_处理中", "4_异常"]:
+                candidate = sub / str(product_id)
+                if candidate.exists():
+                    return candidate
+
+    direct.mkdir(parents=True, exist_ok=True)
+    return direct
 
 
 def env_or_config(config: dict, key: str, env_name: str, default: str = "") -> str:
@@ -106,10 +117,18 @@ def update_status(product_dir: str | Path, stage: str, **fields) -> dict:
     status[stage] = True
     status.update(fields)
     status["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    (path / "status.json").write_text(
-        json.dumps(status, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    target_path = path / "status.json"
+    temp_path = path / "status.json.tmp"
+    try:
+        temp_path.write_text(
+            json.dumps(status, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temp_path.replace(target_path)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
     return status
 
 
@@ -155,11 +174,18 @@ def append_result(
         order.append(product_id)
     by_id[product_id] = new_row
 
-    with path.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=RESULT_FIELDNAMES)
-        writer.writeheader()
-        for key in order:
-            writer.writerow(by_id[key])
+    temp_path = path.with_suffix(".csv.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=RESULT_FIELDNAMES)
+            writer.writeheader()
+            for key in order:
+                writer.writerow(by_id[key])
+        temp_path.replace(path)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
 
 
 def _read_result_rows(path: Path) -> list[dict]:
@@ -515,3 +541,76 @@ def write_run_summary(run_dir: str | Path, rows: list[dict]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+
+def _fix_status_paths(status_file_dir: Path, old_base: str, new_base: str):
+    status_file = status_file_dir / "status.json"
+    if not status_file.exists():
+        return
+    content = status_file.read_text(encoding="utf-8")
+    old_base_fwd = old_base.replace("\\", "/")
+    new_base_fwd = new_base.replace("\\", "/")
+    old_base_bck = old_base.replace("/", "\\")
+    new_base_bck = new_base.replace("/", "\\")
+    
+    content = content.replace(old_base_fwd, new_base_fwd)
+    content = content.replace(old_base_bck, new_base_bck)
+    status_file.write_text(content, encoding="utf-8")
+
+
+def organize_output_folders(base_dir: str = "output"):
+    """Move product directories into categorized subfolders based on completion status."""
+    import shutil
+    base = Path(base_dir)
+    if not base.exists():
+        return
+
+    cat_done = base / "1_完全做好"
+    cat_pending = base / "2_待确认"
+    cat_processing = base / "3_处理中"
+    cat_error = base / "4_异常"
+    
+    for sub in [cat_done, cat_pending, cat_processing, cat_error]:
+        sub.mkdir(exist_ok=True)
+        
+    product_dirs = []
+    category_names = ["1_完全做好", "2_待确认", "3_处理中", "4_异常"]
+    
+    for item in base.iterdir():
+        if not item.is_dir() or item.name.startswith((".git", "__pycache__")):
+            continue
+        if item.name in category_names:
+            for subitem in item.iterdir():
+                if subitem.is_dir():
+                    product_dirs.append(subitem)
+        else:
+            product_dirs.append(item)
+            
+    for pdir in product_dirs:
+        status = read_status(pdir)
+        if not status:
+            continue
+            
+        is_done = bool(status.get("lovart_done"))
+        is_pending = bool(status.get("needs_manual_action"))
+        is_error = bool(status.get("lovart_project_invalid") or status.get("lovart_still_running"))
+        
+        if is_done:
+            target_cat = cat_done
+        elif is_pending:
+            target_cat = cat_pending
+        elif is_error:
+            target_cat = cat_error
+        else:
+            target_cat = cat_processing
+            
+        target_path = target_cat / pdir.name
+        
+        if pdir.parent != target_cat:
+            if target_path.exists():
+                shutil.rmtree(target_path)
+            try:
+                pdir.rename(target_path)
+            except OSError:
+                shutil.move(str(pdir), str(target_path))
+            _fix_status_paths(target_path, old_base=str(pdir), new_base=str(target_path))
