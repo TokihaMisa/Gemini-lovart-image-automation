@@ -6,7 +6,7 @@ echo ==============================================
 echo (请勿关闭此黑色窗口，客户端界面即将弹出)
 where uv >nul 2>nul
 if %ERRORLEVEL% equ 0 (
-    uv run python app.py
+    uv run --no-sync python app.py
 ) else (
     python app.py
 )
