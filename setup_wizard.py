@@ -123,6 +123,19 @@ def main(argv=None) -> int:
         print("- dependencies installed")
         print("- Playwright Chromium installed")
 
+    # Rewrite startup scripts to use the exact absolute Python path to prevent 'No module named gradio'
+    vbs_path = root / "启动无黑框本地客户端.vbs"
+    bat_path = root / "启动桌面客户端.bat"
+    
+    if vbs_path.exists():
+        vbs_content = f'Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "cmd.exe /c chcp 65001 >nul & ""{sys.executable}"" webui.py", 0, False\n'
+        vbs_path.write_text(vbs_content, encoding="utf-8")
+        
+    if bat_path.exists():
+        bat_content = f'@echo off\nchcp 65001 >nul\necho ==============================================\necho 正在为您启动 Lovart 原生桌面客户端...\necho ==============================================\necho (请勿关闭此黑色窗口，客户端界面即将弹出)\n"{sys.executable}" webui.py\npause\n'
+        bat_path.write_text(bat_content, encoding="utf-8")
+    print("- startup scripts correctly bound to current Python environment")
+
     env_path = root / ".env"
     missing_keys = missing_or_placeholder_env_keys(env_path)
     optional_keys = optional_or_placeholder_env_keys(env_path)
