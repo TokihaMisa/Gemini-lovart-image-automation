@@ -1,7 +1,9 @@
 import os
 import sys
+import multiprocessing
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     if "--run-main" in sys.argv:
         sys.argv.remove("--run-main")
         from main import main as run_main

@@ -9,10 +9,59 @@ import yaml
 
 
 def load_config() -> dict:
-    if os.path.exists("config.yaml"):
-        with open("config.yaml", "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    return {}
+    if not os.path.exists("config.yaml"):
+        default_config = """excel:
+  path: data/products.xlsx
+  sheet: 0
+  columns:
+    id: A
+    name_cn: B
+    image_size: C
+    language: D
+    selling_points: E
+    reference_images_are_product: I
+  image_columns:
+    start: F
+    max_columns: 20
+    empty_streak: 20
+browser:
+  chrome_exe: ""
+  user_data_dir: browser_profile
+gemini:
+  preamble_file: preamble.txt
+  base_url: https://gemini.google.com
+  thinking_mode: true
+  reply_timeout: 300
+  upload_timeout: 120
+  upload_attempts: 3
+gemini_api:
+  model: gemini-2.5-flash-lite
+nvidia_api:
+  base_url: https://integrate.api.nvidia.com/v1
+  model_choice: kimi
+  send_images: true
+  models:
+    kimi: moonshotai/kimi-k2.5
+lovart:
+  base_url: https://lgw.lovart.ai
+  image_model: auto
+  model_selection: prefer
+  reasoning_mode: fast
+  wait_forever_on_credit_prompt: true
+  max_confirmation_rounds: 5
+  max_auto_confirm_credits: 10
+  wait_timeout: 10800
+  poll_interval: 5
+  timeout: 600
+  upload_attempts: 3
+  upload_retry_delay: 2
+output_dir: output
+"""
+        with open("config.yaml", "w", encoding="utf-8") as f:
+            f.write(default_config)
+            
+    with open("config.yaml", "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
 def save_config(config_data: dict):
