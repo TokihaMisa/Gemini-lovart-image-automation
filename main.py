@@ -1,10 +1,16 @@
 import argparse
 import csv
+import io
 import os
 import signal
 import sys
 import time
 from pathlib import Path
+
+if isinstance(sys.stdout, io.TextIOWrapper):
+    sys.stdout.reconfigure(encoding='utf-8')
+if isinstance(sys.stderr, io.TextIOWrapper):
+    sys.stderr.reconfigure(encoding='utf-8')
 
 from playwright.sync_api import sync_playwright
 

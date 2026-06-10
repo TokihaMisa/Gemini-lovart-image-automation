@@ -2,10 +2,26 @@ import os
 import subprocess
 import threading
 import time
+import atexit
 from pathlib import Path
 
 import gradio as gr
 import yaml
+
+active_processes = []
+
+def cleanup_processes():
+    for p in active_processes:
+        try:
+            if p.poll() is None:
+                if os.name == 'nt':
+                    subprocess.run(['taskkill', '/F', '/T', '/PID', str(p.pid)], capture_output=True)
+                else:
+                    p.kill()
+        except Exception:
+            pass
+
+atexit.register(cleanup_processes)
 
 
 def load_config() -> dict:
@@ -153,6 +169,7 @@ def run_process(excel_file, custom_output_dir, prompt_source, lovart_mode, lovar
         errors="replace",
         bufsize=1
     )
+    active_processes.append(process)
     
     logs = []
     current_product = "初始化中..."
