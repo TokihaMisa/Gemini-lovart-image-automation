@@ -31,6 +31,9 @@ if __name__ == "__main__":
 
     from webui import build_ui
     import webview
+    
+    # 强制将 WebView2 的用户数据目录设为独立文件夹，避免因权限混淆或幽灵进程锁定导致的 0x8007139F 错误
+    os.environ["WEBVIEW2_USER_DATA_FOLDER"] = os.path.abspath("data/webview_cache")
 
     demo = build_ui()
     # 启动 Gradio 服务器，不阻塞主线程
