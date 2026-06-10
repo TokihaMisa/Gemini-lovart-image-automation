@@ -32,18 +32,46 @@ if __name__ == "__main__":
     if "--run-tkinter-splash" in sys.argv:
         import tkinter as tk
         from tkinter import ttk
+        import sys
+        import threading
+        import queue
+
         root = tk.Tk()
         root.overrideredirect(True)
         root.attributes('-topmost', True)
-        w, h = 320, 110
+        w, h = 340, 130
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
         root.geometry(f'{w}x{h}+{int(sw/2-w/2)}+{int(sh/2-h/2)}')
         f = tk.Frame(root, highlightbackground='#6366f1', highlightthickness=2, bg='white')
         f.pack(fill='both', expand=True)
-        tk.Label(f, text='🚀 Lovart AI 引擎启动中...', font=('Microsoft YaHei', 12, 'bold'), bg='white', fg='#333333').pack(pady=(20, 5))
-        p = ttk.Progressbar(f, orient='horizontal', length=260, mode='indeterminate')
-        p.pack(pady=10)
+        tk.Label(f, text='🚀 Lovart AI 引擎启动中...', font=('Microsoft YaHei', 12, 'bold'), bg='white', fg='#333333').pack(pady=(15, 2))
+        
+        status_var = tk.StringVar(value="正在初始化系统组件...")
+        tk.Label(f, textvariable=status_var, font=('Microsoft YaHei', 9), bg='white', fg='#666666').pack(pady=(0, 5))
+
+        p = ttk.Progressbar(f, orient='horizontal', length=280, mode='indeterminate')
+        p.pack(pady=5)
         p.start(15)
+
+        q = queue.Queue()
+        def read_stdin():
+            try:
+                for line in sys.stdin:
+                    q.put(line.strip())
+            except Exception:
+                pass
+        threading.Thread(target=read_stdin, daemon=True).start()
+
+        def update_status():
+            try:
+                while True:
+                    msg = q.get_nowait()
+                    status_var.set(msg)
+            except queue.Empty:
+                pass
+            root.after(100, update_status)
+
+        root.after(100, update_status)
         root.mainloop()
         sys.exit(0)
 
@@ -59,11 +87,20 @@ if __name__ == "__main__":
             cmd = [sys.executable, __file__, "--run-tkinter-splash"]
         
         creation_flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-        splash_proc = subprocess.Popen(cmd, creationflags=creation_flags)
+        splash_proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, text=True, creationflags=creation_flags)
     except Exception:
         pass
 
     try:
+        def set_status(msg):
+            if splash_proc and splash_proc.poll() is None and splash_proc.stdin:
+                try:
+                    splash_proc.stdin.write(msg + "\n")
+                    splash_proc.stdin.flush()
+                except Exception:
+                    pass
+
+        set_status("正在加载核心组件模型 (这可能需要几秒钟)...")
         from webui import build_ui
         import time
         import webbrowser
@@ -90,10 +127,15 @@ if __name__ == "__main__":
                     
             webbrowser.open(url)
 
+        set_status("正在构建 WebUI 控制面板大纲...")
         demo = build_ui()
+        
+        set_status("正在启动本地服务 (自动分配可用端口)...")
         _, local_url, _ = demo.launch(server_name="127.0.0.1", prevent_thread_lock=True)
 
         theme_url = local_url.rstrip('/') + '/?__theme=dark'
+        
+        set_status("即将完成，准备唤醒浏览器窗口...")
         
         # 启动完成后立即关闭动画
         if splash_proc:
