@@ -4,9 +4,9 @@ import multiprocessing
 
 # 修复 PyInstaller --windowed 无控制台模式下 sys.stdout 为 None 导致 Uvicorn 崩溃的 BUG
 if sys.stdout is None:
-    sys.stdout = open(os.devnull, "w")
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
 if sys.stderr is None:
-    sys.stderr = open(os.devnull, "w")
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
