@@ -29,10 +29,41 @@ if __name__ == "__main__":
             print(res)
         sys.exit(0)
 
+    if "--run-tkinter-splash" in sys.argv:
+        import tkinter as tk
+        from tkinter import ttk
+        root = tk.Tk()
+        root.overrideredirect(True)
+        root.attributes('-topmost', True)
+        w, h = 320, 110
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.geometry(f'{w}x{h}+{int(sw/2-w/2)}+{int(sh/2-h/2)}')
+        f = tk.Frame(root, highlightbackground='#6366f1', highlightthickness=2, bg='white')
+        f.pack(fill='both', expand=True)
+        tk.Label(f, text='🚀 Lovart AI 引擎启动中...', font=('Microsoft YaHei', 12, 'bold'), bg='white', fg='#333333').pack(pady=(20, 5))
+        p = ttk.Progressbar(f, orient='horizontal', length=260, mode='indeterminate')
+        p.pack(pady=10)
+        p.start(15)
+        root.mainloop()
+        sys.exit(0)
+
     from webui import build_ui
     import subprocess
     import time
     import webbrowser
+    
+    # 启动进度条动画 (Splash Screen)
+    splash_proc = None
+    try:
+        if getattr(sys, 'frozen', False):
+            cmd = [sys.executable, "--run-tkinter-splash"]
+        else:
+            cmd = [sys.executable, __file__, "--run-tkinter-splash"]
+        
+        creation_flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        splash_proc = subprocess.Popen(cmd, creationflags=creation_flags)
+    except Exception:
+        pass
 
     def open_as_native_app(url):
         # 优先尝试使用 Edge 的 App 模式 (Windows 10/11 必定自带)
@@ -65,6 +96,13 @@ if __name__ == "__main__":
 
     theme_url = local_url.rstrip('/') + '/?__theme=dark'
     
+    # 启动完成后关闭动画
+    if splash_proc:
+        try:
+            splash_proc.terminate()
+        except Exception:
+            pass
+            
     print(f"\n✅ 服务已启动！内部运行地址: {theme_url}")
     print("正在通过 Edge/Chrome 内核为您唤醒原生客户端窗口...")
     open_as_native_app(theme_url)
