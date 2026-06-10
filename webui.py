@@ -805,12 +805,6 @@ def build_ui():
             outputs=progress_dashboard
         )
         
-        open_dir_btn.click(
-            fn=open_directory,
-            inputs=[custom_output_dir],
-            outputs=[]
-        )
-
         def shutdown_server():
             import os
             import threading

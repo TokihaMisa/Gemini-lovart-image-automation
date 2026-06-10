@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "D:\image-automation\app.py", line 93, in <module>
+    demo = build_ui()
+  File "D:\image-automation\webui.py", line 808, in build_ui
+    open_dir_btn.click(
+    ^^^^^^^^^^^^
+NameError: name 'open_dir_btn' is not defined
