@@ -6,8 +6,16 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
     if "--run-main" in sys.argv:
         sys.argv.remove("--run-main")
-        from main import main as run_main
-        run_main()
+        try:
+            from main import main as run_main
+            run_main()
+        except Exception as e:
+            import traceback
+            print("\n" + "="*50)
+            print("❌ 核心程序发生致命错误 (Fatal Error)")
+            print("可能原因: 网络连接被重置 (代理/VPN冲突) 或 API 配置错误。")
+            print("="*50)
+            traceback.print_exc()
         sys.exit(0)
 
     from webui import build_ui
