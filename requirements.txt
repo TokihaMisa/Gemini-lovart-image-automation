@@ -6,4 +6,3 @@ tenacity
 rich
 gradio
 pydantic
-pywebview
