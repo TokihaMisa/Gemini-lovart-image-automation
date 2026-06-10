@@ -3,9 +3,13 @@ import sys
 import multiprocessing
 
 # 强制将 WebView2 的用户数据目录设为独立文件夹，必须在 import webview 之前执行并确保目录存在！
-webview_dir = os.path.abspath("data/webview_cache")
+import tempfile
+webview_dir = os.path.join(tempfile.gettempdir(), "lovart_webview2_cache")
 os.makedirs(webview_dir, exist_ok=True)
 os.environ["WEBVIEW2_USER_DATA_FOLDER"] = webview_dir
+
+# 如果用户以管理员身份(Administrator)运行，WebView2 会直接崩溃 (0x8007139F)。必须加上 --no-sandbox 参数才能在管理员模式下运行。
+os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = "--no-sandbox"
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
