@@ -709,7 +709,10 @@ def build_ui():
     config = load_config()
     default_output_dir = config.get("output_dir", str(Path("output").absolute()))
     with gr.Blocks(title="Lovart Image Automation WebUI", css=CUSTOM_CSS, js="() => document.documentElement.classList.add('dark')") as demo:
-        gr.HTML("<h1 class='gradient-text' style='text-align: center; margin-top: 20px;'>🎨 Lovart Image Automation Pro</h1>")
+        with gr.Row():
+            gr.HTML("<h1 class='gradient-text' style='text-align: center; margin-top: 20px; flex-grow: 1;'>🎨 Lovart Image Automation Pro</h1>")
+            shutdown_btn = gr.Button("🛑 完全退出并关闭服务", variant="stop", scale=0, min_width=180, elem_classes="action-btn")
+
         gr.Markdown("<p style='text-align: center; color: gray;'>全自动商品图生成与托管中心</p>")
 
         with gr.Tabs():
@@ -800,6 +803,28 @@ def build_ui():
                 gemini_key, nvidia_key, lovart_access, lovart_secret
             ],
             outputs=progress_dashboard
+        )
+        
+        open_dir_btn.click(
+            fn=open_directory,
+            inputs=[custom_output_dir],
+            outputs=[]
+        )
+
+        def shutdown_server():
+            import os
+            import threading
+            import time
+            def kill():
+                time.sleep(1)
+                os._exit(0)
+            threading.Thread(target=kill).start()
+            return gr.update(value="进程已结束，请关闭本页面", interactive=False)
+
+        shutdown_btn.click(
+            fn=shutdown_server,
+            inputs=[],
+            outputs=[shutdown_btn]
         )
         
         check_update_btn.click(
