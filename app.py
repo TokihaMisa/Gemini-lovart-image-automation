@@ -2,6 +2,11 @@ import os
 import sys
 import multiprocessing
 
+# 强制将 WebView2 的用户数据目录设为独立文件夹，必须在 import webview 之前执行并确保目录存在！
+webview_dir = os.path.abspath("data/webview_cache")
+os.makedirs(webview_dir, exist_ok=True)
+os.environ["WEBVIEW2_USER_DATA_FOLDER"] = webview_dir
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     if "--run-main" in sys.argv:
@@ -31,9 +36,6 @@ if __name__ == "__main__":
 
     from webui import build_ui
     import webview
-    
-    # 强制将 WebView2 的用户数据目录设为独立文件夹，避免因权限混淆或幽灵进程锁定导致的 0x8007139F 错误
-    os.environ["WEBVIEW2_USER_DATA_FOLDER"] = os.path.abspath("data/webview_cache")
 
     demo = build_ui()
     # 启动 Gradio 服务器，不阻塞主线程。允许系统自动分配可用端口，避免 7860 端口占用冲突。
