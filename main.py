@@ -273,7 +273,7 @@ def _record_failure(product, status: str, error: str = "", project_url: str = ""
     if os.environ.get("UI_MODE") == "1":
         import json
         is_manual = (status == "needs_manual_action")
-        print(f"[UI_FAIL] {json.dumps({'id': product.id, 'reason': error, 'is_manual': is_manual}, ensure_ascii=False)}")
+        print(f"[UI_FAIL] {json.dumps({'id': product.id, 'reason': error, 'is_manual': is_manual})}")
 
 
 def _lovart_project_url(project_id: str = "") -> str:
@@ -730,7 +730,7 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                     print(f"\n  >>> {url}")
                 if os.environ.get("UI_MODE") == "1":
                     import json
-                    print(f"[UI_SUCCESS] {json.dumps({'id': product.id, 'url': url or '', 'used_model': result.get('used_model', 'unknown')}, ensure_ascii=False)}")
+                    print(f"[UI_SUCCESS] {json.dumps({'id': product.id, 'url': url or '', 'used_model': result.get('used_model', 'unknown')})}")
                 success += 1
                 status = read_status(product_dir)
                 summary_rows.append({
@@ -1023,7 +1023,7 @@ def main(argv=None):
             from utils import split_image_roles
             roles = split_image_roles(product.image_paths)
             img = str(roles["product_image"]).replace("\\", "/") if roles["product_image"] else ""
-            print(f"[UI_PRODUCT] {json.dumps({'id': product.id, 'name': product.name_cn, 'image': img}, ensure_ascii=False)}")
+            print(f"[UI_PRODUCT] {json.dumps({'id': product.id, 'name': product.name_cn, 'image': img})}")
 
     if args.dry_run:
         success, fail, skipped, still_running = _dry_run_products(products, logger, run_dir)
