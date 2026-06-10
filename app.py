@@ -36,11 +36,12 @@ if __name__ == "__main__":
     os.environ["WEBVIEW2_USER_DATA_FOLDER"] = os.path.abspath("data/webview_cache")
 
     demo = build_ui()
-    # 启动 Gradio 服务器，不阻塞主线程
-    demo.launch(server_name="127.0.0.1", server_port=7860, prevent_thread_lock=True)
+    # 启动 Gradio 服务器，不阻塞主线程。允许系统自动分配可用端口，避免 7860 端口占用冲突。
+    _, local_url, _ = demo.launch(server_name="127.0.0.1", prevent_thread_lock=True)
 
+    theme_url = local_url.rstrip('/') + '/?__theme=dark'
     # 启动原生窗口并加载该 URL
-    webview.create_window('Lovart自动化助手', 'http://127.0.0.1:7860/?__theme=dark', width=1024, height=768)
+    webview.create_window('Lovart自动化助手', theme_url, width=1024, height=768)
     webview.start()
     
     # 强制结束所有残留的 Gradio 后台线程，防止产生幽灵进程
