@@ -30,8 +30,34 @@ if __name__ == "__main__":
         sys.exit(0)
 
     from webui import build_ui
-    import webbrowser
+    import subprocess
     import time
+    import webbrowser
+
+    def open_as_native_app(url):
+        # 优先尝试使用 Edge 的 App 模式 (Windows 10/11 必定自带)
+        edge_paths = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+        ]
+        for path in edge_paths:
+            if os.path.exists(path):
+                subprocess.Popen([path, f"--app={url}"])
+                return
+        
+        # 其次尝试 Chrome 的 App 模式
+        chrome_paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expanduser(r"~\AppData\Local\Google\Chrome\Application\chrome.exe")
+        ]
+        for path in chrome_paths:
+            if os.path.exists(path):
+                subprocess.Popen([path, f"--app={url}"])
+                return
+                
+        # 如果都没找到，兜底使用普通浏览器打开
+        webbrowser.open(url)
 
     demo = build_ui()
     # 启动 Gradio 服务器，不阻塞主线程。允许系统自动分配可用端口，避免 7860 端口占用冲突。
@@ -39,9 +65,9 @@ if __name__ == "__main__":
 
     theme_url = local_url.rstrip('/') + '/?__theme=dark'
     
-    print(f"\n✅ 服务已启动！请在浏览器中访问: {theme_url}")
-    print("正在自动为您打开默认浏览器...")
-    webbrowser.open(theme_url)
+    print(f"\n✅ 服务已启动！内部运行地址: {theme_url}")
+    print("正在通过 Edge/Chrome 内核为您唤醒原生客户端窗口...")
+    open_as_native_app(theme_url)
     
     # 保持主进程存活，直到用户手动关闭黑框
     try:
