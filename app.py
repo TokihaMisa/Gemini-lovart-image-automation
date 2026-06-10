@@ -47,12 +47,8 @@ if __name__ == "__main__":
         root.mainloop()
         sys.exit(0)
 
-    from webui import build_ui
+    # 极速启动进度条动画 (在任何庞大模块加载之前立刻弹出)
     import subprocess
-    import time
-    import webbrowser
-    
-    # 启动进度条动画 (Splash Screen)
     splash_proc = None
     try:
         if getattr(sys, 'frozen', False):
@@ -64,6 +60,10 @@ if __name__ == "__main__":
         splash_proc = subprocess.Popen(cmd, creationflags=creation_flags)
     except Exception:
         pass
+
+    from webui import build_ui
+    import time
+    import webbrowser
 
     def open_as_native_app(url):
         # 优先尝试使用 Edge 的 App 模式 (Windows 10/11 必定自带)
