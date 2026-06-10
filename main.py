@@ -822,6 +822,8 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
             })
 
         write_run_summary(run_dir, summary_rows)
+        from utils import organize_output_folders
+        organize_output_folders()
 
     write_run_summary(run_dir, summary_rows)
     return success, fail, skipped, still_running

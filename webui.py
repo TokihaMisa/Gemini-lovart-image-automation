@@ -639,7 +639,7 @@ def pick_directory(current_dir):
 def build_ui():
     config = load_config()
     default_output_dir = config.get("output_dir", str(Path("output").absolute()))
-    with gr.Blocks(title="Lovart Image Automation WebUI", css=CUSTOM_CSS) as demo:
+    with gr.Blocks(title="Lovart Image Automation WebUI", css=CUSTOM_CSS, js="() => document.documentElement.classList.add('dark')") as demo:
         gr.HTML("<h1 class='gradient-text' style='text-align: center; margin-top: 20px;'>🎨 Lovart Image Automation Pro</h1>")
         gr.Markdown("<p style='text-align: center; color: gray;'>全自动商品图生成与托管中心</p>")
 
