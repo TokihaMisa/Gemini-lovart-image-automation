@@ -18,6 +18,17 @@ if __name__ == "__main__":
             traceback.print_exc()
         sys.exit(0)
 
+    if "--run-tkinter-dir" in sys.argv:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.attributes('-topmost', True)
+        root.withdraw()
+        res = filedialog.askdirectory()
+        if res:
+            print(res)
+        sys.exit(0)
+
     from webui import build_ui
     import webview
 

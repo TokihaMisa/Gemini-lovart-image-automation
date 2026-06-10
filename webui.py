@@ -686,15 +686,18 @@ def pick_directory(current_dir):
     import subprocess
     import sys
     import os
-    # Use a subprocess to run tkinter, avoiding Gradio background thread deadlocks
-    script = "import tkinter as tk; from tkinter import filedialog; root = tk.Tk(); root.attributes('-topmost', True); root.withdraw(); print(filedialog.askdirectory())"
     try:
         kwargs = {}
         if os.name == 'nt':
             kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
             
-        # Use sys.executable to ensure we use the same Python environment
-        result = subprocess.check_output([sys.executable, "-c", script], text=True, **kwargs).strip()
+        if getattr(sys, 'frozen', False):
+            cmd = [sys.executable, "--run-tkinter-dir"]
+        else:
+            script = "import tkinter as tk; from tkinter import filedialog; root = tk.Tk(); root.attributes('-topmost', True); root.withdraw(); print(filedialog.askdirectory())"
+            cmd = [sys.executable, "-c", script]
+
+        result = subprocess.check_output(cmd, text=True, **kwargs).strip()
         if result:
             return result
     except Exception:
