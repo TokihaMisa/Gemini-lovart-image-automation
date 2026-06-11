@@ -3,7 +3,7 @@ chcp 65001 >nul
 echo Start building...
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
-uv run --no-sync pyinstaller --noconfirm --onedir --windowed --name "Lovart_Auto" --add-data "preamble.txt;." --add-data "config.example.yaml;." --add-data ".env.example;." --collect-all gradio --collect-all gradio_client --collect-data playwright --collect-data safehttpx --collect-data groovy --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto --hidden-import uvicorn.lifespan.on --hidden-import websockets.legacy.server --collect-data uvicorn app.py
+uv run --no-sync pyinstaller --noconfirm --onedir --windowed --name "Lovart_Auto" --add-data "preamble.txt;." --add-data "config.example.yaml;." --add-data ".env.example;." --collect-all gradio --collect-all gradio_client --collect-data playwright --collect-data safehttpx --collect-data groovy --hidden-import PIL --hidden-import PIL.Image --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto --hidden-import uvicorn.lifespan.on --hidden-import websockets.legacy.server --collect-data uvicorn app.py
 
 echo.
 echo ----------------------------------------
