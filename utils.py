@@ -11,6 +11,18 @@ from pathlib import Path
 import yaml
 
 
+def get_resource_path(filename: str) -> Path:
+    """Resolve file path, prioritizing CWD, then falling back to PyInstaller _internal MEIPASS."""
+    cwd_path = Path(filename)
+    if cwd_path.exists():
+        return cwd_path
+    if hasattr(sys, '_MEIPASS'):
+        mei_path = Path(sys._MEIPASS) / filename
+        if mei_path.exists():
+            return mei_path
+    return cwd_path
+
+
 def load_config(path: str = "config.yaml") -> dict:
     load_dotenv()
     with open(path, "r", encoding="utf-8") as f:

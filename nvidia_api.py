@@ -53,7 +53,8 @@ class NvidiaAPI:
         image_size: str = "",
     ) -> str:
         product_id = product_id or product_name_cn
-        preamble = Path("preamble.txt").read_text(encoding="utf-8")
+        from utils import get_resource_path
+        preamble = get_resource_path("preamble.txt").read_text(encoding="utf-8")
         prompt = f"{preamble}\n\n---\n\n{build_design_prompt(product_name_cn, language, selling_points, image_size=image_size)}"
         images = image_paths if self.send_images else []
 

@@ -41,7 +41,8 @@ class GeminiBot:
                 self._save_debug_snapshot(product_id, "thinking-mode-not-selected")
                 raise RuntimeError("Gemini Thinking mode could not be selected")
 
-            preamble = Path("preamble.txt").read_text(encoding="utf-8")
+            from utils import get_resource_path
+            preamble = get_resource_path("preamble.txt").read_text(encoding="utf-8")
             previous_response_count = self._response_count()
             self._send_message(preamble)
             self.logger.info("Gemini: preamble sent, waiting for reply")
