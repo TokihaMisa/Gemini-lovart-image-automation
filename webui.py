@@ -67,7 +67,7 @@ lovart:
   max_confirmation_rounds: 5
   max_auto_confirm_credits: 10
   wait_timeout: 10800
-  poll_interval: 5
+  poll_interval: 10
   timeout: 600
   upload_attempts: 3
   upload_retry_delay: 2
@@ -278,149 +278,174 @@ def run_process(excel_file, custom_output_dir, prompt_source, lovart_mode, lovar
     yield render_board()
     
     current_pid = None
-    import time, json
+    import time, json, threading, queue
+    
     last_yield_time = time.time()
     
+    q = queue.Queue()
+    def _read_output(out, q):
+        try:
+            for line in iter(out.readline, ''):
+                q.put(line)
+        except Exception:
+            pass
+        finally:
+            out.close()
+            
+    t = threading.Thread(target=_read_output, args=(process.stdout, q), daemon=True)
+    t.start()
+    
     while True:
-        line = process.stdout.readline()
-        if not line and process.poll() is not None:
-            break
-        if line:
-            clean_line = ansi_escape.sub('', line).strip()
-            if not clean_line:
-                continue
-                
-            is_progress = clean_line.startswith("[UI_PROGRESS]")
-            is_uiproduct = clean_line.startswith("[UI_PRODUCT]")
-            is_uisuccess = clean_line.startswith("[UI_SUCCESS]")
-            is_uifail = clean_line.startswith("[UI_FAIL]")
-            is_uimodel = clean_line.startswith("[UI_MODEL]")
+        try:
+            line = q.get(timeout=1.0)
+        except queue.Empty:
+            if process.poll() is not None and not t.is_alive():
+                break
+            # Heartbeat to prevent Gradio/WebSocket from dropping the connection
+            if time.time() - last_yield_time >= 1.0:
+                yield render_board()
+                last_yield_time = time.time()
+            continue
+
+        if not line:
+            if process.poll() is not None:
+                break
+            continue
+
+        clean_line = ansi_escape.sub('', line).strip()
+        if not clean_line:
+            continue
             
-            if not is_progress and not is_uiproduct and not is_uisuccess and not is_uifail and not is_uimodel:
-                logs.append(clean_line)
-                if len(logs) > 30:
-                    logs.pop(0)
-                # If log contains a product ID, append to its per-card logs
-                if current_pid and current_pid in clean_line and current_pid in products_dict:
-                    # Strip timestamps or common prefixes to make it cleaner on the card
-                    clean_msg = clean_line.split("]")[-1].strip() if "]" in clean_line else clean_line
-                    if "INFO" not in clean_line: # ignore basic INFO lines to save space
-                        products_dict[current_pid].setdefault("logs", []).append(f"▶ {clean_msg}")
-            
-            if is_uimodel:
-                try:
-                    model_name = clean_line.replace("[UI_MODEL]", "").strip()
-                    current_model = model_name
-                    if current_pid and current_pid in products_dict:
-                        products_dict[current_pid]["used_model"] = model_name
-                        models_att = products_dict[current_pid].setdefault("models_attempted", [])
-                        if model_name not in models_att:
-                            models_att.append(model_name)
-                        products_dict[current_pid].setdefault("logs", []).append(f"<span style='color: #d946ef;'>🔄 正在尝试模型: {model_name}</span>")
-                except:
-                    pass
-            elif is_uiproduct:
-                try:
-                    data = json.loads(clean_line.replace("[UI_PRODUCT]", "").strip())
-                    pid = data["id"]
-                    if pid not in products_dict:
-                        products_dict[pid] = {"name": data["name"], "status": "⏳ 等待处理", "color": "#94a3b8", "logs": []}
-                    products_dict[pid]["image"] = data.get("image", "")
-                except:
-                    pass
-            elif is_uisuccess:
-                try:
-                    data = json.loads(clean_line.replace("[UI_SUCCESS]", "").strip())
-                    pid = data["id"]
-                    if pid in products_dict:
-                        products_dict[pid]["url"] = data.get("url", "")
-                        model = data.get("used_model", "")
-                        if model and model != "unknown":
-                            products_dict[pid]["used_model"] = model
-                            products_dict[pid].setdefault("logs", []).append(f"<span style='color: #a855f7;'>✨ 最终使用大模型: <b>{model}</b></span>")
-                except:
-                    pass
-            elif is_uifail:
-                try:
-                    data = json.loads(clean_line.replace("[UI_FAIL]", "").strip())
-                    pid = data["id"]
-                    reason = data.get("reason", "未知错误")
-                    is_manual = data.get("is_manual", False)
-                    if pid in products_dict:
-                        status_color = "#f59e0b" if is_manual else "#ef4444"
-                        products_dict[pid]["status"] = f"{'⚠️' if is_manual else '❌'} {reason}"
-                        products_dict[pid]["color"] = status_color
-                        current_status = f"❌ {pid} 失败" if not is_manual else f"⚠️ {pid} 待确认"
-                        products_dict[pid].setdefault("logs", []).append(f"<span style='color: {'#fbbf24' if is_manual else '#f87171'}'>[报错] {reason}</span>")
-                except:
-                    pass
-            elif "| size=" in clean_line and "lang=" in clean_line and clean_line.startswith("["):
-                parts = clean_line.split("|")
-                if len(parts) >= 2:
-                    pid_part = parts[0].strip()
-                    pid = pid_part.split("]")[1].strip() if "]" in pid_part else pid_part
-                    name = parts[1].strip()
-                    if pid not in products_dict:
-                        products_dict[pid] = {"name": name, "status": "⏳ 等待处理", "color": "#94a3b8", "logs": []}
-                        
-            if "Gemini requires login" in clean_line:
-                current_status = "⚠️ 等待浏览器登录"
-                status_color = "#eab308"
-            elif clean_line.startswith("Processing ") or clean_line.startswith("processing "):
-                pid = clean_line.split()[-1].strip()
-                if pid in products_dict:
-                    current_pid = pid
-                    current_product = f"{pid} - {products_dict[pid]['name']}"
-                    current_status = "🔄 提取卖点 & 构思画面"
-                    status_color = "#8b5cf6"
-                    products_dict[pid]["status"] = current_status
-                    products_dict[pid]["color"] = status_color
-                    products_dict[pid].setdefault("logs", []).append("▶ 提取卖点 & 构思画面...")
-            elif "Gemini done" in clean_line:
-                current_status = "✅ 提示词生成完毕"
-                status_color = "#06b6d4"
+        is_progress = clean_line.startswith("[UI_PROGRESS]")
+        is_uiproduct = clean_line.startswith("[UI_PRODUCT]")
+        is_uisuccess = clean_line.startswith("[UI_SUCCESS]")
+        is_uifail = clean_line.startswith("[UI_FAIL]")
+        is_uimodel = clean_line.startswith("[UI_MODEL]")
+        
+        if not is_progress and not is_uiproduct and not is_uisuccess and not is_uifail and not is_uimodel:
+            logs.append(clean_line)
+            if len(logs) > 30:
+                logs.pop(0)
+            # If log contains a product ID, append to its per-card logs
+            if current_pid and current_pid in clean_line and current_pid in products_dict:
+                # Strip timestamps or common prefixes to make it cleaner on the card
+                clean_msg = clean_line.split("]")[-1].strip() if "]" in clean_line else clean_line
+                if "INFO" not in clean_line: # ignore basic INFO lines to save space
+                    products_dict[current_pid].setdefault("logs", []).append(f"▶ {clean_msg}")
+        
+        if is_uimodel:
+            try:
+                model_name = clean_line.replace("[UI_MODEL]", "").strip()
+                current_model = model_name
                 if current_pid and current_pid in products_dict:
-                    products_dict[current_pid]["status"] = current_status
-                    products_dict[current_pid]["color"] = status_color
-                    products_dict[current_pid].setdefault("logs", []).append("▶ Gemini 提示词生成完毕")
-            elif "Lovart API: sent" in clean_line or "Lovart API: Sent" in clean_line:
-                current_status = "🎨 提交生成任务"
+                    products_dict[current_pid]["used_model"] = model_name
+                    models_att = products_dict[current_pid].setdefault("models_attempted", [])
+                    if model_name not in models_att:
+                        models_att.append(model_name)
+                    products_dict[current_pid].setdefault("logs", []).append(f"<span style='color: #d946ef;'>🔄 正在尝试模型: {model_name}</span>")
+            except:
+                pass
+        elif is_uiproduct:
+            try:
+                data = json.loads(clean_line.replace("[UI_PRODUCT]", "").strip())
+                pid = data["id"]
+                if pid not in products_dict:
+                    products_dict[pid] = {"name": data["name"], "status": "⏳ 等待处理", "color": "#94a3b8", "logs": []}
+                products_dict[pid]["image"] = data.get("image", "")
+            except:
+                pass
+        elif is_uisuccess:
+            try:
+                data = json.loads(clean_line.replace("[UI_SUCCESS]", "").strip())
+                pid = data["id"]
+                if pid in products_dict:
+                    products_dict[pid]["url"] = data.get("url", "")
+                    model = data.get("used_model", "")
+                    if model and model != "unknown":
+                        products_dict[pid]["used_model"] = model
+                        products_dict[pid].setdefault("logs", []).append(f"<span style='color: #a855f7;'>✨ 最终使用大模型: <b>{model}</b></span>")
+            except:
+                pass
+        elif is_uifail:
+            try:
+                data = json.loads(clean_line.replace("[UI_FAIL]", "").strip())
+                pid = data["id"]
+                reason = data.get("reason", "未知错误")
+                is_manual = data.get("is_manual", False)
+                if pid in products_dict:
+                    status_color = "#f59e0b" if is_manual else "#ef4444"
+                    products_dict[pid]["status"] = f"{'⚠️' if is_manual else '❌'} {reason}"
+                    products_dict[pid]["color"] = status_color
+                    current_status = f"❌ {pid} 失败" if not is_manual else f"⚠️ {pid} 待确认"
+                    products_dict[pid].setdefault("logs", []).append(f"<span style='color: {'#fbbf24' if is_manual else '#f87171'}'>[报错] {reason}</span>")
+            except:
+                pass
+        elif "| size=" in clean_line and "lang=" in clean_line and clean_line.startswith("["):
+            parts = clean_line.split("|")
+            if len(parts) >= 2:
+                pid_part = parts[0].strip()
+                pid = pid_part.split("]")[1].strip() if "]" in pid_part else pid_part
+                name = parts[1].strip()
+                if pid not in products_dict:
+                    products_dict[pid] = {"name": name, "status": "⏳ 等待处理", "color": "#94a3b8", "logs": []}
+                    
+        if "Gemini requires login" in clean_line:
+            current_status = "⚠️ 等待浏览器登录"
+            status_color = "#eab308"
+        elif clean_line.startswith("Processing ") or clean_line.startswith("processing "):
+            pid = clean_line.split()[-1].strip()
+            if pid in products_dict:
+                current_pid = pid
+                current_product = f"{pid} - {products_dict[pid]['name']}"
+                current_status = "🔄 提取卖点 & 构思画面"
+                status_color = "#8b5cf6"
+                products_dict[pid]["status"] = current_status
+                products_dict[pid]["color"] = status_color
+                products_dict[pid].setdefault("logs", []).append("▶ 提取卖点 & 构思画面...")
+        elif "Gemini done" in clean_line:
+            current_status = "✅ 提示词生成完毕"
+            status_color = "#06b6d4"
+            if current_pid and current_pid in products_dict:
+                products_dict[current_pid]["status"] = current_status
+                products_dict[current_pid]["color"] = status_color
+                products_dict[current_pid].setdefault("logs", []).append("▶ Gemini 提示词生成完毕")
+        elif "Lovart API: sent" in clean_line or "Lovart API: Sent" in clean_line:
+            current_status = "🎨 提交生成任务"
+            status_color = "#f59e0b"
+            if current_pid and current_pid in products_dict:
+                products_dict[current_pid]["status"] = current_status
+                products_dict[current_pid]["color"] = status_color
+                products_dict[current_pid].setdefault("logs", []).append("▶ 正在向 Lovart 提交 API 生成请求...")
+        elif is_progress:
+            parts = clean_line.split("|")
+            if len(parts) >= 2:
+                time_str = parts[0].replace("[UI_PROGRESS]", "").strip()
+                step_str = parts[1].strip()
+                current_status = f"🎨 绘制中 ({time_str} - {step_str})"
                 status_color = "#f59e0b"
                 if current_pid and current_pid in products_dict:
                     products_dict[current_pid]["status"] = current_status
                     products_dict[current_pid]["color"] = status_color
-                    products_dict[current_pid].setdefault("logs", []).append("▶ 正在向 Lovart 提交 API 生成请求...")
-            elif is_progress:
-                parts = clean_line.split("|")
-                if len(parts) >= 2:
-                    time_str = parts[0].replace("[UI_PROGRESS]", "").strip()
-                    step_str = parts[1].strip()
-                    current_status = f"🎨 绘制中 ({time_str} - {step_str})"
-                    status_color = "#f59e0b"
-                    if current_pid and current_pid in products_dict:
-                        products_dict[current_pid]["status"] = current_status
-                        products_dict[current_pid]["color"] = status_color
-                        products_dict[current_pid].setdefault("logs", []).append(f"<span style='color: #60a5fa;'>⏳ 绘制进度: {step_str} | 已用时: {time_str}</span>")
-            elif clean_line.startswith("OK") or "completed" in clean_line.lower() or "SUCCESS" in clean_line:
-                current_status = "🎉 单个商品全部完成"
-                status_color = "#10b981"
-                for pid in products_dict:
-                    if pid in clean_line:
-                        products_dict[pid]["status"] = "🎉 成功生成"
-                        products_dict[pid]["color"] = status_color
-                        products_dict[pid].setdefault("logs", []).append("<span style='color: #4ade80;'>✅ 任务执行成功</span>")
-            elif clean_line.startswith("SKIP"):
-                for pid in products_dict:
-                    if pid in clean_line:
-                        products_dict[pid]["status"] = "⏭️ 已跳过"
-                        products_dict[pid]["color"] = "#64748b"
-                        products_dict[pid].setdefault("logs", []).append("⏭️ 命中缓存，任务已跳过")
-            # Remove the old FAIL parsing since we rely on [UI_FAIL] now
-                
-            # Throttling rendering to avoid freezing UI
-            if time.time() - last_yield_time > 0.5:
-                yield render_board()
-                last_yield_time = time.time()
+                    products_dict[current_pid].setdefault("logs", []).append(f"<span style='color: #60a5fa;'>⏳ 绘制进度: {step_str} | 已用时: {time_str}</span>")
+        elif clean_line.startswith("OK") or "completed" in clean_line.lower() or "SUCCESS" in clean_line:
+            current_status = "🎉 单个商品全部完成"
+            status_color = "#10b981"
+            for pid in products_dict:
+                if pid in clean_line:
+                    products_dict[pid]["status"] = "🎉 成功生成"
+                    products_dict[pid]["color"] = status_color
+                    products_dict[pid].setdefault("logs", []).append("<span style='color: #4ade80;'>✅ 任务执行成功</span>")
+        elif clean_line.startswith("SKIP"):
+            for pid in products_dict:
+                if pid in clean_line:
+                    products_dict[pid]["status"] = "⏭️ 已跳过"
+                    products_dict[pid]["color"] = "#64748b"
+                    products_dict[pid].setdefault("logs", []).append("⏭️ 命中缓存，任务已跳过")
+            
+        # Throttling rendering to avoid freezing UI
+        if time.time() - last_yield_time > 0.5:
+            yield render_board()
+            last_yield_time = time.time()
                 
     yield render_board()
             
@@ -811,6 +836,7 @@ def build_ui():
             import time
             def kill():
                 time.sleep(1)
+                cleanup_processes()
                 os._exit(0)
             threading.Thread(target=kill).start()
             return gr.update(value="进程已结束，请关闭本页面", interactive=False)

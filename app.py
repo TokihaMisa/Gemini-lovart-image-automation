@@ -17,9 +17,15 @@ if __name__ == "__main__":
             run_main()
         except Exception as e:
             import traceback
+            err_msg = str(e)
             print("\n" + "="*50)
             print("❌ 核心程序发生致命错误 (Fatal Error)")
-            print("可能原因: 网络连接被重置 (代理/VPN冲突) 或 API 配置错误。")
+            if "Target closed" in err_msg or "Browser has been closed" in err_msg:
+                print("可能原因: 浏览器被意外关闭或崩溃。")
+            elif "lock" in err_msg.lower() or "user data directory is already in use" in err_msg.lower():
+                print("可能原因: 后台有残留的僵尸浏览器进程（如 chrome.exe）锁住了文件夹！请打开任务管理器，强制结束所有残余的 chrome.exe 进程后重试！")
+            else:
+                print(f"报错详情: {err_msg}")
             print("="*50)
             traceback.print_exc()
         sys.exit(0)

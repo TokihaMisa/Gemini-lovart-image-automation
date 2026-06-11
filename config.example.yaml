@@ -62,7 +62,7 @@ lovart:
   max_confirmation_rounds: 5
   max_auto_confirm_credits: 10
   wait_timeout: 10800
-  poll_interval: 5
+  poll_interval: 10
   timeout: 600
   upload_attempts: 3
   upload_retry_delay: 2

@@ -103,7 +103,7 @@ class LovartBot:
             access_key=access_key,
             secret_key=secret_key,
             timeout=self.cfg.get("timeout", 600),
-            poll_interval=self.cfg.get("poll_interval", 5),
+            poll_interval=self.cfg.get("poll_interval", 10),
         )
         self._fast_mode = False
 
@@ -681,7 +681,7 @@ class LovartBot:
 
     def _poll_with_progress(self, thread_id: str, project_id: str, product_dir: Path | None = None) -> dict:
         timeout = self.cfg.get("wait_timeout", 10800)
-        interval = self.cfg.get("poll_interval", 5)
+        interval = self.cfg.get("poll_interval", 10)
         deadline = time.time() + timeout
         status_names = {
             "pending": "排队中...",

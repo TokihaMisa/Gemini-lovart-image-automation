@@ -34,7 +34,15 @@ class GeminiBot:
         self.logger.info(f"Gemini: starting for '{product_name_cn}'")
 
         try:
-            self.page.goto("https://gemini.google.com/app", wait_until="domcontentloaded")
+            try:
+                self.page.goto("https://gemini.google.com/app", wait_until="domcontentloaded")
+            except Exception as e:
+                if "interrupted by another navigation" in str(e):
+                    self.logger.info("Gemini: Navigation interrupted by redirect. Retrying...")
+                    self.page.wait_for_timeout(2000)
+                    self.page.goto("https://gemini.google.com/app", wait_until="domcontentloaded")
+                else:
+                    raise
             self.page.wait_for_timeout(4000)
             self._start_temporary_chat()
             if self.cfg.get("thinking_mode", True) and not self._select_thinking_mode():

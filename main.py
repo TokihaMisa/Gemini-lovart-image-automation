@@ -918,6 +918,23 @@ def _resolve_browser_executable_for_run(
         print(f"  Browser executable not found: {manual_path}")
 
 
+def _kill_zombie_browsers(user_data_dir: Path, logger):
+    import os
+    import subprocess
+    if os.name != 'nt':
+        return
+    try:
+        dir_name = user_data_dir.name
+        cmd = [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            f"Get-WmiObject Win32_Process | Where-Object {{ $_.Name -match 'chrome.exe|msedge.exe' -and $_.CommandLine -match '{dir_name}' }} | Stop-Process -Force"
+        ]
+        subprocess.run(cmd, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    except Exception as e:
+        logger.warning(f"Failed to kill zombie browsers: {e}")
+
 def _run_browser_flow(config, products, lovart, logger, run_dir, resume=True, wait_for_ready=True):
     browser_cfg = config["browser"]
     user_data_dir = Path(browser_cfg["user_data_dir"])
@@ -930,6 +947,8 @@ def _run_browser_flow(config, products, lovart, logger, run_dir, resume=True, wa
         logger.info(f"Using browser executable: {chrome_exe}")
     else:
         logger.warning("Chrome/Edge executable not found; using Playwright bundled Chromium")
+
+    _kill_zombie_browsers(user_data_dir, logger)
 
     with sync_playwright() as pw:
         logger.info("Launching browser for Gemini")
