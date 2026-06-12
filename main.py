@@ -387,7 +387,7 @@ def _backfill_result_project_urls(results_path: str | Path = None) -> int:
 
     if changed:
         try:
-            with path.open("w", encoding="utf-8", newline="") as fh:
+            with results_path.open("w", encoding="utf-8", newline="") as fh:
                 writer = csv.DictWriter(fh, fieldnames=fieldnames)
                 writer.writeheader()
                 for product_id in order:
