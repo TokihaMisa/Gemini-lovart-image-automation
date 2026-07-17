@@ -1160,6 +1160,13 @@ CUSTOM_CSS = """
 }
 """
 
+DARK_MODE_JS = "() => document.documentElement.classList.add('dark')"
+
+
+def gradio_launch_kwargs() -> dict[str, str]:
+    """Return Gradio 6 launch-time styling options shared by both entry points."""
+    return {"css": CUSTOM_CSS, "js": DARK_MODE_JS}
+
 def manual_save_keys(gemini, nvidia, access, secret):
     save_env(gemini, nvidia, access, secret)
     return "✅ 密钥已成功保存到 .env 文件中"
@@ -1248,7 +1255,7 @@ def build_ui():
         nvidia_update = gr.update(value=updated_nvidia) if updated_nvidia != nvidia_model else gr.skip()
         return gemini_update, nvidia_update
 
-    with gr.Blocks(title="Lovart Image Automation WebUI", css=CUSTOM_CSS, js="() => document.documentElement.classList.add('dark')") as demo:
+    with gr.Blocks(title="Lovart Image Automation WebUI") as demo:
         gemini_catalog_state = gr.State([])
         nvidia_catalog_state = gr.State([])
         with gr.Row():
@@ -1594,4 +1601,10 @@ if __name__ == "__main__":
     demo = build_ui()
     import os
     output_dir = os.path.abspath("output")
-    demo.launch(server_name="127.0.0.1", server_port=7860, inbrowser=True, allowed_paths=[output_dir])
+    demo.launch(
+        server_name="127.0.0.1",
+        server_port=7860,
+        inbrowser=True,
+        allowed_paths=[output_dir],
+        **gradio_launch_kwargs(),
+    )

@@ -113,7 +113,7 @@ if __name__ == "__main__":
                     pass
 
         set_status("正在加载核心组件模型 (这可能需要几秒钟)...")
-        from webui import build_ui
+        from webui import build_ui, gradio_launch_kwargs
         import time
         import webbrowser
 
@@ -143,7 +143,11 @@ if __name__ == "__main__":
         demo = build_ui()
         
         set_status("正在启动本地服务 (自动分配可用端口)...")
-        _, local_url, _ = demo.launch(server_name="127.0.0.1", prevent_thread_lock=True)
+        _, local_url, _ = demo.launch(
+            server_name="127.0.0.1",
+            prevent_thread_lock=True,
+            **gradio_launch_kwargs(),
+        )
 
         theme_url = local_url.rstrip('/') + '/?__theme=dark'
         

@@ -2,10 +2,12 @@ import inspect
 import os
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 
 import yaml
+import webui
 
 from model_provider import DiscoveredModel, ModelProviderError, ModelTestResult
 from prompt_settings import DEFAULT_PROMPT_SETTINGS
@@ -44,6 +46,34 @@ def gemini_model(model_id="gemini-2.5-flash"):
 
 
 class WebUIModelSettingsTests(unittest.TestCase):
+    @patch("webui.load_config", return_value={})
+    def test_build_ui_uses_gradio6_launch_options_without_constructor_warning(self, _load_config):
+        launch_options_factory = getattr(webui, "gradio_launch_kwargs", None)
+        self.assertIsNotNone(launch_options_factory)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            demo = build_ui()
+
+        self.assertIsNotNone(demo)
+        migration_warnings = [
+            str(item.message)
+            for item in caught
+            if "moved from the Blocks constructor to the launch() method" in str(item.message)
+        ]
+        self.assertEqual(migration_warnings, [])
+
+        launch_options = launch_options_factory()
+        self.assertIn("css", launch_options)
+        self.assertIn("gradient-text", launch_options["css"])
+        self.assertIn("js", launch_options)
+        self.assertIn("classList.add('dark')", launch_options["js"])
+
+        app_source = Path("app.py").read_text(encoding="utf-8")
+        webui_source = Path("webui.py").read_text(encoding="utf-8")
+        self.assertIn("**gradio_launch_kwargs()", app_source)
+        self.assertIn("**gradio_launch_kwargs()", webui_source)
+
     def test_example_and_embedded_defaults_expose_prompt_settings_and_direct_models(self):
         example = Path("config.example.yaml").read_text(encoding="utf-8")
         webui = Path("webui.py").read_text(encoding="utf-8")
