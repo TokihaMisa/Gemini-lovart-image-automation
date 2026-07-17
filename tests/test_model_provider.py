@@ -143,6 +143,12 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "network")
         self.assertNotIn("super-secret-key", str(ctx.exception))
 
+    def test_invalid_ipv6_gemini_base_url_never_exposes_key(self):
+        with self.assertRaises(ModelProviderError) as ctx:
+            discover_models("gemini", "super-secret-key", "https://[bad")
+        self.assertEqual(ctx.exception.code, "network")
+        self.assertNotIn("super-secret-key", str(ctx.exception))
+
     @patch("urllib.request.urlopen")
     def test_empty_compatible_list_returns_empty_list(self, urlopen):
         urlopen.return_value = FakeResponse({"data": [{"id": "nvidia/nv-embed-v1"}]})

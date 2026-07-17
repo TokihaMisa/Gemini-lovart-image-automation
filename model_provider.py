@@ -66,9 +66,11 @@ def _discover_gemini(api_key: str, base_url: str, timeout: float) -> list[Discov
         query = {"key": api_key}
         if page_token:
             query["pageToken"] = page_token
-        payload = _request_json(
-            _append_query(_models_url(base_url), query), api_key, "gemini", timeout=timeout
-        )
+        try:
+            request_url = _append_query(_models_url(base_url), query)
+        except ValueError as exc:
+            raise _map_network_error(exc) from None
+        payload = _request_json(request_url, api_key, "gemini", timeout=timeout)
         for raw_model in payload.get("models", []):
             if not isinstance(raw_model, dict):
                 continue
