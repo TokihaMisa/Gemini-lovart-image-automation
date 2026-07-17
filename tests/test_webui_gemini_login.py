@@ -1,5 +1,7 @@
 import tempfile
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,6 +32,18 @@ class WebUIGeminiLoginTests(unittest.TestCase):
 
         popen.assert_not_called()
         self.assertIn("已经打开", message)
+
+    @patch("webui.login_helper_is_active", return_value=False)
+    def test_concurrent_open_callbacks_start_at_most_one_helper(self, _active):
+        with tempfile.TemporaryDirectory() as tmp, patch("webui.subprocess.Popen") as popen:
+            config = Path(tmp) / "config.yaml"
+            popen.side_effect = lambda *_args, **_kwargs: time.sleep(0.05)
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                messages = list(executor.map(lambda _unused: open_gemini_login_browser(config), range(2)))
+
+        self.assertEqual(popen.call_count, 1)
+        self.assertEqual(sum("已打开" in message for message in messages), 1)
+        self.assertEqual(sum("已经打开" in message for message in messages), 1)
 
     def test_check_does_not_close_when_not_ready(self):
         with tempfile.TemporaryDirectory() as tmp:

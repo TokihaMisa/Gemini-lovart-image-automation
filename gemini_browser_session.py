@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import ctypes
+from ctypes import wintypes
 import json
 import os
 from pathlib import Path
@@ -89,11 +91,26 @@ class LoginStatus:
 class LoginRuntimePaths:
     status_path: Path
     close_request_path: Path
+    owner_lock_path: Path
+
+
+@dataclass(frozen=True)
+class LoginHelperOwner:
+    pid: int
+    token: str
 
 
 def login_runtime_paths(config_path: str | Path) -> LoginRuntimePaths:
     root = Path(config_path).parent / "runs" / "gemini_login"
-    return LoginRuntimePaths(root / "status.json", root / "close.request")
+    config = _read_helper_config(config_path)
+    browser_cfg = config.get("browser", {})
+    browser_cfg = browser_cfg if isinstance(browser_cfg, Mapping) else {}
+    profile = resolve_user_data_dir(browser_cfg, config_path)
+    return LoginRuntimePaths(
+        root / "status.json",
+        root / "close.request",
+        profile / ".gemini_login_helper.owner",
+    )
 
 
 _PAGE_INSPECTION_SCRIPT = r"""
@@ -272,6 +289,21 @@ def request_login_helper_close(path: str | Path) -> None:
 def process_is_alive(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
+    if os.name == "nt":
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED
+            try:
+                exit_code = wintypes.DWORD()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return True
+                return exit_code.value == 259  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except OSError:
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -283,7 +315,71 @@ def process_is_alive(pid: int | None) -> bool:
     return True
 
 
+def _read_login_helper_owner(path: str | Path) -> LoginHelperOwner | None:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+        pid = int(value["pid"])
+        token = str(value["token"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    return LoginHelperOwner(pid=pid, token=token) if pid > 0 and token else None
+
+
+def acquire_login_helper_owner(paths: LoginRuntimePaths) -> LoginHelperOwner | None:
+    """Atomically claim a persistent browser profile without signalling any process."""
+    lock_path = paths.owner_lock_path
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    for _attempt in range(2):
+        owner = LoginHelperOwner(pid=os.getpid(), token=os.urandom(16).hex())
+        try:
+            descriptor = os.open(
+                lock_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            existing = _read_login_helper_owner(lock_path)
+            if existing is None or process_is_alive(existing.pid):
+                return None
+            # Only a positively identified dead owner is recoverable. Re-read the
+            # metadata before removal so a replacement owner is never cleaned up.
+            if _read_login_helper_owner(lock_path) != existing:
+                continue
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return None
+            continue
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"pid": owner.pid, "token": owner.token, "created_at": time.time()},
+                handle,
+                ensure_ascii=False,
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        return owner
+    return None
+
+
+def release_login_helper_owner(paths: LoginRuntimePaths, owner: LoginHelperOwner) -> None:
+    """Remove only the lock metadata created by this helper instance."""
+    if _read_login_helper_owner(paths.owner_lock_path) != owner:
+        return
+    try:
+        paths.owner_lock_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
 def login_helper_is_active(paths: LoginRuntimePaths) -> bool:
+    owner = _read_login_helper_owner(paths.owner_lock_path)
+    if owner is not None and process_is_alive(owner.pid):
+        return True
     status = read_login_status(paths.status_path)
     return bool(status and process_is_alive(status.pid))
 
@@ -409,19 +505,19 @@ def _write_helper_status(
 def run_login_helper(config_path: str | Path) -> int:
     """Own one configured Gemini profile until the ready helper is asked to close."""
     paths = login_runtime_paths(config_path)
-    clear_stale_login_runtime(paths)
-    if login_helper_is_active(paths):
+    owner = acquire_login_helper_owner(paths)
+    if owner is None:
         return 1
-
-    _write_helper_status(paths, GeminiPageState.STARTING, False, "Starting Gemini login helper.")
-    config = _read_helper_config(config_path)
-    policy = retry_policy_from_config(config)
-    gemini_config = config.get("gemini", {})
-    gemini_config = gemini_config if isinstance(gemini_config, Mapping) else {}
-    target_url = str(gemini_config.get("base_url", "https://gemini.google.com") or "https://gemini.google.com")
     context = None
     page = None
     try:
+        clear_stale_login_runtime(paths)
+        _write_helper_status(paths, GeminiPageState.STARTING, False, "Starting Gemini login helper.")
+        config = _read_helper_config(config_path)
+        policy = retry_policy_from_config(config)
+        gemini_config = config.get("gemini", {})
+        gemini_config = gemini_config if isinstance(gemini_config, Mapping) else {}
+        target_url = str(gemini_config.get("base_url", "https://gemini.google.com") or "https://gemini.google.com")
         with sync_playwright() as playwright:
             launch_options = build_browser_launch_options(config, config_path=config_path)
             context = playwright.chromium.launch_persistent_context(**launch_options)
@@ -461,11 +557,14 @@ def run_login_helper(config_path: str | Path) -> int:
                 context.close()
             except Exception:
                 pass
+        release_login_helper_owner(paths, owner)
 
 
 __all__ = [
     "GeminiPageState",
     "LoginRuntimePaths",
+    "LoginHelperOwner",
+    "acquire_login_helper_owner",
     "LoginStatus",
     "build_browser_launch_options",
     "build_login_helper_command",
@@ -476,6 +575,7 @@ __all__ = [
     "navigate_gemini_with_retry",
     "process_is_alive",
     "read_login_status",
+    "release_login_helper_owner",
     "request_login_helper_close",
     "resolve_browser_executable",
     "resolve_user_data_dir",

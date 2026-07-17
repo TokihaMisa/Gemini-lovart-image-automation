@@ -55,24 +55,39 @@ PROMPT_FORM_FIELDS = (
 )
 
 active_processes = []
+_gemini_login_launch_lock = threading.Lock()
+_gemini_login_launches: dict[str, float] = {}
+_GEMINI_LOGIN_LAUNCH_GRACE_SECONDS = 10.0
 
 
 def open_gemini_login_browser(config_path: str | Path = "config.yaml") -> str:
     paths = login_runtime_paths(config_path)
-    if login_helper_is_active(paths):
-        return "Gemini 登录浏览器已经打开，请在浏览器窗口中完成登录。"
-    clear_stale_login_runtime(paths)
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUTF8"] = "1"
-    kwargs: dict[str, object] = {"env": env}
-    import sys
-    if os.name == "nt" and getattr(sys, "frozen", False):
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    try:
-        subprocess.Popen(build_login_helper_command(config_path), **kwargs)
-    except OSError:
-        return "无法打开 Gemini 登录浏览器，请检查本地安装后重试。"
+    launch_key = str(paths.owner_lock_path.resolve())
+    with _gemini_login_launch_lock:
+        now = time.monotonic()
+        launch_started = _gemini_login_launches.get(launch_key)
+        if launch_started is not None and now - launch_started >= _GEMINI_LOGIN_LAUNCH_GRACE_SECONDS:
+            _gemini_login_launches.pop(launch_key, None)
+        if login_helper_is_active(paths):
+            _gemini_login_launches.pop(launch_key, None)
+            return "Gemini 登录浏览器已经打开，请在浏览器窗口中完成登录。"
+        clear_stale_login_runtime(paths)
+        if login_helper_is_active(paths):
+            return "Gemini 登录浏览器已经打开，请在浏览器窗口中完成登录。"
+        if launch_key in _gemini_login_launches:
+            return "Gemini 登录浏览器已经打开，正在启动中，请稍后再检查。"
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+        kwargs: dict[str, object] = {"env": env}
+        import sys
+        if os.name == "nt" and getattr(sys, "frozen", False):
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        try:
+            subprocess.Popen(build_login_helper_command(config_path), **kwargs)
+        except OSError:
+            return "无法打开 Gemini 登录浏览器，请检查本地安装后重试。"
+        _gemini_login_launches[launch_key] = now
     return "Gemini 登录浏览器已打开，请在新窗口中完成登录后再检查。"
 
 
