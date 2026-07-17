@@ -9,6 +9,7 @@ from playwright.sync_api import Page
 from prompt_settings import get_prompt_settings
 from gemini_browser_session import (
     GeminiLoginRequiredError,
+    GeminiPageNotReadyError,
     GeminiPageState,
     inspect_gemini_page,
     navigate_gemini_with_retry,
@@ -46,9 +47,20 @@ class GeminiPageStructureError(RuntimeError):
     """Gemini loaded but its expected controls were not present."""
 
 
+class GeminiUploadIncompleteError(RuntimeError):
+    """Image attachment state could not be verified as complete."""
+
+
 def _safe_origin_path(url: str) -> str:
     parts = urlsplit(str(url or ""))
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return ""
+    host = parts.hostname
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    safe_segments = [segment for segment in parts.path.split("/") if segment in {"app", "chat"}]
+    path = "/" + "/".join(safe_segments) if safe_segments else "/"
+    return urlunsplit((parts.scheme, host, path, "", ""))
 
 
 def _safe_controls(page: Page) -> list[str]:
@@ -68,7 +80,8 @@ def _safe_controls(page: Page) -> list[str]:
     for item in controls if isinstance(controls, list) else []:
         text = " ".join(str(item).split())[:160]
         # A label containing an email address is not a safe diagnostic.
-        if "@" in text or not text or text in unique:
+        normalized = normalize_ui_text(text)
+        if "@" in text or "token" in normalized or "password" in normalized or not text or text in unique:
             continue
         unique.append(text)
         if len(unique) >= 20:
@@ -87,18 +100,18 @@ def save_gemini_diagnostics(
     """Persist only bounded, redacted metadata; debug artifacts stay best-effort."""
     debug_dir = Path(run_dir) / "browser-debug" / sanitize_filename(product_id)
     debug_dir.mkdir(parents=True, exist_ok=True)
-    stamp = int(time.time())
+    stamp = time.time_ns()
     # Do not turn a raw exception (which can include addresses or URLs) into a filename.
     safe_label = "diagnostic"
     base = debug_dir / f"{stamp}-{safe_label}"
-    try:
-        page.screenshot(path=str(base.with_suffix(".png")), full_page=True)
-    except Exception:
-        pass
-    try:
-        base.with_suffix(".html").write_text(page.content(), encoding="utf-8")
-    except Exception:
-        pass
+    # A screenshot can expose a signed-in account or page content. Keep a
+    # safe placeholder rather than persisting unredactable browser pixels.
+    base.with_suffix(".png").write_bytes(b"")
+    # DOM content can contain account data and cannot be safely reconstructed
+    # after the fact. Retain a deliberately content-free HTML diagnostic.
+    base.with_suffix(".html").write_text(
+        "<html><body>Gemini diagnostic content redacted.</body></html>", encoding="utf-8"
+    )
     try:
         inspected = page.evaluate("() => ({ language: document.documentElement.lang || navigator.language || '' })") or {}
     except Exception:
@@ -138,7 +151,16 @@ class GeminiBot:
 
     @staticmethod
     def _is_retryable_product_error(error: BaseException) -> bool:
-        return isinstance(error, GeminiPageStructureError) or classify_network_error(error) is RetryKind.TRANSIENT
+        if isinstance(error, GeminiPageStructureError):
+            return True
+        message = str(error).casefold()
+        permanent_markers = (
+            "err_cert_", "certificate verify", "err_access_denied", "access denied",
+            "blocked", "forbidden", "authentication", "authorization", "not authorized",
+        )
+        if any(marker in message for marker in permanent_markers):
+            return False
+        return classify_network_error(error) is RetryKind.TRANSIENT
 
     def _select_thinking_mode_with_recovery(self, product_id: str) -> None:
         if self._select_thinking_mode():
@@ -146,6 +168,8 @@ class GeminiBot:
         status = inspect_gemini_page(self.page)
         if status.state is GeminiPageState.WAITING_LOGIN:
             raise GeminiLoginRequiredError()
+        if status.state is GeminiPageState.ERROR:
+            raise GeminiPageNotReadyError()
         if status.state is GeminiPageState.PAGE_LOADING:
             policy = retry_policy_from_config({"browser": self._browser_config})
             status = navigate_gemini_with_retry(
@@ -153,8 +177,12 @@ class GeminiBot:
             )
             if status.state is GeminiPageState.WAITING_LOGIN:
                 raise GeminiLoginRequiredError()
+            if status.state is GeminiPageState.ERROR:
+                raise GeminiPageNotReadyError()
             if self._select_thinking_mode():
                 return
+        elif status.state is GeminiPageState.READY and self._select_thinking_mode():
+            return
         self._save_debug_snapshot(product_id, "thinking-mode-not-selected", 1, "page_structure")
         raise GeminiPageStructureError("Gemini Thinking mode control is missing on a ready page")
 
@@ -213,7 +241,8 @@ class GeminiBot:
                 else:
                     raise
             self.page.wait_for_timeout(4000)
-            self._start_temporary_chat()
+            if not self._start_temporary_chat():
+                raise GeminiPageStructureError("Gemini temporary chat control is missing")
             if self.cfg.get("thinking_mode", True):
                 self._select_thinking_mode_with_recovery(product_id)
 
@@ -228,7 +257,7 @@ class GeminiBot:
             )
 
             if image_paths and not self._upload_images(image_paths):
-                raise RuntimeError("Gemini image upload did not complete")
+                raise GeminiUploadIncompleteError("Gemini image upload did not complete")
 
             prompt = build_design_prompt(
                 product_name_cn,
@@ -362,10 +391,10 @@ class GeminiBot:
                 self.page.wait_for_timeout(1500)
                 self.logger.info("Gemini: temporary chat clicked via DOM scan")
                 return True
-        except Exception as exc:
-            self.logger.warning(f"Gemini: temporary chat DOM scan failed: {exc}")
+        except Exception:
+            self.logger.warning("Gemini: temporary chat DOM scan was unavailable")
 
-        self.logger.warning("Gemini: temporary chat control not found; continuing in current chat")
+        self.logger.warning("Gemini: temporary chat control not found; stopping this attempt")
         return False
 
     def _select_thinking_mode(self) -> bool:
@@ -613,8 +642,8 @@ class GeminiBot:
             if clicked:
                 self.logger.info("Gemini: clicked Thinking mode via DOM scan")
                 return True
-        except Exception as exc:
-            self.logger.warning(f"Gemini: Thinking mode DOM scan failed: {exc}")
+        except Exception:
+            self.logger.warning("Gemini: Thinking mode DOM scan was unavailable")
         return False
 
     def _current_model_is_flash_legacy(self) -> bool:
@@ -761,8 +790,8 @@ class GeminiBot:
             if clicked:
                 self.logger.info(f"Gemini: clicked {label} via DOM scan")
                 return True
-        except Exception as exc:
-            self.logger.warning(f"Gemini: {label} DOM scan failed: {exc}")
+        except Exception:
+            self.logger.warning(f"Gemini: {label} DOM scan was unavailable")
         return False
 
     def _open_mode_menu(self) -> bool:
@@ -836,8 +865,8 @@ class GeminiBot:
             if clicked:
                 self.logger.info("Gemini: opened mode menu via DOM scan")
                 return True
-        except Exception as exc:
-            self.logger.warning(f"Gemini: mode menu DOM scan failed: {exc}")
+        except Exception:
+            self.logger.warning("Gemini: mode menu DOM scan was unavailable")
         return False
 
     def _upload_images(self, image_paths: list[str]) -> bool:
@@ -867,8 +896,8 @@ class GeminiBot:
                 if self._wait_for_uploads_complete(len(image_paths)):
                     self.logger.info(f"Gemini: uploaded {len(image_paths)} image(s) via direct input")
                     return True
-        except Exception as exc:
-            self.logger.warning(f"Gemini: direct file input upload failed: {exc}")
+        except Exception:
+            self.logger.warning("Gemini: direct file input upload was unavailable")
 
         # Strategy 2: Click the add/upload button robustly, then expect a file chooser
         clicked = False
@@ -937,8 +966,8 @@ class GeminiBot:
                     self.page.wait_for_timeout(1000)
                     self.logger.info("Gemini: clicked add button via DOM scan")
                     clicked = True
-            except Exception as exc:
-                self.logger.warning(f"Gemini: add/upload DOM scan failed: {exc}")
+            except Exception:
+                self.logger.warning("Gemini: add/upload DOM scan was unavailable")
 
         # Try to find the file chooser trigger in the menu
         for selector in [
@@ -984,6 +1013,7 @@ class GeminiBot:
         return False
 
     def _wait_for_uploads_complete(self, expected_count: int) -> bool:
+        """Fail closed unless Gemini exposes stable attachment previews after uploading."""
         timeout_ms = self.cfg.get("upload_timeout", 120) * 1000
         deadline = time.time() + timeout_ms / 1000
         stable_ready = 0
@@ -995,28 +1025,28 @@ class GeminiBot:
                     """
                     () => {
                         const text = document.body.innerText || '';
-                        const busy = /(上传中|正在上传|处理中|正在处理|uploading|processing|attaching)/i.test(text);
-                        const fileInputs = [...document.querySelectorAll('input[type="file"]')];
-                        const fileCount = fileInputs.reduce((total, input) => total + (input.files ? input.files.length : 0), 0);
-                        const attachments = [...document.querySelectorAll('img, video, [aria-label], [data-test-id], mat-chip, .chip')]
+                        const busy = /(上传中|正在上传|处理中|正在处理|uploading|processing|attaching)/i.test(text)
+                            || [...document.querySelectorAll('[role="progressbar"], mat-progress-spinner, mat-spinner, [aria-busy="true"], [data-loading="true"]')]
+                                .some((node) => { const rect = node.getBoundingClientRect(); const style = getComputedStyle(node); return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'; });
+                        const verifiedAttachments = [...document.querySelectorAll('[data-attachment-id], [data-testid*="attachment"], [data-test-id*="attachment"], attachment-preview, .attachment-preview, mat-chip.attachment, .attachment-chip')]
                             .filter((el) => {
+                                const rect = el.getBoundingClientRect();
+                                const style = getComputedStyle(el);
+                                if (rect.width <= 0 || rect.height <= 0 || style.visibility === 'hidden' || style.display === 'none') return false;
                                 const label = [
                                     el.getAttribute('aria-label'),
                                     el.getAttribute('data-test-id'),
+                                    el.getAttribute('data-testid'),
                                     el.getAttribute('title'),
                                     el.innerText,
                                 ].filter(Boolean).join(' ');
-                                return /(image|photo|picture|uploaded|attachment|图片|照片|附件|已上传)/i.test(label);
+                                return /(image|photo|picture|uploaded|attachment|图片|照片|附件|已上传|adjunto|archivo)/i.test(label);
                             }).length;
-                        const sendButtons = [...document.querySelectorAll('button[aria-label*="Send"], button[aria-label*="发送"], button[aria-label*="提交"], button[aria-label*="submit"]')];
-                        const sendDisabled = sendButtons.some((button) => button.disabled || button.getAttribute('aria-disabled') === 'true');
-                        return { busy, fileCount, attachments, sendDisabled };
+                        return { busy, verifiedAttachments };
                     }
                     """
                 ) or {}
-                has_file_signal = state.get("fileCount", 0) >= expected_count
-                has_attachment_signal = state.get("attachments", 0) >= expected_count
-                ready = (has_file_signal or has_attachment_signal) and not state.get("busy") and not state.get("sendDisabled")
+                ready = int(state.get("verifiedAttachments", 0) or 0) >= expected_count and not state.get("busy")
                 if ready:
                     stable_ready += 1
                     if stable_ready >= 2:
@@ -1024,10 +1054,8 @@ class GeminiBot:
                 else:
                     stable_ready = 0
             except Exception:
-                stable_ready += 1
-                if stable_ready >= 5:
-                    self.logger.warning("Gemini: upload state could not be verified; waited before continuing")
-                    return True
+                self.logger.warning("Gemini: upload state could not be verified")
+                return False
 
         self.logger.warning("Gemini: image upload wait timed out")
         return False
@@ -1194,8 +1222,8 @@ class GeminiBot:
                 cleaned = self._strip_gemini_chrome(text)
                 self.logger.info(f"Gemini: JS extraction ({len(cleaned)} chars)")
                 return cleaned.strip()
-        except Exception as exc:
-            self.logger.warning(f"Gemini: JS extraction failed: {exc}")
+        except Exception:
+            self.logger.warning("Gemini: JS extraction was unavailable")
 
         try:
             body = self.page.locator("body").inner_text(timeout=10000)

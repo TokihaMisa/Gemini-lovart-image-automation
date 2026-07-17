@@ -22,7 +22,12 @@ from gemini_bot import (
     normalize_ui_text,
     save_gemini_diagnostics,
 )
-from gemini_browser_session import GeminiLoginRequiredError, GeminiPageState, LoginStatus
+from gemini_browser_session import (
+    GeminiLoginRequiredError,
+    GeminiPageNotReadyError,
+    GeminiPageState,
+    LoginStatus,
+)
 from main import (
     _backfill_result_project_urls,
     _choose_lovart_tool_options,
@@ -94,6 +99,197 @@ def run_formal_flow_for_test(*, wait_for_ready=False):
 
 
 class MediumPriorityBehaviorTests(unittest.TestCase):
+    def test_upload_completion_fails_closed_for_evaluate_errors_files_and_unrelated_images(self):
+        class Page:
+            def __init__(self, value):
+                self.value = value
+
+            def wait_for_timeout(self, _milliseconds):
+                pass
+
+            def evaluate(self, _script):
+                if isinstance(self.value, Exception):
+                    raise self.value
+                return self.value
+
+        class Logger:
+            def warning(self, _message):
+                pass
+
+        cases = (
+            RuntimeError("playwright sentinel"),
+            {"busy": False, "fileCount": 2, "attachments": 0, "sendDisabled": False},
+            {"busy": False, "fileCount": 0, "attachments": 99, "sendDisabled": False},
+        )
+        for value in cases:
+            bot = GeminiBot(Page(value), {"gemini": {"upload_timeout": 1}}, Logger())
+            with patch("gemini_bot.time.time", side_effect=[0] * 10 + [2]):
+                self.assertFalse(bot._wait_for_uploads_complete(2))
+
+    def test_temporary_chat_failure_stops_each_attempt_before_preamble(self):
+        class Bot(GeminiBot):
+            def __init__(self):
+                page = type("Page", (), {"goto": lambda _self, *_args, **_kwargs: None, "wait_for_timeout": lambda _self, _ms: None})()
+                super().__init__(page, {"gemini": {}, "browser": {"product_attempts": 2}}, FakeFormalLogger())
+                self.chats = 0
+
+            def _start_temporary_chat(self):
+                self.chats += 1
+                return False
+
+            def _send_message(self, _text):
+                raise AssertionError("must not continue in the current chat")
+
+        bot = Bot()
+        with self.assertRaises(GeminiPageStructureError):
+            bot.generate_prompt("产品", "Spanish", "卖点", [])
+        self.assertEqual(bot.chats, 2)
+
+    def test_spanish_structural_fallbacks_drive_temporary_mode_thinking_and_upload(self):
+        class Locator:
+            def __init__(self, page, selector):
+                self.page = page
+                self.selector = selector
+                self.first = self
+                self.last = self
+
+            def count(self):
+                if self.selector == 'input[type="file"]':
+                    self.page.file_queries += 1
+                    return 1 if self.page.file_queries > 1 else 0
+                return 0
+
+            def is_visible(self, timeout=None):
+                return any(term in self.selector for term in ("Chat temporal", "Rápido", "Pensamiento ampliado", "Adjuntar"))
+
+            def click(self, **_kwargs):
+                self.page.clicked.append(self.selector)
+
+            def set_input_files(self, _paths):
+                self.page.uploaded = True
+
+        class Page:
+            def __init__(self):
+                self.clicked = []
+                self.file_queries = 0
+                self.uploaded = False
+
+            def locator(self, selector):
+                return Locator(self, selector)
+
+            def wait_for_timeout(self, _milliseconds):
+                pass
+
+        class Bot(GeminiBot):
+            def _wait_for_uploads_complete(self, _expected_count):
+                return True
+
+        page = Page()
+        bot = Bot(page, {"gemini": {}}, FakeFormalLogger())
+        self.assertTrue(bot._start_temporary_chat())
+        self.assertTrue(bot._open_mode_menu())
+        self.assertTrue(bot._click_extended_thinking_option())
+        self.assertTrue(bot._upload_images_once(["image.jpg"]))
+        self.assertTrue(page.uploaded)
+        self.assertTrue(any("Chat temporal" in item for item in page.clicked))
+        self.assertTrue(any("Rápido" in item for item in page.clicked))
+        self.assertTrue(any("Pensamiento ampliado" in item for item in page.clicked))
+        self.assertTrue(any("Adjuntar" in item for item in page.clicked))
+
+    def test_thinking_ready_retries_once_and_error_is_not_page_structure(self):
+        class Bot(GeminiBot):
+            def __init__(self):
+                super().__init__(object(), {"gemini": {}}, FakeFormalLogger())
+                self.selects = 0
+
+            def _select_thinking_mode(self):
+                self.selects += 1
+                return self.selects == 2
+
+        ready = LoginStatus.create(GeminiPageState.READY, True, "https://gemini.google.com/app", "es", "ready")
+        bot = Bot()
+        with patch("gemini_bot.inspect_gemini_page", return_value=ready):
+            bot._select_thinking_mode_with_recovery("SKU")
+        self.assertEqual(bot.selects, 2)
+
+        error = LoginStatus.create(GeminiPageState.ERROR, False, "https://gemini.google.com/app", "es", "error")
+        bot = Bot()
+        with patch("gemini_bot.inspect_gemini_page", return_value=error):
+            with self.assertRaises(GeminiPageNotReadyError):
+                bot._select_thinking_mode_with_recovery("SKU")
+        self.assertEqual(bot.selects, 1)
+
+    def test_permanent_browser_errors_do_not_retry_but_reset_retries_once(self):
+        for error in (
+            RuntimeError("net::ERR_CERT_REVOKED"),
+            RuntimeError("net::ERR_ACCESS_DENIED"),
+            RuntimeError("blocked by policy"),
+        ):
+            class Bot(GeminiBot):
+                def __init__(self):
+                    super().__init__(object(), {"gemini": {}, "browser": {"product_attempts": 2}}, FakeFormalLogger())
+                    self.calls = 0
+
+                def _generate_prompt_once(self, *_args, **_kwargs):
+                    self.calls += 1
+                    raise error
+
+            bot = Bot()
+            with self.assertRaises(RuntimeError):
+                bot.generate_prompt("产品", "Spanish", "卖点", [])
+            self.assertEqual(bot.calls, 1)
+
+        class ResetBot(GeminiBot):
+            def __init__(self):
+                super().__init__(object(), {"gemini": {}, "browser": {"product_attempts": 2, "retry_delays": [0]}}, FakeFormalLogger())
+                self.calls = 0
+
+            def _generate_prompt_once(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("net::ERR_CONNECTION_RESET")
+                return "ok"
+
+        self.assertEqual(ResetBot().generate_prompt("产品", "Spanish", "卖点", []), "ok")
+
+    def test_diagnostics_redact_every_artifact_use_unique_names_and_logs_hide_raw_errors(self):
+        sentinel = "secret@example.com token=private /tmp/private"
+
+        class Page:
+            url = "https://secret@example.com@gemini.google.com/app/token/private?token=private"
+
+            def evaluate(self, _script):
+                return {"language": "es", "controls": [sentinel]}
+
+            def screenshot(self, path, **_kwargs):
+                Path(path).write_text(sentinel, encoding="utf-8")
+
+            def content(self):
+                return f"<html>{sentinel}</html>"
+
+        class Logger:
+            def __init__(self):
+                self.messages = []
+
+            def info(self, _message):
+                pass
+
+            def warning(self, message):
+                self.messages.append(message)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            first = save_gemini_diagnostics(Page(), tmp, "SKU", sentinel, 1, sentinel)
+            second = save_gemini_diagnostics(Page(), tmp, "SKU", sentinel, 1, sentinel)
+            self.assertNotEqual(first, second)
+            for artifact in first.parent.iterdir():
+                self.assertNotIn("secret@example.com", artifact.read_bytes().decode("utf-8", errors="ignore"))
+                self.assertNotIn("private", artifact.read_bytes().decode("utf-8", errors="ignore"))
+
+        logger = Logger()
+        page = type("Page", (), {"evaluate": lambda _self, _script: (_ for _ in ()).throw(RuntimeError(sentinel))})()
+        GeminiBot(page, {"gemini": {}}, logger)._start_temporary_chat()
+        self.assertNotIn(sentinel, " ".join(logger.messages))
+
     def test_spanish_text_normalization_removes_accents_and_case(self):
         self.assertEqual(normalize_ui_text("  PENSAMIENTO RÁPIDO  "), "pensamiento rapido")
 
@@ -574,6 +770,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         class OrderedGeminiBot(GeminiBot):
             def _start_temporary_chat(self):
                 events.append("temporary_chat")
+                return True
 
             def _select_thinking_mode(self):
                 events.append("thinking_mode")
