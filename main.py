@@ -21,6 +21,11 @@ from rich.panel import Panel
 from excel_reader import read_products
 from gemini_api import GeminiAPI
 from gemini_bot import GeminiBot
+from gemini_browser_session import (
+    build_browser_launch_options,
+    resolve_browser_executable,
+    resolve_user_data_dir,
+)
 from lovart_bot import LOVART_IMAGE_MODELS, LovartBot
 from nvidia_api import NvidiaAPI, resolve_nvidia_model
 from prompt_settings import get_prompt_settings, normalize_prompt_settings
@@ -883,33 +888,6 @@ def _build_nvidia_api(config, logger, prompt_settings=None):
     )
 
 
-def _default_browser_candidates() -> list[str]:
-    candidates = [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-    ]
-    local_app_data = Path.home() / "AppData" / "Local"
-    candidates.extend([
-        str(local_app_data / "Google" / "Chrome" / "Application" / "chrome.exe"),
-        str(local_app_data / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
-    ])
-    return candidates
-
-
-def resolve_browser_executable(browser_cfg: dict, candidate_paths: list[str] | None = None) -> str | None:
-    configured = str(browser_cfg.get("chrome_exe", "") or "").strip()
-    if configured and Path(configured).exists():
-        return configured
-
-    for candidate in candidate_paths if candidate_paths is not None else _default_browser_candidates():
-        if candidate and Path(candidate).exists():
-            return candidate
-
-    return None
-
-
 def _resolve_browser_executable_for_run(
     browser_cfg: dict,
     interactive: bool = True,
@@ -935,23 +913,6 @@ def _resolve_browser_executable_for_run(
         print(f"  Browser executable not found: {manual_path}")
 
 
-def _kill_zombie_browsers(user_data_dir: Path, logger):
-    import os
-    import subprocess
-    if os.name != 'nt':
-        return
-    try:
-        dir_name = user_data_dir.name
-        cmd = [
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            f"Get-WmiObject Win32_Process | Where-Object {{ $_.Name -match 'chrome.exe|msedge.exe' -and $_.CommandLine -match '{dir_name}' }} | Stop-Process -Force"
-        ]
-        subprocess.run(cmd, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
-    except Exception as e:
-        logger.warning(f"Failed to kill zombie browsers: {e}")
-
 def _run_browser_flow(
     config,
     products,
@@ -973,8 +934,6 @@ def _run_browser_flow(
         logger.info(f"Using browser executable: {chrome_exe}")
     else:
         logger.warning("Chrome/Edge executable not found; using Playwright bundled Chromium")
-
-    _kill_zombie_browsers(user_data_dir, logger)
 
     with sync_playwright() as pw:
         logger.info("Launching browser for Gemini")
