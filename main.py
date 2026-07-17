@@ -925,6 +925,7 @@ def _run_browser_flow(
     resume=True,
     wait_for_ready=True,
     prompt_settings=None,
+    config_path: str | Path = Path("config.yaml"),
 ):
     browser_cfg = config["browser"]
     chrome_exe = _resolve_browser_executable_for_run(browser_cfg, interactive=wait_for_ready)
@@ -935,7 +936,7 @@ def _run_browser_flow(
 
     with sync_playwright() as pw:
         logger.info("Launching browser for Gemini")
-        launch_options = build_browser_launch_options(config, config_path=Path("config.yaml"))
+        launch_options = build_browser_launch_options(config, config_path=Path(config_path))
         if chrome_exe:
             launch_options["executable_path"] = chrome_exe
         context = pw.chromium.launch_persistent_context(**launch_options)
@@ -1092,6 +1093,7 @@ def main(argv=None):
             resume=args.resume,
             wait_for_ready=args.prompt_source == "ask" or args.lovart == "ask",
             prompt_settings=prompt_settings,
+            config_path=args.config,
         )
 
     print(

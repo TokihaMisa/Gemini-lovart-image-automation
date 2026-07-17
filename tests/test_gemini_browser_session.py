@@ -192,6 +192,7 @@ class GeminiBrowserSessionTests(unittest.TestCase):
             GeminiPageState.READY, True, "https://gemini.google.com/app", "en", "ready"
         )
         launch_options = {"user_data_dir": "shared-profile"}
+        config_path = Path("custom-settings") / "browser-config.yaml"
         with patch("main.sync_playwright", return_value=FormalPlaywrightManager(context)), patch(
             "main.build_browser_launch_options", return_value=launch_options
         ) as build_options, patch.object(
@@ -204,9 +205,10 @@ class GeminiBrowserSessionTests(unittest.TestCase):
                 logger=Logger(),
                 run_dir=Path("runs/test"),
                 wait_for_ready=False,
+                config_path=config_path,
             )
 
         self.assertEqual(result, (1, 0, 0, 0))
-        build_options.assert_called_once_with(config, config_path=Path("config.yaml"))
+        build_options.assert_called_once_with(config, config_path=config_path)
         navigate.assert_called_once()
         self.assertEqual(context.launch_options, launch_options)
