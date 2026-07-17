@@ -10,6 +10,8 @@ from pathlib import Path
 
 import yaml
 
+from prompt_settings import locked_rules_text, normalize_prompt_settings
+
 
 def get_resource_path(filename: str) -> Path:
     """Resolve file path, prioritizing CWD, then falling back to PyInstaller _internal MEIPASS."""
@@ -348,49 +350,73 @@ def merge_reference_images(reference_paths: list[str], output_path: str | Path, 
     return str(output)
 
 
-WHITE_BACKGROUND_PROMPT_BASE = (
-    "请帮我把这张产品图精修一下，要求突出产品的高级感，超清摄影，1k画质，"
-    "产品造型要和原图保持一致，白底图"
-)
-
-
-SCENE_PROMPT_BASE = (
-    "根据这个产品设计一张场景图，其他均保持不变，产品的特征要保持一致，超清摄影，1k画质"
-)
-
-
 def image_size_instruction(image_size: str = "") -> str:
     """Return an image-size instruction only when the workbook provides one."""
     cleaned = str(image_size or "").strip()
     return f"图片尺寸/比例: {cleaned}\n" if cleaned else ""
 
 
-def build_white_background_prompt(image_size: str = "") -> str:
-    return f"{WHITE_BACKGROUND_PROMPT_BASE}\n{image_size_instruction(image_size)}"
+def _effective_image_size_instruction(image_size: str, settings: dict) -> str:
+    cleaned = str(image_size or "").strip()
+    if cleaned:
+        return f"图片尺寸/比例: {cleaned}\n"
+    fallback = str(settings["missing_image_size_policy"] or "").strip()
+    return f"图片尺寸/比例: {fallback}\n" if fallback else ""
 
 
-def build_scene_prompt(image_size: str = "") -> str:
-    return f"{SCENE_PROMPT_BASE}\n{image_size_instruction(image_size)}"
+def build_white_background_prompt(image_size: str = "", prompt_settings=None) -> str:
+    settings = normalize_prompt_settings(prompt_settings)
+    return (
+        f"{settings['white_background_requirements']}\n"
+        f"图片画质: {settings['image_quality']}\n"
+        f"{_effective_image_size_instruction(image_size, settings)}"
+    )
+
+
+def build_scene_prompt(image_size: str = "", prompt_settings=None) -> str:
+    settings = normalize_prompt_settings(prompt_settings)
+    return (
+        f"{settings['scene_requirements']}\n"
+        f"图片画质: {settings['image_quality']}\n"
+        f"{_effective_image_size_instruction(image_size, settings)}"
+    )
 
 
 WHITE_BACKGROUND_PROMPT = build_white_background_prompt()
 SCENE_PROMPT = build_scene_prompt()
 
 
-def build_design_prompt(product_name_cn: str, language: str, selling_points: str, image_size: str = "") -> str:
+def build_design_prompt(
+    product_name_cn: str,
+    language: str,
+    selling_points: str,
+    image_size: str = "",
+    prompt_settings=None,
+) -> str:
     """Build the product-specific Gemini prompt in UTF-8 Chinese."""
-    output_language = language or "巴西葡萄牙语"
+    settings = normalize_prompt_settings(prompt_settings)
+    output_language = str(language or "").strip() or str(settings["default_language"])
+    sections = "、".join(settings["required_sections"])
+    question_rule = "允许在信息确实不足时提出一个必要问题。" if settings["allow_questions"] else "请不要反问，直接根据现有信息生成最优提示词。"
+    extra = str(settings["extra_requirements"] or "").strip()
+    extra_block = f"\n额外要求：\n{extra}\n" if extra else ""
     return (
-        f"图1，图2，是我的{product_name_cn}产品\n"
-        "【角色设定】你是一名资深的电商设计师，精通各种平面设计，设计富有创新性，创意性，注重文字排版，画面内容\n"
-        "我想设计一个这个产品的电商详情页案例，你帮我设计一下这个电商详情页，有12屏的产品详情图，不要生成图片，"
-        "要求设计风格有温馨感，高级感，可以参考 图3 这个设计风格。\n"
-        "输出的每一屏内容都包括（主标题，副标题，信息布局，排版形式）以便我在其他工具中直接生成这些素材。请不要反问，直接根据现有信息生成最优的prompt。\n\n"
-        "图片要求：\n"
-        f"{image_size_instruction(image_size)}"
-        f"语言: {output_language}\n"
-        "无logo\n\n"
-        f"产品信息：\n{selling_points}\n\n"
+        f"上传图片是我的{product_name_cn}产品。\n"
+        "【角色设定】你是一名资深电商设计师，擅长平面设计、信息层级和文字排版。\n"
+        f"请设计一套包含{settings['detail_page_count']}屏的电商详情页；一屏对应一张详情成品图，不是多套设计版本。\n"
+        "你当前只负责输出可交给 Lovart 的逐屏文字设计提示词，不要直接生成图片。\n"
+        f"整体风格：{settings['design_style']}\n"
+        f"每屏必须包含：{sections}\n"
+        f"图片画质：{settings['image_quality']}\n"
+        f"Logo 规则：{settings['logo_policy']}\n"
+        f"文案要求：{settings['copy_style']}；详细程度：{settings['copy_detail_level']}\n"
+        f"产品还原：{settings['product_fidelity']}\n"
+        f"{_effective_image_size_instruction(image_size, settings)}"
+        f"图片语言：{output_language}\n"
+        f"{question_rule}\n"
+        f"产品信息/卖点：\n{selling_points}\n"
+        f"{extra_block}\n"
+        f"【锁定规则】\n{locked_rules_text()}\n"
     )
 
 
@@ -437,28 +463,33 @@ def build_lovart_prompt(
     generated_prompt: str,
     image_note: str = "",
     image_size: str = "",
+    prompt_settings=None,
 ) -> str:
     """Prepend product guardrails before sending Gemini's generated prompt to Lovart."""
-    image_size_requirement = image_size_instruction(image_size).strip()
-    image_size_line = (
-        f"- {image_size_requirement}，1K画质。\n"
-        if image_size_requirement
-        else "- 不要使用默认固定图片比例，1K画质。\n"
-    )
+    settings = normalize_prompt_settings(prompt_settings)
+    output_language = str(language or "").strip() or str(settings["default_language"])
+    sections = "、".join(settings["required_sections"])
+    extra = str(settings["extra_requirements"] or "").strip()
+    extra_line = f"- 额外要求：{extra}\n" if extra else ""
     prefix = (
         f"我的产品是：{product_name_cn}\n\n"
         f"{image_note}"
         "我上传的图片是产品真实外形、结构、颜色、材质和比例的强参考。创意场景、背景和排版可以重新设计，"
         "但产品主体必须严格贴近参考图片，不要改变真实形态，不要幻想出不存在的部件、颜色或结构。\n\n"
         "【角色设定】你是一名资深电商视觉设计师，擅长商品详情页、信息层级、卖点提炼和图片生成提示词设计。\n\n"
-        "我需要你为这个产品设计一套完整的电商详情页\n"
+        f"我需要你为这个产品设计一套包含{settings['detail_page_count']}屏的完整电商详情页；一屏一张最终图片。\n"
         "设计要求：\n"
-        "- 画面要有高级感、商业感和清晰的信息层级。\n"
-        f"{image_size_line}"
-        f"- 图片语言：{language}\n"
-        "- 不要出现 logo。\n"
-        "- 文案要适合跨境电商详情页，不要空泛。\n\n"
+        f"- 整体风格：{settings['design_style']}\n"
+        f"- 每屏必须包含：{sections}\n"
+        f"- 图片画质：{settings['image_quality']}\n"
+        f"- Logo 规则：{settings['logo_policy']}\n"
+        f"- 文案要求：{settings['copy_style']}；详细程度：{settings['copy_detail_level']}\n"
+        f"- 产品还原：{settings['product_fidelity']}\n"
+        f"- {_effective_image_size_instruction(image_size, settings)}"
+        f"- 图片语言：{output_language}\n"
+        f"{extra_line}\n"
         f"产品信息/卖点：\n{selling_points}\n\n"
+        f"【锁定规则】\n{locked_rules_text()}\n\n"
         "以下是 Gemini 已生成的详细提示词，请在此基础上执行：\n\n"
     )
     return f"{prefix}{generated_prompt.strip()}\n"

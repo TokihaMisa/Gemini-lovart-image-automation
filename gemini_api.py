@@ -5,6 +5,7 @@ from pathlib import Path
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from prompt_settings import normalize_prompt_settings
 from utils import (
     build_design_prompt,
     build_lovart_confirmation_prompt,
@@ -19,10 +20,17 @@ class GeminiAPI:
 
     BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
-    def __init__(self, api_key: str, model: str = "gemini-2.5-flash-lite", logger=None):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gemini-2.5-flash-lite",
+        logger=None,
+        prompt_settings=None,
+    ):
         self.api_key = api_key
         self.model = model
         self.logger = logger
+        self.prompt_settings = normalize_prompt_settings(prompt_settings)
 
     def generate_prompt(
         self,
@@ -36,7 +44,7 @@ class GeminiAPI:
         product_id = product_id or product_name_cn
         from utils import get_resource_path
         preamble = get_resource_path("preamble.txt").read_text(encoding="utf-8")
-        prompt = f"{preamble}\n\n---\n\n{build_design_prompt(product_name_cn, language, selling_points, image_size=image_size)}"
+        prompt = f"{preamble}\n\n---\n\n{build_design_prompt(product_name_cn, language, selling_points, image_size=image_size, prompt_settings=self.prompt_settings)}"
 
         if self.logger:
             self.logger.info(f"Gemini API: sending prompt with {len(image_paths)} image(s)")

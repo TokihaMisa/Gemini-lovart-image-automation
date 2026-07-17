@@ -63,6 +63,14 @@ class NvidiaAPIBehaviorTests(unittest.TestCase):
         cfg = {"model_choice": "kimi", "models": {"kimi": "moonshotai/kimi-k2.5"}}
         self.assertEqual(resolve_nvidia_model(cfg), "moonshotai/kimi-k2.5")
 
+    def test_resolve_nvidia_model_prefers_direct_model_id(self):
+        cfg = {
+            "model": "nvidia/new-vision-model",
+            "model_choice": "kimi",
+            "models": {"kimi": "moonshotai/kimi-k2.5"},
+        }
+        self.assertEqual(resolve_nvidia_model(cfg), "nvidia/new-vision-model")
+
     def test_nvidia_payload_includes_images_as_data_urls(self):
         with tempfile.TemporaryDirectory() as tmp:
             image = Path(tmp) / "image.jpeg"

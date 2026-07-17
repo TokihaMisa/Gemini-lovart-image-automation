@@ -23,6 +23,7 @@ from gemini_api import GeminiAPI
 from gemini_bot import GeminiBot
 from lovart_bot import LOVART_IMAGE_MODELS, LovartBot
 from nvidia_api import NvidiaAPI, resolve_nvidia_model
+from prompt_settings import get_prompt_settings, normalize_prompt_settings
 from utils import (
     _read_csv_dict_rows_with_fallback,
     append_result,
@@ -431,7 +432,8 @@ def _dry_run_products(products, logger, run_dir, output_dir=None):
     return 0, 0, len(products), 0
 
 
-def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
+def _process_products(products, gemini, lovart, logger, run_dir, resume=True, prompt_settings=None):
+    prompt_settings = normalize_prompt_settings(prompt_settings)
     console = Console()
     success = fail = skipped = still_running = 0
     summary_rows = []
@@ -550,7 +552,10 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 white_result = lovart.create_support_image(
                     product_id=product.id,
                     step_name="white_bg",
-                    prompt=build_white_background_prompt(getattr(product, "image_size", "")),
+                    prompt=build_white_background_prompt(
+                        getattr(product, "image_size", ""),
+                        prompt_settings=prompt_settings,
+                    ),
                     image_paths=[product_image],
                     project_id=lovart_project_id,
                     confirmation_advisor=gemini,
@@ -611,7 +616,10 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 scene_result = lovart.create_support_image(
                     product_id=product.id,
                     step_name="scene",
-                    prompt=build_scene_prompt(getattr(product, "image_size", "")),
+                    prompt=build_scene_prompt(
+                        getattr(product, "image_size", ""),
+                        prompt_settings=prompt_settings,
+                    ),
                     image_paths=[white_image],
                     project_id=lovart_project_id,
                     confirmation_advisor=gemini,
@@ -710,6 +718,7 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
                 generated_prompt=prompt,
                 image_note=image_note,
                 image_size=getattr(product, "image_size", ""),
+                prompt_settings=prompt_settings,
             )
             (product_dir / "lovart_prompt.txt").write_text(lovart_prompt, encoding="utf-8")
             update_status(product_dir, "lovart_prompt_ready", lovart_prompt_chars=len(lovart_prompt))
@@ -835,7 +844,7 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True):
     return success, fail, skipped, still_running
 
 
-def _build_gemini_api(config, logger):
+def _build_gemini_api(config, logger, prompt_settings=None):
     api_cfg = config.get("gemini_api", {})
     api_key = env_or_config(api_cfg, "api_key", "GEMINI_API_KEY")
     model = api_cfg.get("model", "gemini-2.5-flash-lite")
@@ -843,10 +852,15 @@ def _build_gemini_api(config, logger):
         print("ERROR: GEMINI_API_KEY is not set.")
         sys.exit(1)
     logger.info(f"Using Gemini API: {model}")
-    return GeminiAPI(api_key=api_key, model=model, logger=logger)
+    return GeminiAPI(
+        api_key=api_key,
+        model=model,
+        logger=logger,
+        prompt_settings=prompt_settings if prompt_settings is not None else get_prompt_settings(config),
+    )
 
 
-def _build_nvidia_api(config, logger):
+def _build_nvidia_api(config, logger, prompt_settings=None):
     nvidia_cfg = config.get("nvidia_api", {})
     api_key = env_or_config(nvidia_cfg, "api_key", "NVIDIA_API_KEY")
     if not api_key:
@@ -863,6 +877,7 @@ def _build_nvidia_api(config, logger):
         base_url=base_url,
         logger=logger,
         send_images=send_images,
+        prompt_settings=prompt_settings if prompt_settings is not None else get_prompt_settings(config),
     )
 
 
@@ -935,7 +950,16 @@ def _kill_zombie_browsers(user_data_dir: Path, logger):
     except Exception as e:
         logger.warning(f"Failed to kill zombie browsers: {e}")
 
-def _run_browser_flow(config, products, lovart, logger, run_dir, resume=True, wait_for_ready=True):
+def _run_browser_flow(
+    config,
+    products,
+    lovart,
+    logger,
+    run_dir,
+    resume=True,
+    wait_for_ready=True,
+    prompt_settings=None,
+):
     browser_cfg = config["browser"]
     user_data_dir = Path(browser_cfg["user_data_dir"])
     if not user_data_dir.is_absolute():
@@ -978,7 +1002,15 @@ def _run_browser_flow(config, products, lovart, logger, run_dir, resume=True, wa
         if wait_for_ready:
             input("\nReady. Press Enter to start...")
         gemini = GeminiBot(page, config, logger, run_dir=run_dir)
-        result = _process_products(products, gemini, lovart, logger, run_dir, resume=resume)
+        result = _process_products(
+            products,
+            gemini,
+            lovart,
+            logger,
+            run_dir,
+            resume=resume,
+            prompt_settings=prompt_settings,
+        )
         context.close()
         return result
 
@@ -1018,6 +1050,7 @@ def main(argv=None):
         pass
 
     config = load_config(args.config)
+    prompt_settings = get_prompt_settings(config)
     logger = setup_logging()
     run_dir = create_run_dir()
     logger.info("Image Automation started")
@@ -1068,15 +1101,31 @@ def main(argv=None):
     signal.signal(signal.SIGINT, _on_sigint)
 
     if prompt_source == "gemini_api":
-        gemini = _build_gemini_api(config, logger)
+        gemini = _build_gemini_api(config, logger, prompt_settings=prompt_settings)
         if args.prompt_source == "ask" or args.lovart == "ask":
             input("\nReady. Press Enter to start...")
-        success, fail, skipped, still_running = _process_products(products, gemini, lovart, logger, run_dir, resume=args.resume)
+        success, fail, skipped, still_running = _process_products(
+            products,
+            gemini,
+            lovart,
+            logger,
+            run_dir,
+            resume=args.resume,
+            prompt_settings=prompt_settings,
+        )
     elif prompt_source == "nvidia":
-        prompt_client = _build_nvidia_api(config, logger)
+        prompt_client = _build_nvidia_api(config, logger, prompt_settings=prompt_settings)
         if args.prompt_source == "ask" or args.lovart == "ask":
             input("\nReady. Press Enter to start...")
-        success, fail, skipped, still_running = _process_products(products, prompt_client, lovart, logger, run_dir, resume=args.resume)
+        success, fail, skipped, still_running = _process_products(
+            products,
+            prompt_client,
+            lovart,
+            logger,
+            run_dir,
+            resume=args.resume,
+            prompt_settings=prompt_settings,
+        )
     else:
         success, fail, skipped, still_running = _run_browser_flow(
             config,
@@ -1086,6 +1135,7 @@ def main(argv=None):
             run_dir,
             resume=args.resume,
             wait_for_ready=args.prompt_source == "ask" or args.lovart == "ask",
+            prompt_settings=prompt_settings,
         )
 
     print(
