@@ -533,6 +533,29 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertIn("图片已验证支持", choices[0][0])
 
     @patch("webui.test_selected_model")
+    def test_probe_normalizes_custom_model_id_for_request_catalog_status_and_selection(self, test_model):
+        test_model.return_value = ModelTestResult(True, "模型可用", 8)
+        status, choices, selected, catalog = probe_provider_model(
+            "gemini", "key", "https://google.test/v1beta", "  custom/gemini-model  ", []
+        )
+        self.assertIn("模型可用", status)
+        test_model.assert_called_once_with(
+            "gemini", "key", "https://google.test/v1beta", "custom/gemini-model"
+        )
+        self.assertEqual(selected, "custom/gemini-model")
+        self.assertEqual([value for _, value in choices], ["custom/gemini-model"])
+        self.assertEqual(catalog[0]["model_id"], "custom/gemini-model")
+        self.assertEqual(catalog[0]["image_input_status"], "verified")
+
+    def test_probe_invalid_model_id_uses_user_error_without_forging_catalog(self):
+        status, choices, _selected, catalog = probe_provider_model(
+            "nvidia", "key", "https://nvidia.test/v1", "bad\nmodel", []
+        )
+        self.assertIn("模型 ID 不能包含换行符", status)
+        self.assertEqual(choices, [])
+        self.assertEqual(catalog, [])
+
+    @patch("webui.test_selected_model")
     def test_probe_error_keeps_custom_model_and_uses_test_failed_label(self, test_model):
         test_model.side_effect = ModelProviderError("network", "网络连接失败")
         status, choices, selected, catalog = probe_provider_model(
@@ -682,8 +705,10 @@ class WebUIModelSettingsTests(unittest.TestCase):
             original_cwd = Path.cwd()
             os.chdir(tmp)
             try:
-                Path("config.yaml").write_text("original: config\n", encoding="utf-8")
+                original_config = b"original: config\n"
+                Path("config.yaml").write_bytes(original_config)
                 Path(".env").write_text("ORIGINAL_ENV=1\n", encoding="utf-8")
+                rollback_path = Path(".config.yaml.rollback.tmp").resolve()
                 real_replace = os.replace
                 replace_count = 0
 
@@ -702,6 +727,9 @@ class WebUIModelSettingsTests(unittest.TestCase):
                         "https://gemini.test/v1beta", "gemini-model",
                         "https://nvidia.test/v1", "nvidia-model",
                     )
+                self.assertTrue(rollback_path.exists())
+                self.assertEqual(rollback_path.read_bytes(), original_config)
+                self.assertIn(str(rollback_path), status)
             finally:
                 os.chdir(original_cwd)
         self.assertIn("env write failed", status)

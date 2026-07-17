@@ -160,12 +160,16 @@ def _restore_file_snapshot(path: str | Path, snapshot: tuple[bool, bytes]):
         return
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_name(f".{target.name}.rollback.tmp")
+    temp.write_bytes(data)
     try:
-        temp.write_bytes(data)
         os.replace(temp, target)
-    finally:
-        if temp.exists():
-            temp.unlink()
+    except Exception as exc:
+        backup_path = temp.resolve()
+        raise OSError(
+            f"恢复替换失败；原始副本已保留在 {backup_path}: {exc}"
+        ) from exc
+    if temp.exists():
+        temp.unlink()
 
 
 def _restore_file_snapshots(snapshots) -> list[str]:
@@ -327,6 +331,7 @@ def probe_provider_model(provider, api_key, base_url, model_id, catalog):
         normalized_model_id = validate_model_id(model_id)
     except ModelProviderError:
         normalized_model_id = None
+    effective_model_id = normalized_model_id if normalized_model_id is not None else model_id
     if normalized_model_id and not any(
         item.get("model_id") == normalized_model_id for item in working_catalog
     ):
@@ -340,7 +345,7 @@ def probe_provider_model(provider, api_key, base_url, model_id, catalog):
             recommendation="available",
         )))
     try:
-        result = test_selected_model(provider, api_key, base_url, model_id)
+        result = test_selected_model(provider, api_key, base_url, effective_model_id)
         succeeded = bool(result.ok)
         status_icon = "✅" if succeeded else "❌"
         status = (
@@ -351,10 +356,10 @@ def probe_provider_model(provider, api_key, base_url, model_id, catalog):
         succeeded = False
         status = f"❌ {exc.user_message} 测试可能产生极少量 API 用量。"
     updated_catalog = update_catalog_image_status(
-        working_catalog, model_id, "verified" if succeeded else "failed"
+        working_catalog, effective_model_id, "verified" if succeeded else "failed"
     )
     models = [DiscoveredModel(**item) for item in updated_catalog]
-    return status, model_choice_labels(models), model_id, updated_catalog
+    return status, model_choice_labels(models), effective_model_id, updated_catalog
 
 
 test_provider_model.__test__ = False
