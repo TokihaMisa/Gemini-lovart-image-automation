@@ -177,9 +177,9 @@ class GeminiBot:
             if error.code == 404:
                 return "not_found"
         message = str(error).casefold()
-        if "err_access_denied" in message or "access denied" in message:
+        if "err_access_denied" in message:
             return "auth"
-        if "err_file_not_found" in message or "not found" in message:
+        if "err_file_not_found" in message:
             return "not_found"
         return classify_network_error(error).value
 
@@ -191,8 +191,8 @@ class GeminiBot:
             return error.code in {408, 429} or 500 <= error.code <= 599
         message = str(error).casefold()
         permanent_markers = (
-            "err_cert_", "certificate verify", "err_access_denied", "access denied",
-            "blocked", "forbidden", "authentication", "authorization", "not authorized",
+            "err_cert_", "certificate verify", "err_access_denied",
+            "err_blocked_by_client", "err_blocked_by_response",
         )
         if any(marker in message for marker in permanent_markers):
             return False
@@ -225,9 +225,9 @@ class GeminiBot:
                 return GeminiAuthenticationError()
             if error.code == 404:
                 return GeminiResourceNotFoundError()
-        if "err_access_denied" in message or "access denied" in message:
+        if "err_access_denied" in message:
             return GeminiAuthenticationError()
-        if "err_file_not_found" in message or "not found" in message:
+        if "err_file_not_found" in message:
             return GeminiResourceNotFoundError()
         return GeminiPageNotReadyError()
 

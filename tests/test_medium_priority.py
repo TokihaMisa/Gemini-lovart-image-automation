@@ -117,6 +117,38 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             with self.subTest(error=type(error).__name__, expected=expected):
                 self.assertEqual(GeminiBot._error_kind(error), expected)
 
+    def test_not_found_words_do_not_override_explicit_transient_categories(self):
+        cases = (
+            RuntimeError("net::ERR_NAME_NOT_RESOLVED host not found private@example.com"),
+            HTTPError("https://x", 500, "backend not found private@example.com", {}, None),
+            RuntimeError("net::ERR_CONNECTION_RESET authentication helper not found private@example.com"),
+        )
+
+        for error in cases:
+            class Bot(GeminiBot):
+                def __init__(self):
+                    super().__init__(
+                        object(),
+                        {"gemini": {}, "browser": {"product_attempts": 2, "retry_delays": [0]}},
+                        FakeFormalLogger(),
+                    )
+                    self.calls = 0
+
+                def _generate_prompt_once(self, *_args, **_kwargs):
+                    self.calls += 1
+                    raise error
+
+            with self.subTest(error=str(error).split()[0]):
+                self.assertEqual(GeminiBot._error_kind(error), "transient")
+                bot = Bot()
+                with self.assertRaises(GeminiPageNotReadyError) as raised:
+                    bot.generate_prompt("产品", "Spanish", "卖点", [])
+                self.assertEqual(bot.calls, 2)
+                self.assertNotIn(
+                    "private@example.com",
+                    "".join(traceback.format_exception(raised.exception)),
+                )
+
     def test_upload_completion_fails_closed_for_evaluate_errors_files_and_unrelated_images(self):
         class Page:
             def __init__(self, value):
