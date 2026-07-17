@@ -1,3 +1,4 @@
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,22 +11,15 @@ from setup_wizard import (
     optional_or_placeholder_env_keys,
 )
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
 
 class SetupWizardTests(unittest.TestCase):
     def test_ensure_local_setup_files_creates_templates_and_data_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / ".env.example").write_text("GEMINI_API_KEY=your_gemini_api_key\n", encoding="utf-8")
-            (root / "config.example.yaml").write_text(
-                """gemini_api:
-  model: gemini-2.5-flash-lite
-nvidia_api:
-  model: moonshotai/kimi-k2.5
-prompt_settings:
-  detail_page_count: 12
-""",
-                encoding="utf-8",
-            )
+            shutil.copyfile(REPOSITORY_ROOT / "config.example.yaml", root / "config.example.yaml")
 
             actions = ensure_local_setup_files(root)
 
