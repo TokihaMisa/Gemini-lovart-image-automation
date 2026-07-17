@@ -152,9 +152,12 @@ _PAGE_INSPECTION_SCRIPT = r"""
     .replace(/[\u0300-\u036f]/g, '').toLowerCase();
   const text = normalize(document.body ? document.body.innerText : '');
   const hasVisible = (selector) => Array.from(document.querySelectorAll(selector)).some(visible);
-  const controls = Array.from(document.querySelectorAll('button, [role=button], [role=menuitem]'))
-    .filter(visible).map((node) => (node.innerText || node.getAttribute('aria-label') || '').trim())
-    .filter(Boolean).slice(0, 30);
+  const controls = Array.from(document.querySelectorAll('button, [role=button], [role=menuitem], [aria-label], [title], [data-tooltip]'))
+    .filter(visible)
+    .map((node) => [node.innerText, node.getAttribute('aria-label'), node.getAttribute('title'), node.getAttribute('data-tooltip')]
+      .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().slice(0, 160))
+    .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index)
+    .slice(0, 20);
   return {
     language: document.documentElement.lang || navigator.language || '',
     has_editor: hasVisible('textarea, [contenteditable=true], [role=textbox]'),

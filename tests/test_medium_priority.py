@@ -7,11 +7,22 @@ import traceback
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 import main
 from excel_reader import resolve_image_scan_config
-from gemini_bot import GeminiBot
-from gemini_browser_session import GeminiPageState, LoginStatus
+from gemini_bot import (
+    EXTENDED_THINKING_TERMS,
+    MODE_TERMS,
+    TEMPORARY_CHAT_TERMS,
+    UPLOAD_TERMS,
+    GeminiBot,
+    GeminiPageStructureError,
+    matches_ui_term,
+    normalize_ui_text,
+    save_gemini_diagnostics,
+)
+from gemini_browser_session import GeminiLoginRequiredError, GeminiPageState, LoginStatus
 from main import (
     _backfill_result_project_urls,
     _choose_lovart_tool_options,
@@ -83,6 +94,168 @@ def run_formal_flow_for_test(*, wait_for_ready=False):
 
 
 class MediumPriorityBehaviorTests(unittest.TestCase):
+    def test_spanish_text_normalization_removes_accents_and_case(self):
+        self.assertEqual(normalize_ui_text("  PENSAMIENTO RÁPIDO  "), "pensamiento rapido")
+
+    def test_spanish_mode_and_upload_terms_are_recognized(self):
+        self.assertTrue(matches_ui_term("Rápido", MODE_TERMS))
+        self.assertTrue(matches_ui_term("Pensamiento ampliado", EXTENDED_THINKING_TERMS))
+        self.assertTrue(matches_ui_term("Adjuntar archivos", UPLOAD_TERMS))
+        self.assertTrue(matches_ui_term("Chat temporal", TEMPORARY_CHAT_TERMS))
+
+    def test_product_prompt_is_not_sent_when_upload_never_completes(self):
+        class NullPage:
+            def goto(self, _url, **_kwargs):
+                pass
+
+            def wait_for_timeout(self, _milliseconds):
+                pass
+
+        class Logger:
+            def info(self, _message):
+                pass
+
+            def warning(self, _message):
+                pass
+
+        class OrderedGeminiBot(GeminiBot):
+            def __init__(self):
+                super().__init__(NullPage(), {"gemini": {"thinking_mode": True}, "browser": {"product_attempts": 2}}, Logger())
+                self.events = []
+
+            def _start_temporary_chat(self):
+                self.events.append("temporary_chat")
+                return True
+
+            def _select_thinking_mode(self):
+                self.events.append("thinking")
+                return True
+
+            def _response_count(self):
+                return 0
+
+            def _send_message(self, text):
+                self.events.append("product_prompt" if "产品信息/卖点" in text else "preamble")
+
+            def _wait_for_reply(self, **_kwargs):
+                pass
+
+            def _upload_images(self, _paths):
+                self.events.append("upload")
+                return False
+
+        bot = OrderedGeminiBot()
+        with self.assertRaisesRegex(RuntimeError, "image upload did not complete"):
+            bot.generate_prompt("产品", "Spanish", "卖点", ["image.jpg"])
+        self.assertNotIn("product_prompt", bot.events)
+
+    def test_transient_first_product_attempt_restarts_temporary_chat_then_succeeds(self):
+        class NullPage:
+            pass
+
+        class Logger:
+            def info(self, _message):
+                pass
+
+            def warning(self, _message):
+                pass
+
+        class RetryGeminiBot(GeminiBot):
+            def __init__(self):
+                super().__init__(NullPage(), {"gemini": {}, "browser": {"product_attempts": 2, "retry_delays": [0]}}, Logger())
+                self.attempts = 0
+                self.events = []
+
+            def _generate_prompt_once(self, *_args, **_kwargs):
+                self.attempts += 1
+                self.events.append("temporary_chat")
+                if self.attempts == 1:
+                    raise RuntimeError("net::ERR_CONNECTION_RESET")
+                return "generated prompt"
+
+        bot = RetryGeminiBot()
+        with patch("network_retry.time.sleep"):
+            self.assertEqual(bot.generate_prompt("产品", "Spanish", "卖点", ["image.jpg"]), "generated prompt")
+        self.assertEqual(bot.attempts, 2)
+        self.assertEqual(bot.events.count("temporary_chat"), 2)
+
+    def test_product_retry_stops_after_two_attempts(self):
+        class RetryGeminiBot(GeminiBot):
+            def __init__(self):
+                super().__init__(object(), {"gemini": {}, "browser": {"product_attempts": 9, "retry_delays": [0]}}, FakeFormalLogger())
+                self.attempts = 0
+
+            def _generate_prompt_once(self, *_args, **_kwargs):
+                self.attempts += 1
+                raise GeminiPageStructureError("missing control")
+
+        bot = RetryGeminiBot()
+        with self.assertRaises(GeminiPageStructureError), patch("network_retry.time.sleep"):
+            bot.generate_prompt("产品", "Spanish", "卖点", [])
+        self.assertEqual(bot.attempts, 2)
+
+    def test_login_tls_auth_and_verified_upload_errors_are_not_retried(self):
+        for error in (
+            GeminiLoginRequiredError(),
+            ssl.SSLCertVerificationError("certificate verify failed"),
+            HTTPError("https://gemini.google.com/app", 403, "denied", {}, None),
+            RuntimeError("Gemini image upload did not complete"),
+        ):
+            class RetryGeminiBot(GeminiBot):
+                def __init__(self):
+                    super().__init__(object(), {"gemini": {}, "browser": {"product_attempts": 2}}, FakeFormalLogger())
+                    self.attempts = 0
+
+                def _generate_prompt_once(self, *_args, **_kwargs):
+                    self.attempts += 1
+                    raise error
+
+            bot = RetryGeminiBot()
+            with self.assertRaises(type(error)):
+                bot.generate_prompt("产品", "Spanish", "卖点", [])
+            self.assertEqual(bot.attempts, 1)
+
+    def test_thinking_recovery_raises_login_error_without_retrying_controls(self):
+        class RecoveryBot(GeminiBot):
+            def __init__(self):
+                super().__init__(object(), {"gemini": {}}, FakeFormalLogger())
+                self.selects = 0
+
+            def _select_thinking_mode(self):
+                self.selects += 1
+                return False
+
+        bot = RecoveryBot()
+        waiting = LoginStatus.create(GeminiPageState.WAITING_LOGIN, False, "https://accounts.google.com/signin?email=secret@example.com", "es", "login")
+        with patch("gemini_bot.inspect_gemini_page", return_value=waiting):
+            with self.assertRaises(GeminiLoginRequiredError):
+                bot._select_thinking_mode_with_recovery("SKU-1")
+        self.assertEqual(bot.selects, 1)
+
+    def test_diagnostics_redacts_query_email_and_raw_error(self):
+        class DiagnosticPage:
+            url = "https://gemini.google.com/app?email=secret@example.com&token=private"
+
+            def evaluate(self, _script):
+                return {"language": "es", "controls": ["Adjuntar archivos", "secret@example.com", "x" * 300]}
+
+            def screenshot(self, **_kwargs):
+                pass
+
+            def content(self):
+                return "<html>private</html>"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = save_gemini_diagnostics(
+                DiagnosticPage(), Path(tmp), "SKU/1", "failed: secret@example.com", 2, "raw token=private",
+            )
+            payload = json.loads(result.read_text(encoding="utf-8"))
+        self.assertEqual(payload["url"], "https://gemini.google.com/app")
+        self.assertNotIn("secret@example.com", json.dumps(payload))
+        self.assertNotIn("private", json.dumps(payload))
+        self.assertLessEqual(len(payload["controls"]), 20)
+        self.assertLessEqual(max(map(len, payload["controls"])), 160)
+
     def test_ui_mode_uses_defaults_without_console_input(self):
         config = {"gemini_api": {}, "nvidia_api": {}, "lovart": {}}
         args = parse_args(["--prompt-source", "ask", "--lovart", "ask"])

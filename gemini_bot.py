@@ -1,10 +1,19 @@
 import json
 import time
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+import unicodedata
 
 from playwright.sync_api import Page
 
 from prompt_settings import get_prompt_settings
+from gemini_browser_session import (
+    GeminiLoginRequiredError,
+    GeminiPageState,
+    inspect_gemini_page,
+    navigate_gemini_with_retry,
+)
+from network_retry import RetryKind, classify_network_error, retry_policy_from_config
 from utils import (
     build_design_prompt,
     build_lovart_confirmation_prompt,
@@ -15,13 +24,139 @@ from utils import (
 )
 
 
+def normalize_ui_text(text: str) -> str:
+    """Normalize UI labels across Chinese, English, and accented Spanish."""
+    decomposed = unicodedata.normalize("NFKD", str(text or ""))
+    without_marks = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return " ".join(without_marks.casefold().split())
+
+
+def matches_ui_term(text: str, terms) -> bool:
+    value = normalize_ui_text(text)
+    return any(normalize_ui_text(term) in value for term in terms)
+
+
+MODE_TERMS = frozenset(("快速", "fast", "flash", "rápido", "modo rápido"))
+EXTENDED_THINKING_TERMS = frozenset(("扩展思考", "extended thinking", "pensamiento ampliado"))
+UPLOAD_TERMS = frozenset(("上传", "attach", "upload", "adjuntar archivos", "adjuntar"))
+TEMPORARY_CHAT_TERMS = frozenset(("临时", "temporary", "chat temporal"))
+
+
+class GeminiPageStructureError(RuntimeError):
+    """Gemini loaded but its expected controls were not present."""
+
+
+def _safe_origin_path(url: str) -> str:
+    parts = urlsplit(str(url or ""))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
+def _safe_controls(page: Page) -> list[str]:
+    """Collect a small, privacy-safe control summary for diagnostics."""
+    try:
+        payload = page.evaluate(
+            """() => ({ language: document.documentElement.lang || navigator.language || '',
+                controls: [...document.querySelectorAll('button, [role=button], [role=menuitem], [aria-label], [title]')]
+                  .filter((node) => { const rect = node.getBoundingClientRect(); const style = getComputedStyle(node); return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'; })
+                  .map((node) => [node.innerText, node.getAttribute('aria-label'), node.getAttribute('title'), node.getAttribute('data-tooltip')].filter(Boolean).join(' ').trim())
+                  .filter(Boolean).slice(0, 40) })"""
+        ) or {}
+    except Exception:
+        payload = {}
+    controls = payload.get("controls", []) if isinstance(payload, dict) else []
+    unique: list[str] = []
+    for item in controls if isinstance(controls, list) else []:
+        text = " ".join(str(item).split())[:160]
+        # A label containing an email address is not a safe diagnostic.
+        if "@" in text or not text or text in unique:
+            continue
+        unique.append(text)
+        if len(unique) >= 20:
+            break
+    return unique
+
+
+def save_gemini_diagnostics(
+    page: Page,
+    run_dir: str | Path,
+    product_id: str,
+    reason: str,
+    attempts: int,
+    error_kind: str,
+) -> Path:
+    """Persist only bounded, redacted metadata; debug artifacts stay best-effort."""
+    debug_dir = Path(run_dir) / "browser-debug" / sanitize_filename(product_id)
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    stamp = int(time.time())
+    # Do not turn a raw exception (which can include addresses or URLs) into a filename.
+    safe_label = "diagnostic"
+    base = debug_dir / f"{stamp}-{safe_label}"
+    try:
+        page.screenshot(path=str(base.with_suffix(".png")), full_page=True)
+    except Exception:
+        pass
+    try:
+        base.with_suffix(".html").write_text(page.content(), encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        inspected = page.evaluate("() => ({ language: document.documentElement.lang || navigator.language || '' })") or {}
+    except Exception:
+        inspected = {}
+    metadata = {
+        "url": _safe_origin_path(getattr(page, "url", "")),
+        "language": str(inspected.get("language", "")) if isinstance(inspected, dict) else "",
+        "controls": _safe_controls(page),
+        "attempts": max(1, int(attempts)),
+        "error_kind": (
+            normalize_ui_text(error_kind)
+            if normalize_ui_text(error_kind) in {"transient", "permanent_tls", "auth", "not_found", "other", "login_required", "page_structure"}
+            else "other"
+        ),
+    }
+    result = base.with_suffix(".json")
+    result.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
+
+
 class GeminiBot:
     def __init__(self, page: Page, config: dict, logger, run_dir: str | Path | None = None):
         self.page = page
-        self.cfg = config["gemini"]
+        self.cfg = config.get("gemini", {})
+        self._browser_config = config.get("browser", {})
         self.logger = logger
         self.run_dir = Path(run_dir) if run_dir else None
         self.prompt_settings = get_prompt_settings(config)
+
+    @staticmethod
+    def _error_kind(error: BaseException) -> str:
+        if isinstance(error, GeminiLoginRequiredError):
+            return "login_required"
+        if isinstance(error, GeminiPageStructureError):
+            return "page_structure"
+        return classify_network_error(error).value
+
+    @staticmethod
+    def _is_retryable_product_error(error: BaseException) -> bool:
+        return isinstance(error, GeminiPageStructureError) or classify_network_error(error) is RetryKind.TRANSIENT
+
+    def _select_thinking_mode_with_recovery(self, product_id: str) -> None:
+        if self._select_thinking_mode():
+            return
+        status = inspect_gemini_page(self.page)
+        if status.state is GeminiPageState.WAITING_LOGIN:
+            raise GeminiLoginRequiredError()
+        if status.state is GeminiPageState.PAGE_LOADING:
+            policy = retry_policy_from_config({"browser": self._browser_config})
+            status = navigate_gemini_with_retry(
+                self.page, "https://gemini.google.com/app", policy, logger=self.logger
+            )
+            if status.state is GeminiPageState.WAITING_LOGIN:
+                raise GeminiLoginRequiredError()
+            if self._select_thinking_mode():
+                return
+        self._save_debug_snapshot(product_id, "thinking-mode-not-selected", 1, "page_structure")
+        raise GeminiPageStructureError("Gemini Thinking mode control is missing on a ready page")
 
     def generate_prompt(
         self,
@@ -34,7 +169,39 @@ class GeminiBot:
     ) -> str:
         product_id = product_id or product_name_cn
         self.logger.info(f"Gemini: starting for '{product_name_cn}'")
+        policy = retry_policy_from_config({"browser": self._browser_config})
+        product_attempts = min(2, policy.product_attempts)
+        last_error: Exception | None = None
+        for attempt in range(1, product_attempts + 1):
+            try:
+                result = self._generate_prompt_once(
+                    product_name_cn, language, selling_points, image_paths, product_id, image_size
+                )
+                out_dir = product_output_dir(product_id)
+                (out_dir / "gemini_prompt.txt").write_text(result, encoding="utf-8")
+                update_status(out_dir, "gemini_done", gemini_chars=len(result))
+                return result
+            except Exception as exc:
+                last_error = exc
+                if not self._is_retryable_product_error(exc) or attempt >= product_attempts:
+                    self._save_debug_snapshot(product_id, "exception", attempt, self._error_kind(exc))
+                    raise
+                self.logger.warning(f"Gemini: retrying product prompt attempt {attempt + 1}/{product_attempts}")
+                delay = policy.delay_after(attempt)
+                if delay:
+                    from network_retry import time as retry_time
+                    retry_time.sleep(delay)
+        raise last_error or RuntimeError("Gemini product prompt failed")
 
+    def _generate_prompt_once(
+        self,
+        product_name_cn: str,
+        language: str,
+        selling_points: str,
+        image_paths: list[str],
+        product_id: str,
+        image_size: str,
+    ) -> str:
         try:
             try:
                 self.page.goto("https://gemini.google.com/app", wait_until="domcontentloaded")
@@ -47,9 +214,8 @@ class GeminiBot:
                     raise
             self.page.wait_for_timeout(4000)
             self._start_temporary_chat()
-            if self.cfg.get("thinking_mode", True) and not self._select_thinking_mode():
-                self._save_debug_snapshot(product_id, "thinking-mode-not-selected")
-                raise RuntimeError("Gemini Thinking mode could not be selected")
+            if self.cfg.get("thinking_mode", True):
+                self._select_thinking_mode_with_recovery(product_id)
 
             from utils import get_resource_path
             preamble = get_resource_path("preamble.txt").read_text(encoding="utf-8")
@@ -62,7 +228,6 @@ class GeminiBot:
             )
 
             if image_paths and not self._upload_images(image_paths):
-                self._save_debug_snapshot(product_id, "image-upload-failed")
                 raise RuntimeError("Gemini image upload did not complete")
 
             prompt = build_design_prompt(
@@ -82,12 +247,8 @@ class GeminiBot:
                 self._save_debug_snapshot(product_id, "short-response")
             self.logger.info(f"Gemini: got response ({len(result)} chars)")
 
-            out_dir = product_output_dir(product_id)
-            (out_dir / "gemini_prompt.txt").write_text(result, encoding="utf-8")
-            update_status(out_dir, "gemini_done", gemini_chars=len(result))
             return result
         except Exception:
-            self._save_debug_snapshot(product_id, "exception")
             raise
 
     def advise_lovart_confirmation(
@@ -151,6 +312,10 @@ class GeminiBot:
             '[role="button"][aria-label*="Temporary"]',
             'button:has-text("Temporary")',
             '[role="button"]:has-text("Temporary")',
+            'button[aria-label*="Chat temporal"]',
+            '[role="button"][aria-label*="Chat temporal"]',
+            'button:has-text("Chat temporal")',
+            '[role="button"]:has-text("Chat temporal")',
         ]
         for selector in selectors:
             try:
@@ -165,7 +330,7 @@ class GeminiBot:
 
         script = """
         () => {
-            const patterns = [/临时/, /臨時/, /temporary/i];
+            const patterns = [/临时/, /臨時/, /temporary/i, /chat temporal/i];
             const candidates = [...document.querySelectorAll('button, [role="button"], a')];
             const visible = (el) => {
                 const rect = el.getBoundingClientRect();
@@ -320,10 +485,13 @@ class GeminiBot:
             'button:has-text("Extended thinking")',
             '[role="button"]:has-text("Extended thinking")',
             'mat-option:has-text("Extended thinking")',
+            'gem-menu-item:has-text("Pensamiento ampliado")',
+            '[role="menuitem"]:has-text("Pensamiento ampliado")',
+            'button:has-text("Pensamiento ampliado")',
         ]
         if self._click_gemini_control(
             selectors,
-            r'[/\u6269\u5c55\u601d\u8003/, /extended\s+thinking/i]',
+            r'[/\u6269\u5c55\u601d\u8003/, /extended\s+thinking/i, /pensamiento\s+ampliado/i]',
             "extended thinking option",
         ):
             return True
@@ -361,8 +529,11 @@ class GeminiBot:
             '[role="menuitem"]:has-text("Thinking level")',
             'button:has-text("Thinking level")',
             '[role="button"]:has-text("Thinking level")',
+            'gem-menu-item:has-text("Nivel de pensamiento")',
+            '[role="menuitem"]:has-text("Nivel de pensamiento")',
+            'button:has-text("Nivel de pensamiento")',
         ]
-        return self._click_gemini_control(selectors, r'[/思考等级/, /thinking level/i]', "thinking level menu")
+        return self._click_gemini_control(selectors, r'[/思考等级/, /thinking level/i, /nivel de pensamiento/i]', "thinking level menu")
 
     def _click_extended_thinking_level(self) -> bool:
         selectors = [
@@ -408,7 +579,7 @@ class GeminiBot:
 
         script = """
         () => {
-            const include = [/思考模式/, /^思考$/, /思考等级/, /thinking mode/i, /^thinking$/i, /deep think/i];
+            const include = [/思考模式/, /^思考$/, /思考等级/, /thinking mode/i, /^thinking$/i, /deep think/i, /pensamiento/i];
             const exclude = [/显示思路/, /显示思考/, /show thinking/i, /思路/, /thought/i];
             const candidates = [...document.querySelectorAll('button, [role="button"], [role="menuitem"], gem-menu-item, mat-option, [aria-label], [title]')];
             const visible = (el) => {
@@ -610,6 +781,10 @@ class GeminiBot:
             '[role="button"][aria-label*="Fast"]',
             'button:has-text("Fast")',
             '[role="button"]:has-text("Fast")',
+            'button[aria-label*="Rápido"]',
+            '[role="button"][aria-label*="Rápido"]',
+            'button:has-text("Rápido")',
+            '[role="button"]:has-text("Rápido")',
             'button[aria-label*="mode"]',
             '[role="button"][aria-label*="mode"]',
             'button[aria-label*="模式"]',
@@ -627,7 +802,7 @@ class GeminiBot:
 
         script = """
         () => {
-            const patterns = [/打开模式选择器/, /快速模式/, /^快速$/, /fast mode/i, /^fast$/i, /^flash$/i, /mode/i, /模式/, /^pro$/i];
+            const patterns = [/打开模式选择器/, /快速模式/, /^快速$/, /fast mode/i, /^fast$/i, /^flash$/i, /mode/i, /模式/, /^pro$/i, /^rapido$/i, /modo rapido/i];
             const exclude = [/fast forward/i, /快速生成图片/];
             const candidates = [...document.querySelectorAll('button, [role="button"], [aria-label], [title]')];
             const visible = (el) => {
@@ -706,6 +881,8 @@ class GeminiBot:
             'button[aria-label*="Upload"]',
             'button[aria-label*="attach"]',
             'button[aria-label*="Attach"]',
+            'button[aria-label*="Adjuntar"]',
+            '[role="button"][aria-label*="Adjuntar"]',
             '[role="button"][aria-label*="上传和工具"]',
         ]
         
@@ -727,7 +904,7 @@ class GeminiBot:
         if not clicked and hasattr(self.page, "evaluate"):
             script = """
             () => {
-                const include = [/上传和工具/, /上传/, /添加文件/, /添加图片/, /附件/, /upload/i, /attach/i, /add files/i, /add image/i];
+                const include = [/上传和工具/, /上传/, /添加文件/, /添加图片/, /附件/, /upload/i, /attach/i, /adjuntar/i, /add files/i, /add image/i];
                 const candidates = [...document.querySelectorAll('button, [role="button"], [aria-label], [title]')];
                 const visible = (el) => {
                     const rect = el.getBoundingClientRect();
@@ -775,6 +952,9 @@ class GeminiBot:
             'button:has-text("Upload file")',
             'gem-menu-item:has-text("上传文件")',
             'button:has-text("file")',
+            'li:has-text("Adjuntar archivos")',
+            '[role="menuitem"]:has-text("Adjuntar archivos")',
+            'button:has-text("Adjuntar archivos")',
             'div:has-text("从您的计算机")',
         ]:
             try:
@@ -1027,21 +1207,17 @@ class GeminiBot:
         except Exception:
             return "(could not extract response)"
 
-    def _save_debug_snapshot(self, product_id: str, label: str) -> None:
+    def _save_debug_snapshot(
+        self, product_id: str, label: str, attempts: int = 1, error_kind: str = "other"
+    ) -> None:
         if not self.run_dir:
             return
-        debug_dir = self.run_dir / "browser-debug" / sanitize_filename(product_id)
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        stamp = int(time.time())
-        base = debug_dir / f"{stamp}-{sanitize_filename(label)}"
         try:
-            self.page.screenshot(path=str(base.with_suffix(".png")), full_page=True)
+            save_gemini_diagnostics(
+                self.page, self.run_dir, product_id, label, attempts, error_kind
+            )
         except Exception as exc:
-            self.logger.warning(f"Gemini: failed to save screenshot: {exc}")
-        try:
-            base.with_suffix(".html").write_text(self.page.content(), encoding="utf-8")
-        except Exception as exc:
-            self.logger.warning(f"Gemini: failed to save HTML snapshot: {exc}")
+            self.logger.warning("Gemini: failed to save sanitized diagnostics")
 
     @staticmethod
     def _strip_gemini_chrome(text: str) -> str:
