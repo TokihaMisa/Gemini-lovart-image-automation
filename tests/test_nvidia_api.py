@@ -3,9 +3,11 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from main import _build_nvidia_api, _choose_prompt_source, parse_args
+from gemini_api import GeminiAPI
+from main import _build_gemini_api, _build_nvidia_api, _choose_prompt_source, parse_args
+from model_provider import ModelProviderError
 from nvidia_api import NvidiaAPI, resolve_nvidia_model
 
 
@@ -63,6 +65,14 @@ class NvidiaAPIBehaviorTests(unittest.TestCase):
         cfg = {"model_choice": "kimi", "models": {"kimi": "moonshotai/kimi-k2.5"}}
         self.assertEqual(resolve_nvidia_model(cfg), "moonshotai/kimi-k2.5")
 
+    def test_resolve_nvidia_model_prefers_direct_model_id(self):
+        cfg = {
+            "model": "nvidia/new-vision-model",
+            "model_choice": "kimi",
+            "models": {"kimi": "moonshotai/kimi-k2.5"},
+        }
+        self.assertEqual(resolve_nvidia_model(cfg), "nvidia/new-vision-model")
+
     def test_nvidia_payload_includes_images_as_data_urls(self):
         with tempfile.TemporaryDirectory() as tmp:
             image = Path(tmp) / "image.jpeg"
@@ -74,6 +84,20 @@ class NvidiaAPIBehaviorTests(unittest.TestCase):
         self.assertEqual(content[0], {"type": "text", "text": "hello"})
         self.assertEqual(content[1]["type"], "image_url")
         self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
+
+    def test_nvidia_client_rejects_invalid_base_url(self):
+        with self.assertRaises(ModelProviderError) as ctx:
+            NvidiaAPI(api_key="key", model="nvidia/model", base_url="not-a-url")
+        self.assertEqual(ctx.exception.code, "invalid_base_url")
+
+    def test_nvidia_client_rejects_model_id_line_breaks(self):
+        with self.assertRaises(ModelProviderError) as ctx:
+            NvidiaAPI(
+                api_key="key",
+                model="nvidia/model\r\nInjected: value",
+                base_url="https://nvidia.test/v1",
+            )
+        self.assertEqual(ctx.exception.code, "invalid_model")
 
     def test_build_nvidia_api_sends_images_for_kimi(self):
         cfg = {
@@ -88,6 +112,56 @@ class NvidiaAPIBehaviorTests(unittest.TestCase):
             client = _build_nvidia_api(cfg, logger=None)
 
         self.assertTrue(client.send_images)
+
+    def test_build_nvidia_api_uses_configured_base_url(self):
+        cfg = {
+            "nvidia_api": {
+                "base_url": "https://nvidia.proxy.test/v1",
+                "model": "nvidia/custom",
+                "send_images": True,
+            }
+        }
+        with patch.dict("os.environ", {"NVIDIA_API_KEY": "key"}):
+            client = _build_nvidia_api(cfg, logger=None)
+        self.assertEqual(client.base_url, "https://nvidia.proxy.test/v1")
+
+    def test_build_gemini_api_uses_configured_base_url_and_model(self):
+        cfg = {
+            "gemini_api": {
+                "base_url": "https://gemini.proxy.test/v1beta",
+                "model": "gemini-custom",
+            }
+        }
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "key"}):
+            client = _build_gemini_api(cfg, logger=MagicMock())
+        self.assertEqual(client.base_url, "https://gemini.proxy.test/v1beta")
+        self.assertEqual(client.model, "gemini-custom")
+
+    @patch("urllib.request.urlopen")
+    def test_gemini_formal_request_uses_client_base_url(self, urlopen):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "candidates": [{"content": {"parts": [{"text": "result"}]}}]
+                }).encode("utf-8")
+
+        urlopen.return_value = Response()
+        client = GeminiAPI(
+            api_key="key",
+            model="gemini-custom",
+            base_url="https://gemini.proxy.test/v1beta",
+        )
+        self.assertEqual(client._call("hello", []), "result")
+        request = urlopen.call_args.args[0]
+        self.assertTrue(request.full_url.startswith(
+            "https://gemini.proxy.test/v1beta/models/gemini-custom:generateContent"
+        ))
 
     def test_nvidia_extracts_chat_completion_text(self):
         data = {"choices": [{"message": {"content": "result text"}}]}

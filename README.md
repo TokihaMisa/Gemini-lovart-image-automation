@@ -78,6 +78,19 @@ LOVART_SECRET_KEY=your_lovart_secret_key
 
 You can also input and save these keys directly via the **"⚙️ 系统设置" (System Settings)** tab in the WebUI.
 
+## Prompt-model and prompt-settings workflow
+
+1. Save your Gemini and/or NVIDIA API key in `.env` or in the WebUI system settings.
+2. In the WebUI, click **“检测 API 并刷新模型”** for the selected Gemini or NVIDIA prompt source.
+3. Select a discovered model. You may then run the minimal multimodal model test; it can use a very small amount of API quota.
+4. Open **“提示词设置”** and save the persistent prompt settings you want to use.
+5. Review the visible, read-only locked rules in the effective-rule preview.
+6. Start the task. Values supplied by Excel override these software defaults.
+
+Browser mode does not require API model discovery. The saved API model fields are `gemini_api.model` and `nvidia_api.model`; the legacy NVIDIA `model_choice` and `models` fields remain compatibility-only for older configurations.
+
+Prompt precedence is: Excel product values (name, language, image size/aspect ratio, selling points, and reference-image attributes) → saved prompt settings → built-in defaults. Locked rules always apply and cannot be changed in the form.
+
 ## Files Generated Automatically
 
 These paths are created during normal use and do not need to be uploaded:

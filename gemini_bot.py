@@ -4,6 +4,7 @@ from pathlib import Path
 
 from playwright.sync_api import Page
 
+from prompt_settings import get_prompt_settings
 from utils import (
     build_design_prompt,
     build_lovart_confirmation_prompt,
@@ -20,6 +21,7 @@ class GeminiBot:
         self.cfg = config["gemini"]
         self.logger = logger
         self.run_dir = Path(run_dir) if run_dir else None
+        self.prompt_settings = get_prompt_settings(config)
 
     def generate_prompt(
         self,
@@ -63,7 +65,13 @@ class GeminiBot:
                 self._save_debug_snapshot(product_id, "image-upload-failed")
                 raise RuntimeError("Gemini image upload did not complete")
 
-            prompt = build_design_prompt(product_name_cn, language, selling_points, image_size=image_size)
+            prompt = build_design_prompt(
+                product_name_cn,
+                language,
+                selling_points,
+                image_size=image_size,
+                prompt_settings=self.prompt_settings,
+            )
             previous_response_count = self._response_count()
             self._send_message(prompt)
             self.logger.info("Gemini: product prompt sent, waiting for reply")

@@ -5,6 +5,8 @@ from pathlib import Path
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from model_provider import validate_base_url, validate_model_id
+from prompt_settings import normalize_prompt_settings
 from utils import (
     build_design_prompt,
     build_lovart_confirmation_prompt,
@@ -17,12 +19,21 @@ from utils import (
 class GeminiAPI:
     """Gemini API client that does not require browser automation."""
 
-    BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+    DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
-    def __init__(self, api_key: str, model: str = "gemini-2.5-flash-lite", logger=None):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gemini-2.5-flash-lite",
+        base_url: str = DEFAULT_BASE_URL,
+        logger=None,
+        prompt_settings=None,
+    ):
         self.api_key = api_key
-        self.model = model
+        self.model = validate_model_id(model)
+        self.base_url = validate_base_url(base_url)
         self.logger = logger
+        self.prompt_settings = normalize_prompt_settings(prompt_settings)
 
     def generate_prompt(
         self,
@@ -36,7 +47,7 @@ class GeminiAPI:
         product_id = product_id or product_name_cn
         from utils import get_resource_path
         preamble = get_resource_path("preamble.txt").read_text(encoding="utf-8")
-        prompt = f"{preamble}\n\n---\n\n{build_design_prompt(product_name_cn, language, selling_points, image_size=image_size)}"
+        prompt = f"{preamble}\n\n---\n\n{build_design_prompt(product_name_cn, language, selling_points, image_size=image_size, prompt_settings=self.prompt_settings)}"
 
         if self.logger:
             self.logger.info(f"Gemini API: sending prompt with {len(image_paths)} image(s)")
@@ -96,7 +107,7 @@ class GeminiAPI:
     @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=2, max=10))
     def _call(self, text: str, image_paths: list[str] | None = None) -> str:
         """Send a request to Gemini API. Returns the text response."""
-        url = f"{self.BASE}/{self.model}:generateContent?key={self.api_key}"
+        url = f"{self.base_url}/models/{self.model}:generateContent?key={self.api_key}"
 
         parts = [{"text": text}]
         if image_paths:

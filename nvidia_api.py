@@ -5,6 +5,8 @@ from pathlib import Path
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from model_provider import validate_base_url, validate_model_id
+from prompt_settings import normalize_prompt_settings
 from utils import (
     build_design_prompt,
     build_lovart_confirmation_prompt,
@@ -18,11 +20,13 @@ DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 
 def resolve_nvidia_model(cfg: dict) -> str:
+    direct = str(cfg.get("model", "") or "").strip()
+    if direct:
+        return direct
     choice = str(cfg.get("model_choice", "kimi") or "kimi").strip().lower()
-    models = cfg.get("models", {})
-    model = models.get(choice)
+    model = cfg.get("models", {}).get(choice)
     if not model:
-        raise ValueError(f"Unknown NVIDIA model choice '{choice}'. Configure nvidia_api.models.{choice}.")
+        raise ValueError(f"Unknown NVIDIA model choice '{choice}'. Configure nvidia_api.model.")
     return str(model)
 
 
@@ -36,12 +40,14 @@ class NvidiaAPI:
         base_url: str = DEFAULT_NVIDIA_BASE_URL,
         logger=None,
         send_images: bool = True,
+        prompt_settings=None,
     ):
         self.api_key = api_key
-        self.model = model
-        self.base_url = base_url.rstrip("/")
+        self.model = validate_model_id(model)
+        self.base_url = validate_base_url(base_url)
         self.logger = logger
         self.send_images = send_images
+        self.prompt_settings = normalize_prompt_settings(prompt_settings)
 
     def generate_prompt(
         self,
@@ -55,7 +61,7 @@ class NvidiaAPI:
         product_id = product_id or product_name_cn
         from utils import get_resource_path
         preamble = get_resource_path("preamble.txt").read_text(encoding="utf-8")
-        prompt = f"{preamble}\n\n---\n\n{build_design_prompt(product_name_cn, language, selling_points, image_size=image_size)}"
+        prompt = f"{preamble}\n\n---\n\n{build_design_prompt(product_name_cn, language, selling_points, image_size=image_size, prompt_settings=self.prompt_settings)}"
         images = image_paths if self.send_images else []
 
         if self.logger:
