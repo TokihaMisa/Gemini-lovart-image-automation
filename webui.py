@@ -143,6 +143,10 @@ def load_config(path: str | Path = "config.yaml") -> dict:
 browser:
   chrome_exe: ""
   user_data_dir: browser_profile
+  network_attempts: 5
+  page_ready_timeout: 90
+  product_attempts: 2
+  retry_delays: [3, 6, 12, 20]
 gemini:
   preamble_file: preamble.txt
   base_url: https://gemini.google.com
@@ -1398,7 +1402,10 @@ def build_ui():
                     gr.Markdown("在下方输入您的密钥，修改完成后请点击**保存密钥**按钮，系统将加密写入 `.env` 文件。")
 
                     gr.Markdown("### Gemini 浏览器账户")
-                    gemini_login_status = gr.Markdown("Gemini 登录浏览器尚未打开。")
+                    gemini_login_status = gr.Markdown(
+                        "Gemini 登录浏览器尚未打开。",
+                        elem_id="gemini-login-status",
+                    )
                     with gr.Row():
                         open_gemini_login_btn = gr.Button("打开 Gemini 登录浏览器")
                         check_gemini_login_btn = gr.Button("检查登录并关闭浏览器")

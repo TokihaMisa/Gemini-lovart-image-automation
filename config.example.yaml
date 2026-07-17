@@ -22,6 +22,10 @@ browser:
   # Optional. Leave empty to auto-detect Chrome/Edge or use Playwright's bundled Chromium.
   chrome_exe: ""
   user_data_dir: "browser_profile"
+  network_attempts: 5
+  page_ready_timeout: 90
+  product_attempts: 2
+  retry_delays: [3, 6, 12, 20]
 
 gemini:
   preamble_file: "preamble.txt"

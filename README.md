@@ -91,6 +91,24 @@ Browser mode does not require API model discovery. The saved API model fields ar
 
 Prompt precedence is: Excel product values (name, language, image size/aspect ratio, selling points, and reference-image attributes) → saved prompt settings → built-in defaults. Locked rules always apply and cannot be changed in the form.
 
+## Gemini 浏览器登录、生成与网络排查
+
+使用 `gemini_browser` 前，请在 WebUI 中按以下顺序操作：
+
+1. 打开 **API 与模型**。
+2. 点击 **打开 Gemini 登录浏览器**。
+3. 在打开的窗口中完成 Google 登录和账号验证。
+4. 点击 **检查登录并关闭浏览器**，等待显示登录成功状态。
+5. 再启动 `gemini_browser` 任务。
+
+浏览器登录使用本机的 `browser_profile` 保存会话；不要共享或提交该目录。Gemini 页面控件支持中文、英文和西班牙语界面。`gemini_browser` 只负责根据商品资料生成提示词文本，最终图片由后续 Lovart 流程生成；输出的语言和内容仍以产品文档（Excel）及已保存的提示词设置为准。
+
+弱网络下会进行有界重试：默认最多 5 次网络尝试，页面就绪最多等待 90 秒，每个商品最多 2 次 Gemini 浏览器尝试，重试间隔为 3、6、12、20 秒。超时、临时连接/DNS 变化、部分 SSL 协议错误，以及 408、429 和 5xx 响应可重试；登录验证、权限问题和不存在的模型或端点不会被反复重试。
+
+证书颁发机构、域名或日期错误属于永久 TLS 问题。请先检查系统时间、代理/VPN、防病毒软件的 TLS 拦截，以及企业根证书配置。关闭 TLS 证书校验不是默认解决方案，也不应作为常规修复手段。
+
+常见状态/错误类别包括：等待登录、页面加载/未就绪、永久 TLS、上传未完成、Thinking/页面结构、认证/权限，以及端点/模型未找到。界面会给出可操作的状态信息，但网络、账号验证和第三方服务状态仍可能需要人工处理。
+
 ## Files Generated Automatically
 
 These paths are created during normal use and do not need to be uploaded:

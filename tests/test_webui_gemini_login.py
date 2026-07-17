@@ -10,11 +10,28 @@ from webui import (
     build_ui,
     check_gemini_login_and_close,
     guard_gemini_browser_task,
+    load_config,
     open_gemini_login_browser,
 )
 
 
 class WebUIGeminiLoginTests(unittest.TestCase):
+    def test_webui_created_config_uses_exact_balanced_browser_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = load_config(Path(tmp) / "config.yaml")
+
+        self.assertEqual(
+            {key: config["browser"].get(key) for key in (
+                "network_attempts", "page_ready_timeout", "product_attempts", "retry_delays",
+            )},
+            {
+                "network_attempts": 5,
+                "page_ready_timeout": 90,
+                "product_attempts": 2,
+                "retry_delays": [3, 6, 12, 20],
+            },
+        )
+
     @patch("webui.subprocess.Popen")
     @patch("webui.login_helper_is_active", return_value=False)
     def test_open_button_starts_one_helper_and_returns_waiting_status(self, _active, popen):
@@ -89,6 +106,15 @@ class WebUIGeminiLoginTests(unittest.TestCase):
         labels = {component.get("props", {}).get("value") for component in components}
         self.assertIn("打开 Gemini 登录浏览器", labels)
         self.assertIn("检查登录并关闭浏览器", labels)
+        status_components = [
+            component for component in components
+            if component.get("props", {}).get("elem_id") == "gemini-login-status"
+        ]
+        self.assertEqual(len(status_components), 1)
+        self.assertEqual(
+            status_components[0]["props"].get("value"),
+            "Gemini 登录浏览器尚未打开。",
+        )
         dependencies = config["dependencies"]
         login_events = [
             dependency for dependency in dependencies

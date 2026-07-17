@@ -12,6 +12,12 @@ from setup_wizard import (
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+BALANCED_BROWSER_DEFAULTS = {
+    "network_attempts": 5,
+    "page_ready_timeout": 90,
+    "product_attempts": 2,
+    "retry_delays": [3, 6, 12, 20],
+}
 
 
 class SetupWizardTests(unittest.TestCase):
@@ -30,8 +36,22 @@ class SetupWizardTests(unittest.TestCase):
             self.assertIn("prompt_settings", created_config)
             self.assertEqual(created_config["gemini_api"]["model"], "gemini-2.5-flash-lite")
             self.assertEqual(created_config["nvidia_api"]["model"], "moonshotai/kimi-k2.5")
+            self.assertEqual(
+                {key: created_config["browser"].get(key) for key in BALANCED_BROWSER_DEFAULTS},
+                BALANCED_BROWSER_DEFAULTS,
+            )
             self.assertIn("created .env from .env.example", actions)
             self.assertIn("created config.yaml from config.example.yaml", actions)
+
+    def test_example_config_publishes_exact_balanced_browser_defaults(self):
+        example_config = yaml.safe_load(
+            (REPOSITORY_ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(
+            {key: example_config["browser"].get(key) for key in BALANCED_BROWSER_DEFAULTS},
+            BALANCED_BROWSER_DEFAULTS,
+        )
 
     def test_missing_or_placeholder_env_keys_requires_only_lovart_keys(self):
         with tempfile.TemporaryDirectory() as tmp:
