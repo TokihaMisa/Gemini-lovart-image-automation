@@ -45,6 +45,20 @@ class GeminiPermanentTlsError(RuntimeError):
         super().__init__(message)
 
 
+class GeminiAuthenticationError(RuntimeError):
+    """Raised for authentication or account-permission failures."""
+
+    def __init__(self, message: str = "Gemini 身份验证或权限不足，请检查登录状态或账户权限。"):
+        super().__init__(message)
+
+
+class GeminiResourceNotFoundError(RuntimeError):
+    """Raised when Gemini's requested page or resource is unavailable."""
+
+    def __init__(self, message: str = "Gemini 请求的页面或资源不存在，请检查地址或模型配置。"):
+        super().__init__(message)
+
+
 class GeminiPageState(str, Enum):
     STARTING = "starting"
     PAGE_LOADING = "page_loading"
@@ -600,6 +614,8 @@ __all__ = [
     "GeminiLoginRequiredError",
     "GeminiPageNotReadyError",
     "GeminiPermanentTlsError",
+    "GeminiAuthenticationError",
+    "GeminiResourceNotFoundError",
     "LoginRuntimePaths",
     "LoginHelperOwner",
     "acquire_login_helper_owner",

@@ -24,9 +24,11 @@ from gemini_bot import (
     save_gemini_diagnostics,
 )
 from gemini_browser_session import (
+    GeminiAuthenticationError,
     GeminiLoginRequiredError,
     GeminiPermanentTlsError,
     GeminiPageNotReadyError,
+    GeminiResourceNotFoundError,
     GeminiPageState,
     LoginStatus,
 )
@@ -258,11 +260,16 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             bot = Bot(HTTPError("https://gemini.test", status, "raw-token@example.com", {}, None))
             self.assertEqual(bot.generate_prompt("产品", "Spanish", "卖点", []), "ok")
             self.assertEqual(bot.calls, 2)
-        for status in (401, 403, 404):
+        for status, error_type, wording in (
+            (401, GeminiAuthenticationError, "身份验证"),
+            (403, GeminiAuthenticationError, "身份验证"),
+            (404, GeminiResourceNotFoundError, "资源不存在"),
+        ):
             bot = Bot(HTTPError("https://gemini.test", status, "raw-token@example.com", {}, None))
-            with self.assertRaises(GeminiPageNotReadyError) as raised:
+            with self.assertRaises(error_type) as raised:
                 bot.generate_prompt("产品", "Spanish", "卖点", [])
             self.assertEqual(bot.calls, 1)
+            self.assertIn(wording, str(raised.exception))
             self.assertNotIn("raw-token@example.com", "".join(traceback.format_exception(raised.exception)))
 
         bot = Bot(ssl.SSLCertVerificationError("raw-token@example.com"))
@@ -312,6 +319,31 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         trace = "".join(traceback.format_exception(raised.exception))
         self.assertNotIn(sentinel, str(raised.exception))
         self.assertNotIn(sentinel, trace)
+
+    def test_terminal_auth_and_not_found_errors_are_typed_safe_and_single_attempt(self):
+        cases = (
+            (HTTPError("https://x", 401, "secret@example.com", {}, None), GeminiAuthenticationError, "身份验证"),
+            (HTTPError("https://x", 403, "secret@example.com", {}, None), GeminiAuthenticationError, "身份验证"),
+            (RuntimeError("net::ERR_ACCESS_DENIED secret@example.com"), GeminiAuthenticationError, "身份验证"),
+            (HTTPError("https://x", 404, "secret@example.com", {}, None), GeminiResourceNotFoundError, "资源不存在"),
+            (RuntimeError("net::ERR_FILE_NOT_FOUND secret@example.com"), GeminiResourceNotFoundError, "资源不存在"),
+        )
+        for error, error_type, wording in cases:
+            class Bot(GeminiBot):
+                def __init__(self):
+                    super().__init__(object(), {"gemini": {}, "browser": {"product_attempts": 2}}, FakeFormalLogger())
+                    self.calls = 0
+
+                def _generate_prompt_once(self, *_args, **_kwargs):
+                    self.calls += 1
+                    raise error
+
+            bot = Bot()
+            with self.assertRaises(error_type) as raised:
+                bot.generate_prompt("产品", "Spanish", "卖点", [])
+            self.assertEqual(bot.calls, 1)
+            self.assertIn(wording, str(raised.exception))
+            self.assertNotIn("secret@example.com", "".join(traceback.format_exception(raised.exception)))
 
     def test_temporary_chat_failure_stops_each_attempt_before_preamble(self):
         class Bot(GeminiBot):
@@ -581,7 +613,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         for error, expected_type in (
             (GeminiLoginRequiredError(), GeminiLoginRequiredError),
             (ssl.SSLCertVerificationError("certificate verify failed"), GeminiPermanentTlsError),
-            (HTTPError("https://gemini.google.com/app", 403, "denied", {}, None), GeminiPageNotReadyError),
+            (HTTPError("https://gemini.google.com/app", 403, "denied", {}, None), GeminiAuthenticationError),
             (RuntimeError("Gemini image upload did not complete"), GeminiPageNotReadyError),
         ):
             class RetryGeminiBot(GeminiBot):

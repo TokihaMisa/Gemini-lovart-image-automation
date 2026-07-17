@@ -11,9 +11,11 @@ from playwright.sync_api import Page
 
 from prompt_settings import get_prompt_settings
 from gemini_browser_session import (
+    GeminiAuthenticationError,
     GeminiLoginRequiredError,
     GeminiPermanentTlsError,
     GeminiPageNotReadyError,
+    GeminiResourceNotFoundError,
     GeminiPageState,
     inspect_gemini_page,
     navigate_gemini_with_retry,
@@ -189,10 +191,12 @@ class GeminiBot:
     @staticmethod
     def _safe_terminal_error(error: BaseException) -> BaseException:
         safe_errors = (
+            GeminiAuthenticationError,
             GeminiLoginRequiredError,
             GeminiPermanentTlsError,
             GeminiPageNotReadyError,
             GeminiPageStructureError,
+            GeminiResourceNotFoundError,
             GeminiUploadIncompleteError,
         )
         if isinstance(error, safe_errors):
@@ -200,6 +204,15 @@ class GeminiBot:
         message = str(error).casefold()
         if isinstance(error, ssl.SSLCertVerificationError) or "err_cert_" in message or "certificate" in message:
             return GeminiPermanentTlsError()
+        if isinstance(error, HTTPError):
+            if error.code in {401, 403}:
+                return GeminiAuthenticationError()
+            if error.code == 404:
+                return GeminiResourceNotFoundError()
+        if "err_access_denied" in message or "access denied" in message:
+            return GeminiAuthenticationError()
+        if "err_file_not_found" in message or "not found" in message:
+            return GeminiResourceNotFoundError()
         return GeminiPageNotReadyError()
 
     def _select_thinking_mode_with_recovery(self, product_id: str) -> None:
