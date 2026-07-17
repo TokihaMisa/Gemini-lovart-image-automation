@@ -378,6 +378,94 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         self.assertTrue(bot._select_thinking_mode())
         self.assertTrue(any("already selected" in message for message in logger.messages))
 
+    def test_gemini_thinking_mode_accepts_checked_extended_thinking_option(self):
+        events = []
+
+        class FakePage:
+            def wait_for_timeout(self, ms):
+                events.append(f"wait:{ms}")
+
+        class FakeLogger:
+            def __init__(self):
+                self.messages = []
+
+            def info(self, message):
+                self.messages.append(message)
+
+            def warning(self, message):
+                self.messages.append(message)
+
+        class NewMenuBot(GeminiBot):
+            def _open_mode_menu(self):
+                events.append("open_menu")
+                return True
+
+            def _click_flash_model(self):
+                events.append("click_flash")
+                return True
+
+            def _extended_thinking_option_is_checked(self):
+                events.append("checked")
+                return True
+
+            def _click_extended_thinking_option(self):
+                events.append("click_extended")
+                return False
+
+        logger = FakeLogger()
+        bot = NewMenuBot(FakePage(), {"gemini": {}}, logger)
+
+        self.assertTrue(bot._select_thinking_mode())
+        self.assertIn("checked", events)
+        self.assertNotIn("click_extended", events)
+        self.assertTrue(any("extended thinking option already selected" in message for message in logger.messages))
+
+    def test_gemini_thinking_mode_clicks_unchecked_extended_thinking_option(self):
+        events = []
+
+        class FakePage:
+            def wait_for_timeout(self, ms):
+                events.append(f"wait:{ms}")
+
+        class FakeLogger:
+            def __init__(self):
+                self.messages = []
+
+            def info(self, message):
+                self.messages.append(message)
+
+            def warning(self, message):
+                self.messages.append(message)
+
+        class NewMenuBot(GeminiBot):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.check_count = 0
+
+            def _open_mode_menu(self):
+                events.append("open_menu")
+                return True
+
+            def _click_flash_model(self):
+                events.append("click_flash")
+                return True
+
+            def _extended_thinking_option_is_checked(self):
+                self.check_count += 1
+                events.append("checked")
+                return False
+
+            def _click_extended_thinking_option(self):
+                events.append("click_extended")
+                return True
+
+        logger = FakeLogger()
+        bot = NewMenuBot(FakePage(), {"gemini": {}}, logger)
+
+        self.assertTrue(bot._select_thinking_mode())
+        self.assertIn("click_extended", events)
+        self.assertTrue(any("selected Flash with extended thinking" in message for message in logger.messages))
+
     def test_gemini_reply_wait_uses_generation_state_not_text_keywords(self):
         class FakePage:
             def wait_for_timeout(self, ms):
