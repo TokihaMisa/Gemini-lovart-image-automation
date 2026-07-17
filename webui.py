@@ -3,10 +3,20 @@ import subprocess
 import threading
 import time
 import atexit
+from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
 
 import gradio as gr
 import yaml
+
+from model_provider import (
+    DiscoveredModel,
+    ModelProviderError,
+    discover_models,
+    model_choice_labels,
+    test_selected_model,
+)
 
 active_processes = []
 
@@ -80,9 +90,79 @@ output_dir: output
         return yaml.safe_load(f) or {}
 
 
-def save_config(config_data: dict):
-    with open("config.yaml", "w", encoding="utf-8") as f:
-        yaml.safe_dump(config_data, f, allow_unicode=True, sort_keys=False)
+def save_config(config_data: dict, path: str | Path = "config.yaml"):
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(f".{target.name}.tmp")
+    try:
+        text = yaml.safe_dump(config_data, allow_unicode=True, sort_keys=False)
+        temp.write_text(text, encoding="utf-8")
+        os.replace(temp, target)
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
+def refresh_provider_models(provider, api_key, base_url, current_model):
+    try:
+        models = discover_models(provider, api_key, base_url)
+    except ModelProviderError as exc:
+        choices = [(current_model, current_model)] if current_model else []
+        return f"❌ {exc.user_message}", choices, current_model, []
+
+    choices = model_choice_labels(models)
+    model_ids = [model.model_id for model in models]
+    selected = current_model if current_model in model_ids else (model_ids[0] if model_ids else current_model)
+    if selected and selected not in model_ids:
+        choices.append((selected, selected))
+    return f"✅ 成功获取 {len(models)} 个可用模型。", choices, selected, [asdict(model) for model in models]
+
+
+def test_provider_model(provider, api_key, base_url, model_id):
+    try:
+        result = test_selected_model(provider, api_key, base_url, model_id)
+    except ModelProviderError as exc:
+        return f"❌ {exc.user_message} 测试可能产生极少量 API 用量。"
+    return f"✅ {result.message}（{result.latency_ms} ms）。测试可能产生极少量 API 用量。"
+
+
+test_provider_model.__test__ = False
+
+
+def resolve_model_dropdown(prompt_source, gemini_catalog, nvidia_catalog, config):
+    if prompt_source == "gemini_browser":
+        page_managed = "由浏览器页面选择"
+        return [(page_managed, page_managed)], page_managed, False
+
+    if prompt_source == "gemini_api":
+        catalog = gemini_catalog
+        config_section = "gemini_api"
+    elif prompt_source == "nvidia":
+        catalog = nvidia_catalog
+        config_section = "nvidia_api"
+    else:
+        return [], "", False
+
+    models = [DiscoveredModel(**item) for item in catalog]
+    choices = model_choice_labels(models)
+    model_ids = [model.model_id for model in models]
+    selected = config.get(config_section, {}).get("model", "")
+    if not selected and model_ids:
+        selected = model_ids[0]
+    if selected and selected not in model_ids:
+        choices.append((selected, selected))
+    return choices, selected, True
+
+
+def persist_selected_model(config, prompt_source, model_id):
+    updated = deepcopy(config)
+    config_section = {
+        "gemini_api": "gemini_api",
+        "nvidia": "nvidia_api",
+    }.get(prompt_source)
+    if config_section:
+        updated.setdefault(config_section, {})["model"] = model_id
+    return updated
 
 
 def save_env(gemini_key: str, nvidia_key: str, lovart_access: str, lovart_secret: str):
@@ -112,11 +192,11 @@ def get_env(key: str) -> str:
     return ""
 
 
-def run_process(excel_file, custom_output_dir, prompt_source, lovart_mode, lovart_image_model, gemini_key, nvidia_key, lovart_access, lovart_secret):
+def run_process(excel_file, custom_output_dir, prompt_source, prompt_model, lovart_mode, lovart_image_model, gemini_key, nvidia_key, lovart_access, lovart_secret):
     # Save env and configs
     save_env(gemini_key, nvidia_key, lovart_access, lovart_secret)
     
-    config = load_config()
+    config = persist_selected_model(load_config(), prompt_source, prompt_model)
     if "lovart" not in config:
         config["lovart"] = {}
     config["lovart"]["image_model"] = lovart_image_model
@@ -733,7 +813,41 @@ def pick_directory(current_dir):
 def build_ui():
     config = load_config()
     default_output_dir = config.get("output_dir", str(Path("output").absolute()))
+    gemini_config = config.get("gemini_api", {})
+    nvidia_config = config.get("nvidia_api", {})
+    gemini_saved_model = gemini_config.get("model", "")
+    nvidia_saved_model = nvidia_config.get("model", "")
+    gemini_base_url_value = gemini_config.get("base_url", "https://generativelanguage.googleapis.com/v1beta")
+    nvidia_base_url_value = nvidia_config.get("base_url", "https://integrate.api.nvidia.com/v1")
+
+    def refresh_provider_controls(provider, api_key, base_url, current_model, prompt_source_value):
+        status, choices, selected, catalog = refresh_provider_models(
+            provider, api_key, base_url, current_model
+        )
+        provider_update = gr.update(choices=choices, value=selected)
+        active_source = "gemini_api" if provider == "gemini" else "nvidia"
+        workspace_update = (
+            gr.update(choices=choices, value=selected, interactive=True)
+            if prompt_source_value == active_source
+            else gr.skip()
+        )
+        return status, provider_update, workspace_update, catalog
+
+    def resolve_workspace_model(prompt_source_value, gemini_catalog, nvidia_catalog, gemini_model, nvidia_model):
+        live_config = deepcopy(config)
+        live_config.setdefault("gemini_api", {})["model"] = gemini_model or ""
+        live_config.setdefault("nvidia_api", {})["model"] = nvidia_model or ""
+        choices, selected, interactive = resolve_model_dropdown(
+            prompt_source_value, gemini_catalog, nvidia_catalog, live_config
+        )
+        return gr.update(choices=choices, value=selected, interactive=interactive)
+
+    def sync_workspace_model(prompt_source_value, provider_source, model_id):
+        return model_id if prompt_source_value == provider_source else gr.skip()
+
     with gr.Blocks(title="Lovart Image Automation WebUI", css=CUSTOM_CSS, js="() => document.documentElement.classList.add('dark')") as demo:
+        gemini_catalog_state = gr.State([])
+        nvidia_catalog_state = gr.State([])
         with gr.Row():
             gr.HTML("<h1 class='gradient-text' style='text-align: center; margin-top: 20px; flex-grow: 1;'>🎨 Lovart Image Automation Pro</h1>")
             shutdown_btn = gr.Button("🛑 完全退出并关闭服务", variant="stop", scale=0, min_width=180, elem_classes="action-btn")
@@ -774,6 +888,13 @@ def build_ui():
                             label="提示词引擎",
                             elem_classes=["glass-input", "pill-dropdown"]
                         )
+                        prompt_model = gr.Dropdown(
+                            choices=[("由浏览器页面选择", "由浏览器页面选择")],
+                            value="由浏览器页面选择",
+                            label="提示词模型",
+                            interactive=False,
+                            elem_classes=["glass-input", "pill-dropdown"]
+                        )
                         lovart_mode = gr.Dropdown(
                             choices=["unlimited", "fast"], 
                             value="unlimited", 
@@ -794,14 +915,38 @@ def build_ui():
                     elem_classes="glass-panel"
                 )
 
-            # ================= TAB 2: 密钥设置 =================
-            with gr.Tab("🔑 密钥配置 (Credentials)"):
+            # ================= TAB 2: API 与模型 =================
+            with gr.Tab("🔌 API 与模型"):
                 with gr.Column(elem_classes="glass-panel"):
-                    gr.Markdown("### 🔒 API 密钥管理")
+                    gr.Markdown("### 🔒 API 密钥与模型管理")
                     gr.Markdown("在下方输入您的密钥，修改完成后请点击**保存密钥**按钮，系统将加密写入 `.env` 文件。")
                     
                     gemini_key = gr.Textbox(label="GEMINI_API_KEY", value=get_env("GEMINI_API_KEY"), type="password")
+                    gemini_base_url = gr.Textbox(label="Gemini API 地址", value=gemini_base_url_value)
+                    gemini_model = gr.Dropdown(
+                        choices=[(gemini_saved_model, gemini_saved_model)] if gemini_saved_model else [],
+                        value=gemini_saved_model or None,
+                        label="Gemini 模型",
+                        allow_custom_value=True,
+                    )
+                    gemini_refresh_btn = gr.Button("刷新 Gemini 模型")
+                    gr.Markdown("测试可能产生极少量 API 用量。")
+                    gemini_test_btn = gr.Button("测试 Gemini 模型")
+                    gemini_status = gr.Markdown("")
+
                     nvidia_key = gr.Textbox(label="NVIDIA_API_KEY (Kimi)", value=get_env("NVIDIA_API_KEY"), type="password")
+                    nvidia_base_url = gr.Textbox(label="NVIDIA API 地址", value=nvidia_base_url_value)
+                    nvidia_model = gr.Dropdown(
+                        choices=[(nvidia_saved_model, nvidia_saved_model)] if nvidia_saved_model else [],
+                        value=nvidia_saved_model or None,
+                        label="NVIDIA 模型",
+                        allow_custom_value=True,
+                    )
+                    nvidia_refresh_btn = gr.Button("刷新 NVIDIA 模型")
+                    gr.Markdown("测试可能产生极少量 API 用量。")
+                    nvidia_test_btn = gr.Button("测试 NVIDIA 模型")
+                    nvidia_status = gr.Markdown("")
+
                     lovart_access = gr.Textbox(label="LOVART_ACCESS_KEY", value=get_env("LOVART_ACCESS_KEY"), type="password")
                     lovart_secret = gr.Textbox(label="LOVART_SECRET_KEY", value=get_env("LOVART_SECRET_KEY"), type="password")
                     
@@ -810,6 +955,27 @@ def build_ui():
                     
                     key_inputs = [gemini_key, nvidia_key, lovart_access, lovart_secret]
                     save_keys_btn.click(fn=manual_save_keys, inputs=key_inputs, outputs=save_status)
+
+                    gemini_refresh_btn.click(
+                        fn=lambda key, url, model, source: refresh_provider_controls("gemini", key, url, model, source),
+                        inputs=[gemini_key, gemini_base_url, gemini_model, prompt_source],
+                        outputs=[gemini_status, gemini_model, prompt_model, gemini_catalog_state],
+                    )
+                    nvidia_refresh_btn.click(
+                        fn=lambda key, url, model, source: refresh_provider_controls("nvidia", key, url, model, source),
+                        inputs=[nvidia_key, nvidia_base_url, nvidia_model, prompt_source],
+                        outputs=[nvidia_status, nvidia_model, prompt_model, nvidia_catalog_state],
+                    )
+                    gemini_test_btn.click(
+                        fn=lambda key, url, model: test_provider_model("gemini", key, url, model),
+                        inputs=[gemini_key, gemini_base_url, gemini_model],
+                        outputs=gemini_status,
+                    )
+                    nvidia_test_btn.click(
+                        fn=lambda key, url, model: test_provider_model("nvidia", key, url, model),
+                        inputs=[nvidia_key, nvidia_base_url, nvidia_model],
+                        outputs=nvidia_status,
+                    )
 
             # ================= TAB 3: 系统更新 =================
             with gr.Tab("⚙️ 系统更新 (OTA)"):
@@ -821,10 +987,25 @@ def build_ui():
                     update_log = gr.Textbox(label="更新状态日志", lines=8, autoscroll=True)
 
         # 绑定按钮事件
+        prompt_source.change(
+            fn=resolve_workspace_model,
+            inputs=[prompt_source, gemini_catalog_state, nvidia_catalog_state, gemini_model, nvidia_model],
+            outputs=prompt_model,
+        )
+        gemini_model.change(
+            fn=lambda source, model: sync_workspace_model(source, "gemini_api", model),
+            inputs=[prompt_source, gemini_model],
+            outputs=prompt_model,
+        )
+        nvidia_model.change(
+            fn=lambda source, model: sync_workspace_model(source, "nvidia", model),
+            inputs=[prompt_source, nvidia_model],
+            outputs=prompt_model,
+        )
         start_btn.click(
             fn=run_process,
             inputs=[
-                excel_file, custom_output_dir, prompt_source, lovart_mode, lovart_image_model,
+                excel_file, custom_output_dir, prompt_source, prompt_model, lovart_mode, lovart_image_model,
                 gemini_key, nvidia_key, lovart_access, lovart_secret
             ],
             outputs=progress_dashboard
