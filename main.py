@@ -22,6 +22,9 @@ from excel_reader import read_products
 from gemini_api import GeminiAPI
 from gemini_bot import GeminiBot
 from gemini_browser_session import (
+    GeminiLoginRequiredError,
+    GeminiPageNotReadyError,
+    GeminiPermanentTlsError,
     GeminiPageState,
     build_browser_launch_options,
     navigate_gemini_with_retry,
@@ -29,6 +32,7 @@ from gemini_browser_session import (
     resolve_user_data_dir,
     retry_policy_from_config,
 )
+from network_retry import RetryKind, classify_network_error
 from lovart_bot import LOVART_IMAGE_MODELS, LovartBot
 from nvidia_api import NvidiaAPI, resolve_nvidia_model
 from prompt_settings import get_prompt_settings, normalize_prompt_settings
@@ -54,6 +58,10 @@ from utils import (
 )
 
 _shutdown_requested = False
+
+
+def _is_ui_mode() -> bool:
+    return os.environ.get("UI_MODE") == "1"
 
 
 def _on_sigint(signum, frame):
@@ -130,6 +138,8 @@ def _apply_prompt_source_aliases(args) -> None:
 
 
 def _ask_number(prompt: str, default: int, min_value: int, max_value: int) -> int:
+    if _is_ui_mode():
+        return default
     raw = input(prompt).strip()
     if not raw:
         return default
@@ -143,6 +153,8 @@ def _ask_number(prompt: str, default: int, min_value: int, max_value: int) -> in
 
 
 def _ask_numbers(prompt: str, default_values: list[int], min_value: int, max_value: int) -> list[int]:
+    if _is_ui_mode():
+        return default_values
     raw = input(prompt).strip()
     if not raw:
         return default_values
@@ -236,6 +248,13 @@ def _choose_prompt_source(config: dict, args) -> str:
         config.setdefault("nvidia_api", {})["model_choice"] = args.nvidia_model
     if args.prompt_source != "ask":
         return args.prompt_source
+    if _is_ui_mode():
+        if env_or_config(config.get("gemini_api", {}), "api_key", "GEMINI_API_KEY"):
+            return "gemini_api"
+        if env_or_config(config.get("nvidia_api", {}), "api_key", "NVIDIA_API_KEY"):
+            config.setdefault("nvidia_api", {})["model_choice"] = "kimi"
+            return "nvidia"
+        return "gemini_browser"
 
     while True:
         print(f"\n{'=' * 50}")
@@ -260,6 +279,8 @@ def _choose_prompt_source(config: dict, args) -> str:
 
 
 def _choose_lovart_mode() -> bool:
+    if _is_ui_mode():
+        return False
     print(f"\n{'=' * 50}")
     print("  Lovart generation mode:")
     print("    [1] Fast      (uses credits, no queue)")
@@ -928,7 +949,10 @@ def _run_browser_flow(
     config_path: str | Path = Path("config.yaml"),
 ):
     browser_cfg = config["browser"]
-    chrome_exe = _resolve_browser_executable_for_run(browser_cfg, interactive=wait_for_ready)
+    interactive_console = wait_for_ready and not _is_ui_mode()
+    chrome_exe = _resolve_browser_executable_for_run(
+        browser_cfg, interactive=interactive_console
+    )
     if chrome_exe:
         logger.info(f"Using browser executable: {chrome_exe}")
     else:
@@ -940,36 +964,47 @@ def _run_browser_flow(
         if chrome_exe:
             launch_options["executable_path"] = chrome_exe
         context = pw.chromium.launch_persistent_context(**launch_options)
-        page = context.pages[0] if context.pages else context.new_page()
-        policy = retry_policy_from_config(config)
-        status = navigate_gemini_with_retry(
-            page, config["gemini"]["base_url"], policy, logger=logger
-        )
-        if status.state is GeminiPageState.WAITING_LOGIN:
-            print("\n  Gemini requires login. Log in, then press Enter.")
-            input("  Press Enter...")
-            status = navigate_gemini_with_retry(
-                page, config["gemini"]["base_url"], policy, logger=logger
-            )
-        if not status.ready:
-            context.close()
-            raise RuntimeError("Gemini browser page is not ready.")
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            policy = retry_policy_from_config(config)
+            try:
+                status = navigate_gemini_with_retry(
+                    page, config["gemini"]["base_url"], policy, logger=logger
+                )
+            except GeminiPermanentTlsError:
+                logger.warning("Gemini TLS 证书验证失败，未开始处理商品。")
+                raise
+            except Exception as exc:
+                if classify_network_error(exc) is RetryKind.PERMANENT_TLS:
+                    logger.warning("Gemini TLS 证书验证失败，未开始处理商品。")
+                    raise GeminiPermanentTlsError() from exc
+                if isinstance(exc, TimeoutError):
+                    logger.warning("Gemini 页面未准备完成，未开始处理商品。")
+                    raise GeminiPageNotReadyError() from exc
+                raise
 
-        logger.info("Gemini browser ready")
-        if wait_for_ready:
-            input("\nReady. Press Enter to start...")
-        gemini = GeminiBot(page, config, logger, run_dir=run_dir)
-        result = _process_products(
-            products,
-            gemini,
-            lovart,
-            logger,
-            run_dir,
-            resume=resume,
-            prompt_settings=prompt_settings,
-        )
-        context.close()
-        return result
+            if status.state is GeminiPageState.WAITING_LOGIN:
+                logger.warning("Gemini 未登录，未开始处理商品。")
+                raise GeminiLoginRequiredError()
+            if not status.ready:
+                logger.warning("Gemini 页面未准备完成，未开始处理商品。")
+                raise GeminiPageNotReadyError()
+
+            logger.info("Gemini browser ready")
+            if interactive_console:
+                input("\nReady. Press Enter to start...")
+            gemini = GeminiBot(page, config, logger, run_dir=run_dir)
+            return _process_products(
+                products,
+                gemini,
+                lovart,
+                logger,
+                run_dir,
+                resume=resume,
+                prompt_settings=prompt_settings,
+            )
+        finally:
+            context.close()
 
 
 def _generate_excel_template():
@@ -1059,7 +1094,7 @@ def main(argv=None):
 
     if prompt_source == "gemini_api":
         gemini = _build_gemini_api(config, logger, prompt_settings=prompt_settings)
-        if args.prompt_source == "ask" or args.lovart == "ask":
+        if (args.prompt_source == "ask" or args.lovart == "ask") and not _is_ui_mode():
             input("\nReady. Press Enter to start...")
         success, fail, skipped, still_running = _process_products(
             products,
@@ -1072,7 +1107,7 @@ def main(argv=None):
         )
     elif prompt_source == "nvidia":
         prompt_client = _build_nvidia_api(config, logger, prompt_settings=prompt_settings)
-        if args.prompt_source == "ask" or args.lovart == "ask":
+        if (args.prompt_source == "ask" or args.lovart == "ask") and not _is_ui_mode():
             input("\nReady. Press Enter to start...")
         success, fail, skipped, still_running = _process_products(
             products,

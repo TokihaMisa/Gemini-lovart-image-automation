@@ -1,11 +1,13 @@
 import tempfile
 import unittest
+import ssl
 from pathlib import Path
 from unittest.mock import patch
 
 import main
 
 from gemini_browser_session import (
+    GeminiPermanentTlsError,
     GeminiPageState,
     LoginStatus,
     acquire_login_helper_owner,
@@ -139,6 +141,20 @@ class GeminiBrowserSessionTests(unittest.TestCase):
                 navigate_gemini_with_retry(page, "https://gemini.google.com", policy)
 
         self.assertEqual(page.goto_calls, 2)
+
+    def test_navigation_maps_permanent_tls_to_safe_error(self):
+        page = FakePage("https://gemini.google.com/app", {})
+
+        def certificate_failure(_url, **_kwargs):
+            raise ssl.SSLCertVerificationError("private certificate detail")
+
+        page.goto = certificate_failure
+
+        with self.assertRaises(GeminiPermanentTlsError) as raised:
+            navigate_gemini_with_retry(page, "https://gemini.google.com", RetryPolicy())
+
+        self.assertIn("证书", str(raised.exception))
+        self.assertNotIn("private certificate detail", str(raised.exception))
 
     def test_formal_browser_flow_uses_shared_launch_and_navigation_apis(self):
         class FormalPage:

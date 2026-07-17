@@ -15,7 +15,34 @@ from urllib.parse import urlsplit, urlunsplit
 import yaml
 from playwright.sync_api import sync_playwright
 
-from network_retry import RetryPolicy, retry_policy_from_config, run_with_retry
+from network_retry import (
+    RetryKind,
+    RetryPolicy,
+    classify_network_error,
+    retry_policy_from_config,
+    run_with_retry,
+)
+
+
+class GeminiLoginRequiredError(RuntimeError):
+    """Raised when Gemini redirects to an interactive Google login page."""
+
+    def __init__(self, message: str = "Gemini 未登录，请先在软件内打开登录浏览器完成登录。"):
+        super().__init__(message)
+
+
+class GeminiPageNotReadyError(RuntimeError):
+    """Raised when Gemini cannot reach a ready editor before processing begins."""
+
+    def __init__(self, message: str = "Gemini 页面未准备完成，请检查网络后重试。"):
+        super().__init__(message)
+
+
+class GeminiPermanentTlsError(RuntimeError):
+    """Raised for certificate failures that must not be retried or bypassed."""
+
+    def __init__(self, message: str = "Gemini TLS 证书验证失败，请检查系统时间、代理或受信任证书。"):
+        super().__init__(message)
 
 
 class GeminiPageState(str, Enum):
@@ -249,7 +276,12 @@ def navigate_gemini_with_retry(
         if logger:
             logger.warning(message)
 
-    return run_with_retry(navigate, policy, on_retry=on_retry)  # type: ignore[return-value]
+    try:
+        return run_with_retry(navigate, policy, on_retry=on_retry)  # type: ignore[return-value]
+    except Exception as exc:
+        if classify_network_error(exc) is RetryKind.PERMANENT_TLS:
+            raise GeminiPermanentTlsError() from exc
+        raise
 
 
 def write_login_status(path: str | Path, status: LoginStatus) -> None:
@@ -562,6 +594,9 @@ def run_login_helper(config_path: str | Path) -> int:
 
 __all__ = [
     "GeminiPageState",
+    "GeminiLoginRequiredError",
+    "GeminiPageNotReadyError",
+    "GeminiPermanentTlsError",
     "LoginRuntimePaths",
     "LoginHelperOwner",
     "acquire_login_helper_owner",

@@ -1,22 +1,197 @@
 import csv
 import json
 import os
+import ssl
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import main
 from excel_reader import resolve_image_scan_config
 from gemini_bot import GeminiBot
+from gemini_browser_session import GeminiPageState, LoginStatus
 from main import (
     _backfill_result_project_urls,
+    _choose_lovart_tool_options,
+    _choose_prompt_source,
     _process_products,
+    _resolve_lovart_mode,
     _resolve_browser_executable_for_run,
+    parse_args,
     resolve_browser_executable,
 )
 from utils import update_status, write_run_summary
 
 
+class FakeFormalLogger:
+    def info(self, _message):
+        pass
+
+    def warning(self, _message):
+        pass
+
+
+class FakeFormalContext:
+    def __init__(self):
+        self.pages = [object()]
+        self.closed = False
+
+    def new_page(self):
+        return self.pages[0]
+
+    def close(self):
+        self.closed = True
+
+
+class FakeFormalPlaywrightManager:
+    def __init__(self, context):
+        self.playwright = type("Playwright", (), {
+            "chromium": type("Chromium", (), {
+                "launch_persistent_context": lambda _self, **_kwargs: context,
+            })(),
+        })()
+
+    def __enter__(self):
+        return self.playwright
+
+    def __exit__(self, _exc_type, _exc, _traceback):
+        return False
+
+
+def run_formal_flow_for_test(*, wait_for_ready=False):
+    config = {
+        "browser": {"user_data_dir": "browser_profile"},
+        "gemini": {"base_url": "https://gemini.google.com", "thinking_mode": True},
+    }
+    context = FakeFormalContext()
+    with patch("main.sync_playwright", return_value=FakeFormalPlaywrightManager(context)), patch(
+        "main.build_browser_launch_options", return_value={}
+    ), patch("main._resolve_browser_executable_for_run", return_value=None):
+        result = main._run_browser_flow(
+            config,
+            products=[object()],
+            lovart=object(),
+            logger=FakeFormalLogger(),
+            run_dir=Path("runs/test"),
+            resume=False,
+            wait_for_ready=wait_for_ready,
+            prompt_settings={},
+        )
+    return result, context
+
+
 class MediumPriorityBehaviorTests(unittest.TestCase):
+    def test_ui_mode_uses_defaults_without_console_input(self):
+        config = {"gemini_api": {}, "nvidia_api": {}, "lovart": {}}
+        args = parse_args(["--prompt-source", "ask", "--lovart", "ask"])
+
+        with patch.dict(os.environ, {"UI_MODE": "1"}), patch(
+            "builtins.input", side_effect=AssertionError("UI mode must not prompt")
+        ):
+            source = _choose_prompt_source(config, args)
+            _choose_lovart_tool_options(config, args)
+            fast_mode = _resolve_lovart_mode(args.lovart)
+
+        self.assertEqual(source, "gemini_browser")
+        self.assertEqual(config["lovart"]["image_model"], "auto")
+        self.assertFalse(fast_mode)
+
+    @patch("main._process_products")
+    @patch("main.navigate_gemini_with_retry")
+    def test_formal_browser_flow_blocks_products_when_login_is_required(self, navigate, process):
+        navigate.return_value = LoginStatus.create(
+            GeminiPageState.WAITING_LOGIN,
+            False,
+            "https://accounts.google.com/signin",
+            "zh-CN",
+            "waiting",
+            pid=1,
+        )
+
+        with self.assertRaises(main.GeminiLoginRequiredError) as raised:
+            run_formal_flow_for_test()
+
+        self.assertIn("未登录", str(raised.exception))
+        process.assert_not_called()
+
+    @patch("main._process_products")
+    @patch("main.navigate_gemini_with_retry")
+    def test_formal_browser_flow_blocks_products_when_page_is_not_ready(self, navigate, process):
+        navigate.return_value = LoginStatus.create(
+            GeminiPageState.PAGE_LOADING,
+            False,
+            "https://gemini.google.com/app",
+            "zh-CN",
+            "loading",
+            pid=1,
+        )
+
+        with self.assertRaises(main.GeminiPageNotReadyError) as raised:
+            run_formal_flow_for_test()
+
+        self.assertIn("未准备", str(raised.exception))
+        process.assert_not_called()
+
+    @patch("main._process_products")
+    @patch("main.navigate_gemini_with_retry", side_effect=TimeoutError("private timeout detail"))
+    def test_formal_browser_flow_maps_timeout_to_safe_page_not_ready_error(self, _navigate, process):
+        with self.assertRaises(main.GeminiPageNotReadyError) as raised:
+            run_formal_flow_for_test()
+
+        self.assertIn("未准备", str(raised.exception))
+        self.assertNotIn("private timeout detail", str(raised.exception))
+        process.assert_not_called()
+
+    @patch("main._process_products")
+    @patch(
+        "main.navigate_gemini_with_retry",
+        side_effect=ssl.SSLCertVerificationError("private certificate detail"),
+    )
+    def test_formal_browser_flow_maps_permanent_tls_to_safe_error(self, _navigate, process):
+        with self.assertRaises(main.GeminiPermanentTlsError) as raised:
+            run_formal_flow_for_test()
+
+        self.assertIn("证书", str(raised.exception))
+        self.assertNotIn("private certificate detail", str(raised.exception))
+        process.assert_not_called()
+
+    @patch("main._process_products", return_value=(1, 0, 0, 0))
+    @patch("main.navigate_gemini_with_retry")
+    def test_formal_browser_flow_processes_only_after_ready(self, navigate, process):
+        navigate.return_value = LoginStatus.create(
+            GeminiPageState.READY,
+            True,
+            "https://gemini.google.com/app",
+            "es",
+            "ready",
+            pid=1,
+        )
+
+        result, _context = run_formal_flow_for_test()
+
+        self.assertEqual(result, (1, 0, 0, 0))
+        process.assert_called_once()
+
+    @patch("main._process_products", return_value=(1, 0, 0, 0))
+    @patch("main.navigate_gemini_with_retry")
+    def test_formal_browser_flow_never_reads_console_input_in_ui_mode(self, navigate, _process):
+        navigate.return_value = LoginStatus.create(
+            GeminiPageState.READY,
+            True,
+            "https://gemini.google.com/app",
+            "en",
+            "ready",
+            pid=1,
+        )
+
+        with patch.dict(os.environ, {"UI_MODE": "1"}), patch(
+            "builtins.input", side_effect=AssertionError("UI mode must not prompt")
+        ):
+            result, _context = run_formal_flow_for_test(wait_for_ready=True)
+
+        self.assertEqual(result, (1, 0, 0, 0))
+
     def test_backfill_result_project_urls_reads_gbk_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
