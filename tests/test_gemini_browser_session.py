@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import ssl
+import traceback
 from pathlib import Path
 from unittest.mock import patch
 
@@ -155,6 +156,9 @@ class GeminiBrowserSessionTests(unittest.TestCase):
 
         self.assertIn("证书", str(raised.exception))
         self.assertNotIn("private certificate detail", str(raised.exception))
+        self.assertNotIn(
+            "private certificate detail", "".join(traceback.format_exception(raised.exception))
+        )
 
     def test_formal_browser_flow_uses_shared_launch_and_navigation_apis(self):
         class FormalPage:

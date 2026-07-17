@@ -3,6 +3,7 @@ import json
 import os
 import ssl
 import tempfile
+import traceback
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -134,6 +135,23 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         process.assert_not_called()
 
     @patch("main._process_products")
+    @patch("main.navigate_gemini_with_retry")
+    def test_formal_browser_flow_requires_ready_state_as_well_as_ready_flag(self, navigate, process):
+        navigate.return_value = LoginStatus.create(
+            GeminiPageState.ERROR,
+            True,
+            "https://gemini.google.com/app",
+            "zh-CN",
+            "incorrectly marked ready",
+            pid=1,
+        )
+
+        with self.assertRaises(main.GeminiPageNotReadyError):
+            run_formal_flow_for_test()
+
+        process.assert_not_called()
+
+    @patch("main._process_products")
     @patch("main.navigate_gemini_with_retry", side_effect=TimeoutError("private timeout detail"))
     def test_formal_browser_flow_maps_timeout_to_safe_page_not_ready_error(self, _navigate, process):
         with self.assertRaises(main.GeminiPageNotReadyError) as raised:
@@ -141,6 +159,9 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
 
         self.assertIn("未准备", str(raised.exception))
         self.assertNotIn("private timeout detail", str(raised.exception))
+        self.assertNotIn(
+            "private timeout detail", "".join(traceback.format_exception(raised.exception))
+        )
         process.assert_not_called()
 
     @patch("main._process_products")
@@ -154,6 +175,9 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
 
         self.assertIn("证书", str(raised.exception))
         self.assertNotIn("private certificate detail", str(raised.exception))
+        self.assertNotIn(
+            "private certificate detail", "".join(traceback.format_exception(raised.exception))
+        )
         process.assert_not_called()
 
     @patch("main._process_products", return_value=(1, 0, 0, 0))

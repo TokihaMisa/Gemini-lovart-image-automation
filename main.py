@@ -973,20 +973,20 @@ def _run_browser_flow(
                 )
             except GeminiPermanentTlsError:
                 logger.warning("Gemini TLS 证书验证失败，未开始处理商品。")
-                raise
+                raise GeminiPermanentTlsError() from None
             except Exception as exc:
                 if classify_network_error(exc) is RetryKind.PERMANENT_TLS:
                     logger.warning("Gemini TLS 证书验证失败，未开始处理商品。")
-                    raise GeminiPermanentTlsError() from exc
+                    raise GeminiPermanentTlsError() from None
                 if isinstance(exc, TimeoutError):
                     logger.warning("Gemini 页面未准备完成，未开始处理商品。")
-                    raise GeminiPageNotReadyError() from exc
+                    raise GeminiPageNotReadyError() from None
                 raise
 
             if status.state is GeminiPageState.WAITING_LOGIN:
                 logger.warning("Gemini 未登录，未开始处理商品。")
                 raise GeminiLoginRequiredError()
-            if not status.ready:
+            if status.state is not GeminiPageState.READY or not status.ready:
                 logger.warning("Gemini 页面未准备完成，未开始处理商品。")
                 raise GeminiPageNotReadyError()
 

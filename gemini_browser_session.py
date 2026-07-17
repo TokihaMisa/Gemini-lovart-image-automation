@@ -280,7 +280,7 @@ def navigate_gemini_with_retry(
         return run_with_retry(navigate, policy, on_retry=on_retry)  # type: ignore[return-value]
     except Exception as exc:
         if classify_network_error(exc) is RetryKind.PERMANENT_TLS:
-            raise GeminiPermanentTlsError() from exc
+            raise GeminiPermanentTlsError() from None
         raise
 
 
