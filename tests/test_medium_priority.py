@@ -25,6 +25,7 @@ from gemini_bot import (
 )
 from gemini_browser_session import (
     GeminiLoginRequiredError,
+    GeminiPermanentTlsError,
     GeminiPageNotReadyError,
     GeminiPageState,
     LoginStatus,
@@ -195,6 +196,27 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         self.assertTrue(bot._click_extended_thinking_level())
         self.assertTrue(bot._extended_thinking_option_is_checked())
 
+    def test_real_playwright_dom_normalizes_accented_and_whitespace_controls(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            try:
+                page.set_content("""
+                    <button data-tooltip='  CHAT   TEMPORAL  '>temporary</button>
+                    <button title='RÁPIDO'>mode</button>
+                    <button aria-label='Pensamiento ampliado'>thinking</button>
+                    <div role='menuitemcheckbox' title=' PENSAMIENTO   AMPLIADO ' aria-checked='true'>selected</div>
+                """)
+                bot = GeminiBot(page, {"gemini": {}}, FakeFormalLogger())
+                self.assertTrue(bot._start_temporary_chat())
+                self.assertTrue(bot._open_mode_menu())
+                self.assertTrue(bot._click_extended_thinking_option())
+                self.assertTrue(bot._extended_thinking_option_is_checked())
+            finally:
+                browser.close()
+
     def test_product_retry_uses_explicit_browser_allowlist(self):
         class Bot(GeminiBot):
             def __init__(self, error):
@@ -219,8 +241,38 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             self.assertEqual(bot.generate_prompt("产品", "Spanish", "卖点", []), "ok")
             self.assertEqual(bot.calls, 2)
 
+    def test_product_retry_handles_only_transient_http_and_sanitizes_final_raw_errors(self):
+        class Bot(GeminiBot):
+            def __init__(self, error):
+                super().__init__(object(), {"gemini": {}, "browser": {"product_attempts": 2, "retry_delays": [0]}}, FakeFormalLogger())
+                self.error = error
+                self.calls = 0
+
+            def _generate_prompt_once(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise self.error
+                return "ok"
+
+        for status in (408, 429, 500, 503):
+            bot = Bot(HTTPError("https://gemini.test", status, "raw-token@example.com", {}, None))
+            self.assertEqual(bot.generate_prompt("产品", "Spanish", "卖点", []), "ok")
+            self.assertEqual(bot.calls, 2)
+        for status in (401, 403, 404):
+            bot = Bot(HTTPError("https://gemini.test", status, "raw-token@example.com", {}, None))
+            with self.assertRaises(GeminiPageNotReadyError) as raised:
+                bot.generate_prompt("产品", "Spanish", "卖点", [])
+            self.assertEqual(bot.calls, 1)
+            self.assertNotIn("raw-token@example.com", "".join(traceback.format_exception(raised.exception)))
+
+        bot = Bot(ssl.SSLCertVerificationError("raw-token@example.com"))
+        with self.assertRaises(GeminiPermanentTlsError) as raised:
+            bot.generate_prompt("产品", "Spanish", "卖点", [])
+        self.assertEqual(bot.calls, 1)
+        self.assertNotIn("raw-token@example.com", "".join(traceback.format_exception(raised.exception)))
+
     def test_diagnostics_reject_untrusted_language_controls_and_write_valid_safe_png(self):
-        sentinels = ("secret@example.com", "token=private", "C:\\Users\\private", "/tmp/private", "https://x.test/app?key=private")
+        sentinels = ("secret@example.com", "token=private", "C:\\Users\\private", "/tmp/private", "https://x.test/app?key=private", "//server/share/private", "unrecognized-control-987")
 
         class Page:
             url = "https://gemini.google.com/app?token=private"
@@ -232,7 +284,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             metadata_path = save_gemini_diagnostics(Page(), tmp, "SKU", "private", 1, "private")
             payload = json.loads(metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["language"], "unknown")
-            self.assertEqual(payload["controls"], ["Adjuntar archivos"])
+            self.assertEqual(payload["controls"], ["upload"])
             with Image.open(metadata_path.with_suffix(".png")) as image:
                 image.load()
                 self.assertEqual(image.size, (1, 1))
@@ -526,11 +578,11 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         self.assertEqual(bot.attempts, 2)
 
     def test_login_tls_auth_and_verified_upload_errors_are_not_retried(self):
-        for error in (
-            GeminiLoginRequiredError(),
-            ssl.SSLCertVerificationError("certificate verify failed"),
-            HTTPError("https://gemini.google.com/app", 403, "denied", {}, None),
-            RuntimeError("Gemini image upload did not complete"),
+        for error, expected_type in (
+            (GeminiLoginRequiredError(), GeminiLoginRequiredError),
+            (ssl.SSLCertVerificationError("certificate verify failed"), GeminiPermanentTlsError),
+            (HTTPError("https://gemini.google.com/app", 403, "denied", {}, None), GeminiPageNotReadyError),
+            (RuntimeError("Gemini image upload did not complete"), GeminiPageNotReadyError),
         ):
             class RetryGeminiBot(GeminiBot):
                 def __init__(self):
@@ -542,7 +594,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                     raise error
 
             bot = RetryGeminiBot()
-            with self.assertRaises(type(error)):
+            with self.assertRaises(expected_type):
                 bot.generate_prompt("产品", "Spanish", "卖点", [])
             self.assertEqual(bot.attempts, 1)
 

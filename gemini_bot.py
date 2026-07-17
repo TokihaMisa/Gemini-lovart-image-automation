@@ -4,12 +4,15 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 import unicodedata
 import re
+import ssl
+from urllib.error import HTTPError
 
 from playwright.sync_api import Page
 
 from prompt_settings import get_prompt_settings
 from gemini_browser_session import (
     GeminiLoginRequiredError,
+    GeminiPermanentTlsError,
     GeminiPageNotReadyError,
     GeminiPageState,
     inspect_gemini_page,
@@ -77,19 +80,20 @@ def _safe_controls(page: Page) -> list[str]:
     except Exception:
         payload = {}
     controls = payload.get("controls", []) if isinstance(payload, dict) else []
+    categories = (
+        (TEMPORARY_CHAT_TERMS, "temporary_chat"),
+        (EXTENDED_THINKING_TERMS, "extended_thinking"),
+        (UPLOAD_TERMS, "upload"),
+        (MODE_TERMS, "mode"),
+    )
     unique: list[str] = []
     for item in controls if isinstance(controls, list) else []:
         text = " ".join(str(item).split())[:160]
-        # A label containing an email address is not a safe diagnostic.
-        normalized = normalize_ui_text(text)
-        unsafe = (
-            "@" in text or "?" in text or "token" in normalized or "password" in normalized
-            or "secret" in normalized or "err_" in normalized or re.search(r"[a-z]:\\|/(?:tmp|home|users)/", text, re.I)
-            or text.startswith(("http://", "https://"))
-        )
-        if unsafe or not text or text in unique:
+        category = next((label for terms, label in categories if matches_ui_term(text, terms)), None)
+        # Never persist raw control text: unknown values are intentionally omitted.
+        if not category or category in unique:
             continue
-        unique.append(text)
+        unique.append(category)
         if len(unique) >= 20:
             break
     return unique
@@ -165,6 +169,8 @@ class GeminiBot:
     def _is_retryable_product_error(error: BaseException) -> bool:
         if isinstance(error, GeminiPageStructureError):
             return True
+        if isinstance(error, HTTPError):
+            return error.code in {408, 429} or 500 <= error.code <= 599
         message = str(error).casefold()
         permanent_markers = (
             "err_cert_", "certificate verify", "err_access_denied", "access denied",
@@ -179,6 +185,22 @@ class GeminiBot:
             "err_network_changed", "err_name_not_resolved", "temporary dns",
             "err_ssl_protocol_error", "connection reset", "connection timed out",
         ))
+
+    @staticmethod
+    def _safe_terminal_error(error: BaseException) -> BaseException:
+        safe_errors = (
+            GeminiLoginRequiredError,
+            GeminiPermanentTlsError,
+            GeminiPageNotReadyError,
+            GeminiPageStructureError,
+            GeminiUploadIncompleteError,
+        )
+        if isinstance(error, safe_errors):
+            return error
+        message = str(error).casefold()
+        if isinstance(error, ssl.SSLCertVerificationError) or "err_cert_" in message or "certificate" in message:
+            return GeminiPermanentTlsError()
+        return GeminiPageNotReadyError()
 
     def _select_thinking_mode_with_recovery(self, product_id: str) -> None:
         if self._select_thinking_mode():
@@ -232,12 +254,16 @@ class GeminiBot:
                 retryable = self._is_retryable_product_error(exc)
                 if not retryable:
                     self._save_debug_snapshot(product_id, "exception", attempt, self._error_kind(exc))
-                    raise
+                    safe_error = self._safe_terminal_error(exc)
+                    if safe_error is exc:
+                        raise
+                    raise safe_error from None
                 if attempt >= product_attempts:
                     self._save_debug_snapshot(product_id, "exception", attempt, self._error_kind(exc))
-                    if isinstance(exc, GeminiPageStructureError):
+                    safe_error = self._safe_terminal_error(exc)
+                    if safe_error is exc:
                         raise
-                    raise GeminiPageNotReadyError() from None
+                    raise safe_error from None
                 self.logger.warning(f"Gemini: retrying product prompt attempt {attempt + 1}/{product_attempts}")
                 delay = policy.delay_after(attempt)
                 if delay:
@@ -361,7 +387,7 @@ class GeminiBot:
         () => {{
             const terms = {json.dumps(normalized_terms, ensure_ascii=False)};
             const normalize = (value) => (value || '').normalize('NFKD')
-                .replace(/[\\u0300-\\u036f]/g, '').toLowerCase().replace(/\\s+/g, ' ').trim();
+                .replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
             const visible = (node) => {{
                 const rect = node.getBoundingClientRect(); const style = getComputedStyle(node);
                 return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
@@ -389,7 +415,7 @@ class GeminiBot:
         () => {{
             const terms = {json.dumps(normalized_terms, ensure_ascii=False)};
             const normalize = (value) => (value || '').normalize('NFKD')
-                .replace(/[\\u0300-\\u036f]/g, '').toLowerCase().replace(/\\s+/g, ' ').trim();
+                .replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
             const visible = (node) => {{ const rect = node.getBoundingClientRect(); const style = getComputedStyle(node); return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'; }};
             return [...document.querySelectorAll('button, [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [aria-label], [title], [data-tooltip]')]
                 .filter(visible).some((node) => {{
