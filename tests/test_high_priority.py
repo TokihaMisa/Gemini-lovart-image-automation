@@ -64,9 +64,9 @@ class HighPriorityBehaviorTests(unittest.TestCase):
             with path.open("r", encoding="utf-8", newline="") as fh:
                 rows = list(csv.reader(fh))
 
-        self.assertEqual(rows[0], ["product_id", "product_name", "status", "project_url", "error"])
-        self.assertEqual(rows[1], ["SKU-123", 'Name, "quoted"', "success", "https://example.test", ""])
-        self.assertEqual(rows[2], ["SKU-456", "Recovered item", "success", "https://example.test/2", ""])
+        self.assertEqual(rows[0], ["product_id", "product_name", "status", "project_url", "error", "used_model"])
+        self.assertEqual(rows[1], ["SKU-123", 'Name, "quoted"', "success", "https://example.test", "", ""])
+        self.assertEqual(rows[2], ["SKU-456", "Recovered item", "success", "https://example.test/2", "", ""])
         self.assertEqual(len(rows), 3)
 
     def test_append_result_reads_existing_gbk_results_csv(self):
@@ -84,6 +84,7 @@ class HighPriorityBehaviorTests(unittest.TestCase):
                 rows = list(csv.DictReader(fh))
 
         self.assertEqual(rows[0]["product_name"], "\u6d4b\u8bd5\u5546\u54c1")
+        self.assertEqual(rows[0]["used_model"], "")
         self.assertEqual(rows[1]["product_id"], "SKU-NEW")
         self.assertEqual(rows[1]["project_url"], "https://example.test/new")
 

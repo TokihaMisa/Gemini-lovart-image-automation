@@ -258,6 +258,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             def __init__(self, selector):
                 self.selector = selector
                 self.first = self
+                self.last = self
 
             def count(self):
                 if "add_2" in self.selector:
@@ -266,7 +267,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                     return 1
                 return 0
 
-            def click(self, timeout=None):
+            def click(self, timeout=None, force=False):
                 events.append(f"click:{self.selector}")
 
             def set_input_files(self, image_paths):
@@ -303,6 +304,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 self.page = page
                 self.selector = selector
                 self.first = self
+                self.last = self
 
             def count(self):
                 if "add_2" in self.selector:
@@ -317,7 +319,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 events.append(f"click:{self.selector}")
 
             def is_visible(self, timeout=None):
-                return False
+                return "add_2" in self.selector
 
             def set_input_files(self, image_paths):
                 events.append(f"set_files:{len(image_paths)}")

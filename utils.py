@@ -222,19 +222,29 @@ def _read_result_rows(path: Path) -> list[dict]:
 
 
 def _upgrade_results_csv_header(path: Path) -> None:
-    """Upgrade legacy 3-column results.csv files before appending new rows."""
+    """Upgrade legacy results.csv files before appending new rows."""
     rows = _read_csv_rows_with_fallback(path)
     if not rows or rows[0] == RESULT_FIELDNAMES:
         return
-    if rows[0] != ["product_id", "product_name", "project_url"]:
+    legacy_header = rows[0]
+    if legacy_header not in (
+        ["product_id", "product_name", "project_url"],
+        ["product_id", "product_name", "status", "project_url", "error"],
+    ):
         return
 
     upgraded_rows = [RESULT_FIELDNAMES]
     for row in rows[1:]:
         product_id = row[0] if len(row) > 0 else ""
         product_name = row[1] if len(row) > 1 else ""
-        project_url = row[2] if len(row) > 2 else ""
-        upgraded_rows.append([product_id, product_name, "success", project_url, ""])
+        if legacy_header == ["product_id", "product_name", "project_url"]:
+            project_url = row[2] if len(row) > 2 else ""
+            upgraded_rows.append([product_id, product_name, "success", project_url, "", ""])
+        else:
+            status = row[2] if len(row) > 2 else ""
+            project_url = row[3] if len(row) > 3 else ""
+            error = row[4] if len(row) > 4 else ""
+            upgraded_rows.append([product_id, product_name, status, project_url, error, ""])
 
     with path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh)
