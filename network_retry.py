@@ -56,6 +56,7 @@ _NOT_FOUND_BROWSER_ERRORS = frozenset((
 ))
 
 _TRANSIENT_BROWSER_ERRORS = frozenset((
+    "net::err_aborted",
     "net::err_connection_reset",
     "net::err_connection_closed",
     "net::err_connection_timed_out",
@@ -64,6 +65,10 @@ _TRANSIENT_BROWSER_ERRORS = frozenset((
     "net::err_name_not_resolved",
     "net::err_ssl_protocol_error",
 ))
+
+_TRANSIENT_BROWSER_TEXT_MARKERS = (
+    "interrupted by another navigation",
+)
 
 _TRANSIENT_SSL_PROTOCOL_MARKERS = (
     "protocol interrupted",
@@ -102,6 +107,14 @@ def _unwrap_url_error_reason(exc: BaseException) -> tuple[BaseException, str]:
     return current, " ".join(messages)
 
 
+def _is_playwright_timeout(exc: BaseException) -> bool:
+    error_type = type(exc)
+    return (
+        error_type.__name__ == "TimeoutError"
+        and error_type.__module__.startswith("playwright.")
+    )
+
+
 def classify_network_error(exc: BaseException) -> RetryKind:
     if isinstance(exc, HTTPError):
         if exc.code in (401, 403):
@@ -133,10 +146,16 @@ def classify_network_error(exc: BaseException) -> RetryKind:
     if isinstance(root, http.client.IncompleteRead):
         return RetryKind.TRANSIENT
 
-    if isinstance(root, (TimeoutError, socket.timeout, socket.gaierror, ConnectionError)):
+    if (
+        isinstance(root, (TimeoutError, socket.timeout, socket.gaierror, ConnectionError))
+        or _is_playwright_timeout(root)
+    ):
         return RetryKind.TRANSIENT
 
     if any(marker in message for marker in _DNS_MARKERS):
+        return RetryKind.TRANSIENT
+
+    if any(marker in message for marker in _TRANSIENT_BROWSER_TEXT_MARKERS):
         return RetryKind.TRANSIENT
 
     if browser_errors & _TRANSIENT_BROWSER_ERRORS:

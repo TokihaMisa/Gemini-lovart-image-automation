@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 from PIL import Image
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 import main
 from excel_reader import resolve_image_scan_config
@@ -277,12 +278,11 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                     raise self.error
                 return "ok"
 
-        with patch("gemini_bot.classify_network_error", return_value=RetryKind.TRANSIENT):
-            for marker in ("net::ERR_INVALID_URL", "net::ERR_TOO_MANY_REDIRECTS", "net::ERR_FILE_NOT_FOUND"):
-                bot = Bot(RuntimeError(marker))
-                with self.assertRaises(RuntimeError):
-                    bot.generate_prompt("产品", "Spanish", "卖点", [])
-                self.assertEqual(bot.calls, 1)
+        for marker in ("net::ERR_INVALID_URL", "net::ERR_TOO_MANY_REDIRECTS", "net::ERR_FILE_NOT_FOUND"):
+            bot = Bot(RuntimeError(marker))
+            with self.assertRaises(RuntimeError):
+                bot.generate_prompt("产品", "Spanish", "卖点", [])
+            self.assertEqual(bot.calls, 1)
         for marker in ("net::ERR_CONNECTION_RESET", "net::ERR_NETWORK_CHANGED", "net::ERR_NAME_NOT_RESOLVED", "net::ERR_SSL_PROTOCOL_ERROR"):
             bot = Bot(RuntimeError(marker))
             self.assertEqual(bot.generate_prompt("产品", "Spanish", "卖点", []), "ok")
@@ -322,6 +322,58 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             bot.generate_prompt("产品", "Spanish", "卖点", [])
         self.assertEqual(bot.calls, 1)
         self.assertNotIn("raw-token@example.com", "".join(traceback.format_exception(raised.exception)))
+
+    def test_product_wrapper_recovers_explicit_playwright_navigation_interruptions(self):
+        errors = (
+            PlaywrightTimeoutError("playwright-private@example.com"),
+            RuntimeError("net::ERR_ABORTED private@example.com"),
+            RuntimeError("interrupted by another navigation private@example.com"),
+        )
+
+        for error in errors:
+            class Bot(GeminiBot):
+                def __init__(self):
+                    super().__init__(
+                        object(),
+                        {"gemini": {}, "browser": {"product_attempts": 2, "retry_delays": [0]}},
+                        FakeFormalLogger(),
+                    )
+                    self.calls = 0
+
+                def _generate_prompt_once(self, *_args, **_kwargs):
+                    self.calls += 1
+                    if self.calls == 1:
+                        raise error
+                    return "ok"
+
+            with self.subTest(error=type(error).__name__, message=str(error).split()[0]):
+                bot = Bot()
+                self.assertEqual(bot.generate_prompt("产品", "Spanish", "卖点", []), "ok")
+                self.assertEqual(bot.calls, 2)
+
+    def test_exhausted_real_playwright_timeout_is_safe_after_two_product_attempts(self):
+        sentinel = "playwright-private@example.com"
+
+        class Bot(GeminiBot):
+            def __init__(self):
+                super().__init__(
+                    object(),
+                    {"gemini": {}, "browser": {"product_attempts": 2, "retry_delays": [0]}},
+                    FakeFormalLogger(),
+                )
+                self.calls = 0
+
+            def _generate_prompt_once(self, *_args, **_kwargs):
+                self.calls += 1
+                raise PlaywrightTimeoutError(sentinel)
+
+        bot = Bot()
+        with self.assertRaises(GeminiPageNotReadyError) as raised:
+            bot.generate_prompt("产品", "Spanish", "卖点", [])
+
+        self.assertEqual(bot.calls, 2)
+        self.assertNotIn(sentinel, str(raised.exception))
+        self.assertNotIn(sentinel, "".join(traceback.format_exception(raised.exception)))
 
     def test_diagnostics_reject_untrusted_language_controls_and_write_valid_safe_png(self):
         sentinels = ("secret@example.com", "token=private", "C:\\Users\\private", "/tmp/private", "https://x.test/app?key=private", "//server/share/private", "unrecognized-control-987")

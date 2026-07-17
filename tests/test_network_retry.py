@@ -4,6 +4,8 @@ import unittest
 from http.client import IncompleteRead
 from urllib.error import HTTPError, URLError
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 from network_retry import (
     RetryKind,
     RetryPolicy,
@@ -38,6 +40,41 @@ class NetworkRetryTests(unittest.TestCase):
         for exc in cases:
             with self.subTest(exc=type(exc).__name__):
                 self.assertEqual(classify_network_error(exc), RetryKind.TRANSIENT)
+
+    def test_classifies_real_playwright_timeout_without_accepting_arbitrary_namesake(self):
+        real_timeout = PlaywrightTimeoutError("playwright-private@example.com")
+        fake_timeout_type = type(
+            "TimeoutError", (Exception,), {"__module__": "not_playwright.errors"}
+        )
+
+        self.assertEqual(classify_network_error(real_timeout), RetryKind.TRANSIENT)
+        self.assertEqual(classify_network_error(fake_timeout_type("fake")), RetryKind.OTHER)
+
+    def test_classifies_only_explicit_browser_navigation_interruptions_as_transient(self):
+        for error in (
+            RuntimeError("net::ERR_ABORTED private@example.com"),
+            RuntimeError("Navigation interrupted by another navigation private@example.com"),
+        ):
+            with self.subTest(message=str(error).split()[0]):
+                self.assertEqual(classify_network_error(error), RetryKind.TRANSIENT)
+
+    def test_retry_executor_uses_five_attempts_for_real_playwright_timeout(self):
+        calls = []
+
+        def operation():
+            calls.append(1)
+            if len(calls) < 5:
+                raise PlaywrightTimeoutError("playwright-private@example.com")
+            return "ok"
+
+        result = run_with_retry(
+            operation,
+            RetryPolicy(retry_delays=(0, 0, 0, 0)),
+            sleep=lambda _delay: None,
+        )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(len(calls), 5)
 
     def test_classifies_permanent_tls_and_auth_without_retry(self):
         for exc in (

@@ -5,6 +5,8 @@ import traceback
 from pathlib import Path
 from unittest.mock import patch
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 import main
 
 from gemini_browser_session import (
@@ -141,6 +143,31 @@ class GeminiBrowserSessionTests(unittest.TestCase):
 
         self.assertTrue(status.ready)
         self.assertEqual(page.goto_calls, 1)
+
+    def test_navigation_retries_real_playwright_timeout_through_five_attempts(self):
+        page = FakePage("https://gemini.google.com/app", {
+            "language": "en", "has_editor": True, "has_login_prompt": False,
+            "has_loading": False, "controls": [],
+        })
+        attempts = []
+        original_goto = page.goto
+
+        def flaky_goto(url, **kwargs):
+            attempts.append(1)
+            if len(attempts) < 5:
+                raise PlaywrightTimeoutError("playwright-private@example.com")
+            return original_goto(url, **kwargs)
+
+        page.goto = flaky_goto
+        with patch("network_retry.time.sleep"):
+            status = navigate_gemini_with_retry(
+                page,
+                "https://gemini.google.com/app",
+                RetryPolicy(retry_delays=(0, 0, 0, 0)),
+            )
+
+        self.assertTrue(status.ready)
+        self.assertEqual(len(attempts), 5)
 
     def test_navigation_retries_when_page_readiness_times_out(self):
         page = FakePage("https://gemini.google.com/app", {

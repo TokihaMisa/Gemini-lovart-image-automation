@@ -189,22 +189,7 @@ class GeminiBot:
     def _is_retryable_product_error(error: BaseException) -> bool:
         if isinstance(error, GeminiPageStructureError):
             return True
-        if isinstance(error, HTTPError):
-            return error.code in {408, 429} or 500 <= error.code <= 599
-        message = str(error).casefold()
-        permanent_markers = (
-            "err_cert_", "certificate verify", "err_access_denied",
-            "err_blocked_by_client", "err_blocked_by_response",
-        )
-        if any(marker in message for marker in permanent_markers):
-            return False
-        if isinstance(error, (TimeoutError, ConnectionError)):
-            return True
-        return any(marker in message for marker in (
-            "err_connection_reset", "err_connection_closed", "err_connection_timed_out",
-            "err_network_changed", "err_name_not_resolved", "temporary dns",
-            "err_ssl_protocol_error", "connection reset", "connection timed out",
-        ))
+        return classify_network_error(error) is RetryKind.TRANSIENT
 
     @staticmethod
     def _safe_terminal_error(
