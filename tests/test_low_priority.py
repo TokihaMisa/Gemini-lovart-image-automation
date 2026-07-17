@@ -20,6 +20,34 @@ from utils import read_status
 
 
 class LowPriorityBehaviorTests(unittest.TestCase):
+    def test_task6_lovart_upload_errors_never_echo_raw_response_or_business_message(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({"code": 418, "message": "raw-business-sentinel"}).encode("utf-8")
+
+        client = AgentSkill("https://lovart.test", "access-key", "secret-key")
+        with tempfile.TemporaryDirectory() as tmp:
+            local_path = Path(tmp) / "file.png"
+            local_path.write_bytes(b"image")
+            http_error = HTTPError("https://lovart.test/upload", 401, "denied", {}, io.BytesIO(b"raw-http-body-sentinel"))
+            with patch("lovart_api.urllib.request.urlopen", side_effect=http_error):
+                with self.assertRaises(AgentSkillError) as ctx:
+                    client.upload_file(str(local_path))
+            self.assertEqual(ctx.exception.code, 401)
+            self.assertNotIn("raw-http-body-sentinel", ctx.exception.message)
+
+            with patch("lovart_api.urllib.request.urlopen", return_value=Response()):
+                with self.assertRaises(AgentSkillError) as ctx:
+                    client.upload_file(str(local_path))
+            self.assertEqual(ctx.exception.code, 418)
+            self.assertNotIn("raw-business-sentinel", ctx.exception.message)
+
     def test_task6_lovart_retries_transient_ssl_with_resigning_and_shared_delay(self):
         class LovartResponse:
             def __enter__(self):
@@ -52,6 +80,11 @@ class LowPriorityBehaviorTests(unittest.TestCase):
 
         self.assertEqual(urlopen.call_count, 1)
         self.assertNotIn(secret, ctx.exception.message)
+        self.assertIn("系统时间", ctx.exception.message)
+        self.assertIn("代理", ctx.exception.message)
+        self.assertIn("VPN", ctx.exception.message)
+        self.assertIn("杀毒软件", ctx.exception.message)
+        self.assertIn("企业证书", ctx.exception.message)
 
         error = HTTPError("https://lovart.test/status", 401, "denied", {}, io.BytesIO(secret.encode()))
         with patch("lovart_api.urllib.request.urlopen", side_effect=error):

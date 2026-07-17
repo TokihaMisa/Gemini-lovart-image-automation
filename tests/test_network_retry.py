@@ -1,6 +1,7 @@
 import socket
 import ssl
 import unittest
+from http.client import IncompleteRead
 from urllib.error import HTTPError, URLError
 
 from network_retry import (
@@ -28,6 +29,7 @@ class NetworkRetryTests(unittest.TestCase):
             ConnectionResetError(),
             URLError("temporary DNS failure"),
             ssl.SSLError("protocol interrupted"),
+            IncompleteRead(b"partial"),
             RuntimeError("net::ERR_NETWORK_CHANGED"),
             RuntimeError("net::ERR_SSL_PROTOCOL_ERROR"),
             HTTPError("https://example.test", 429, "rate", {}, None),
@@ -48,6 +50,12 @@ class NetworkRetryTests(unittest.TestCase):
         self.assertEqual(
             classify_network_error(HTTPError("https://x", 403, "denied", {}, None)),
             RetryKind.AUTH,
+        )
+
+    def test_unknown_ssl_error_is_not_retried(self):
+        self.assertEqual(
+            classify_network_error(ssl.SSLError("unexpected ssl library failure")),
+            RetryKind.OTHER,
         )
         self.assertEqual(
             classify_network_error(HTTPError("https://x", 404, "missing", {}, None)),

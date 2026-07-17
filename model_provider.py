@@ -17,7 +17,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import urllib.request
 
-from network_retry import RetryPolicy, run_with_retry
+from network_retry import (
+    PERMANENT_TLS_GUIDANCE,
+    RetryKind,
+    RetryPolicy,
+    classify_network_error,
+    run_with_retry,
+)
 
 
 @dataclass(frozen=True)
@@ -295,10 +301,14 @@ def _request_json(
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
+    failure: ModelProviderError | None = None
+    decoded: dict[str, Any] | None = None
     try:
         decoded = run_with_retry(request_operation, RetryPolicy())
     except HTTPError as exc:
-        raise _map_http_error(provider, exc, operation) from None
+        failure = _map_http_error(provider, exc, operation)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        failure = ModelProviderError("invalid_response", "模型服务返回了无法识别的数据。")
     except (
         URLError,
         TimeoutError,
@@ -308,9 +318,9 @@ def _request_json(
         http.client.HTTPException,
         ValueError,
     ) as exc:
-        raise _map_network_error(exc) from None
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ModelProviderError("invalid_response", "模型服务返回了无法识别的数据。") from None
+        failure = _map_network_error(exc)
+    if failure is not None:
+        raise failure from None
     if not isinstance(decoded, dict):
         raise ModelProviderError("invalid_response", "模型服务返回了无法识别的数据。")
     return decoded
@@ -341,10 +351,25 @@ def _map_http_error(provider: str, exc: HTTPError, operation: str) -> ModelProvi
 
 
 def _map_network_error(exc: BaseException) -> ModelProviderError:
+    if classify_network_error(exc) is RetryKind.PERMANENT_TLS:
+        return ModelProviderError("tls_certificate", PERMANENT_TLS_GUIDANCE)
     reason = exc.reason if isinstance(exc, URLError) else exc
     if isinstance(reason, (TimeoutError, socket.timeout)):
         return ModelProviderError("timeout", "连接模型服务超时，请稍后重试。")
     return ModelProviderError("network", "无法连接模型服务，请检查网络和 API 地址。")
+
+
+def safe_provider_request_error(
+    provider: str,
+    exc: BaseException,
+    operation: str = "request",
+) -> ModelProviderError:
+    """Map a failed provider transport to a secret-free, context-free error."""
+    if isinstance(exc, HTTPError):
+        return _map_http_error(provider, exc, operation)
+    if isinstance(exc, (UnicodeDecodeError, json.JSONDecodeError)):
+        return ModelProviderError("invalid_response", "模型服务返回了无法识别的数据。")
+    return _map_network_error(exc)
 
 
 def model_choice_labels(models: list[DiscoveredModel]) -> list[tuple[str, str]]:

@@ -3,8 +3,8 @@ import json
 import urllib.request
 from pathlib import Path
 
-from model_provider import validate_base_url, validate_model_id
-from network_retry import RetryPolicy, classify_network_error, run_with_retry
+from model_provider import safe_provider_request_error, validate_base_url, validate_model_id
+from network_retry import RetryPolicy, run_with_retry
 from prompt_settings import normalize_prompt_settings
 from utils import (
     build_design_prompt,
@@ -157,6 +157,8 @@ class NvidiaAPI:
             with urllib.request.urlopen(req, timeout=180) as resp:
                 return json.loads(resp.read().decode("utf-8"))
 
+        failure = None
+        data = None
         try:
             data = run_with_retry(
                 request_operation,
@@ -164,9 +166,11 @@ class NvidiaAPI:
                 on_retry=self._retry_notice,
             )
         except Exception as exc:
+            failure = safe_provider_request_error("nvidia", exc)
+        if failure is not None:
             if self.logger:
-                self.logger.error(f"NVIDIA API request failed ({classify_network_error(exc).value})")
-            raise
+                self.logger.error(f"NVIDIA API request failed ({failure.code})")
+            raise failure from None
 
         result = self._extract_text(data)
         if self.logger:

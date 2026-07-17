@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
+import http.client
 import socket
 import ssl
 import time
@@ -48,6 +49,13 @@ _PERMANENT_TLS_MARKERS = (
     "net::err_cert_date_invalid",
 )
 
+_TRANSIENT_SSL_PROTOCOL_MARKERS = (
+    "protocol interrupted",
+    "ssl protocol error",
+)
+
+PERMANENT_TLS_GUIDANCE = "TLS 证书验证失败，请检查系统时间、代理或 VPN、杀毒软件的 TLS 拦截及企业证书。"
+
 
 def classify_network_error(exc: BaseException) -> RetryKind:
     message = str(exc).lower()
@@ -56,7 +64,9 @@ def classify_network_error(exc: BaseException) -> RetryKind:
     ):
         return RetryKind.PERMANENT_TLS
 
-    if isinstance(exc, ssl.SSLError):
+    if isinstance(exc, ssl.SSLError) and any(
+        marker in message for marker in _TRANSIENT_SSL_PROTOCOL_MARKERS
+    ):
         return RetryKind.TRANSIENT
 
     if isinstance(exc, HTTPError):
@@ -67,6 +77,9 @@ def classify_network_error(exc: BaseException) -> RetryKind:
         if exc.code in (408, 429) or 500 <= exc.code < 600:
             return RetryKind.TRANSIENT
         return RetryKind.OTHER
+
+    if isinstance(exc, http.client.IncompleteRead):
+        return RetryKind.TRANSIENT
 
     if isinstance(exc, (TimeoutError, socket.timeout, ConnectionError, URLError)):
         return RetryKind.TRANSIENT

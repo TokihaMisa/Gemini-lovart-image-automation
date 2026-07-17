@@ -16,7 +16,13 @@ from typing import Optional
 
 import os
 
-from network_retry import RetryKind, RetryPolicy, classify_network_error, run_with_retry
+from network_retry import (
+    PERMANENT_TLS_GUIDANCE,
+    RetryKind,
+    RetryPolicy,
+    classify_network_error,
+    run_with_retry,
+)
 
 # SSL context — verification ON by default. Opt-out via LOVART_INSECURE_SSL=1
 # for users behind corporate proxies/VPNs that do TLS interception.
@@ -86,6 +92,8 @@ class AgentSkill:
                 return json.loads(resp.read().decode())
 
         attempts = RetryPolicy().network_attempts if retries == 3 else max(1, retries)
+        failure = None
+        result = None
         try:
             result = run_with_retry(
                 request_operation,
@@ -98,11 +106,14 @@ class AgentSkill:
                 403: "Lovart 访问被拒绝。",
                 404: "Lovart API 路径不存在。",
             }
-            raise AgentSkillError(messages.get(exc.code, "Lovart 服务暂时不可用，请稍后重试。"), exc.code) from None
+            failure = AgentSkillError(messages.get(exc.code, "Lovart 服务暂时不可用，请稍后重试。"), exc.code)
         except Exception as exc:
             if classify_network_error(exc) is RetryKind.PERMANENT_TLS:
-                raise AgentSkillError("证书验证失败，请检查系统时间、证书或代理设置。") from None
-            raise AgentSkillError("无法连接 Lovart 服务，请检查网络后重试。") from None
+                failure = AgentSkillError(PERMANENT_TLS_GUIDANCE)
+            else:
+                failure = AgentSkillError("无法连接 Lovart 服务，请检查网络后重试。")
+        if failure is not None:
+            raise failure from None
 
         if isinstance(result, dict) and result.get("code", 0) != 0:
             raise AgentSkillError("Lovart 服务返回错误。", result.get("code", -1))
@@ -181,15 +192,24 @@ class AgentSkill:
 
         url = f"{self.base_url}{path}"
         req = urllib.request.Request(url, data=body, method="POST", headers=headers)
+        failure = None
+        result = None
         try:
             with urllib.request.urlopen(req, timeout=self.timeout, context=_ssl_ctx) as resp:
                 result = json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode()
-            raise AgentSkillError(f"Upload failed ({e.code}): {err_body}")
+        except urllib.error.HTTPError as exc:
+            failure = AgentSkillError("Lovart 上传请求被拒绝。", exc.code)
+        except Exception as exc:
+            if classify_network_error(exc) is RetryKind.PERMANENT_TLS:
+                failure = AgentSkillError(PERMANENT_TLS_GUIDANCE)
+            else:
+                failure = AgentSkillError("Lovart 上传失败，请检查网络后重试。")
+        if failure is not None:
+            raise failure from None
 
         if result.get("code") != 0:
-            raise AgentSkillError(f"Upload failed: {result.get('message', 'unknown error')}")
+            code = result.get("code")
+            raise AgentSkillError("Lovart 上传失败。", code if isinstance(code, int) else -1)
 
         return result["data"]["url"]
 

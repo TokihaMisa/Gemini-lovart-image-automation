@@ -3,6 +3,7 @@ import http.client
 import json
 import socket
 import ssl
+import traceback
 import unittest
 from urllib.error import HTTPError, URLError
 from unittest.mock import patch
@@ -80,6 +81,75 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.assertNotIn("pageToken=page-2", urlopen.call_args_list[0].args[0].full_url)
         self.assertIn("pageToken=page-2", urlopen.call_args_list[1].args[0].full_url)
         self.assertIn("pageToken=page-2", urlopen.call_args_list[2].args[0].full_url)
+
+    @patch("network_retry.time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_task6_pagination_retries_only_the_incomplete_page(self, urlopen, _sleep):
+        sentinel = "raw-incomplete-body-sentinel"
+        urlopen.side_effect = [
+            FakeResponse({
+                "models": [{
+                    "name": "models/gemini-3.5-flash",
+                    "supportedGenerationMethods": ["generateContent"],
+                }],
+                "nextPageToken": "page-2",
+            }),
+            http.client.IncompleteRead(sentinel.encode()),
+            FakeResponse({"models": [{
+                "name": "models/gemini-3.5-pro",
+                "supportedGenerationMethods": ["generateContent"],
+            }]}),
+        ]
+
+        models = discover_models("gemini", "key", "https://google.test/v1beta")
+
+        self.assertEqual([model.model_id for model in models], ["gemini-3.5-flash", "gemini-3.5-pro"])
+        self.assertEqual(urlopen.call_count, 3)
+        self.assertNotIn("pageToken=page-2", urlopen.call_args_list[0].args[0].full_url)
+        self.assertIn("pageToken=page-2", urlopen.call_args_list[1].args[0].full_url)
+        self.assertIn("pageToken=page-2", urlopen.call_args_list[2].args[0].full_url)
+
+    @patch("urllib.request.urlopen")
+    def test_task6_model_provider_permanent_tls_is_safe_and_single_attempt(self, urlopen):
+        sentinel = "raw-tls-sentinel"
+        urlopen.side_effect = ssl.SSLCertVerificationError(sentinel)
+
+        with self.assertRaises(ModelProviderError) as ctx:
+            discover_models("nvidia", "super-secret-key", "https://nvidia.test/v1")
+
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertNotIn(sentinel, str(ctx.exception))
+        self.assertNotIn(sentinel, repr(ctx.exception.__dict__))
+        self.assertNotIn(sentinel, "".join(traceback.format_exception(ctx.exception)))
+        self.assertIn("系统时间", ctx.exception.user_message)
+        self.assertIn("代理", ctx.exception.user_message)
+        self.assertIn("VPN", ctx.exception.user_message)
+        self.assertIn("杀毒软件", ctx.exception.user_message)
+        self.assertIn("企业证书", ctx.exception.user_message)
+
+    @patch("urllib.request.urlopen")
+    def test_task6_model_provider_invalid_json_does_not_retain_raw_document(self, urlopen):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b"raw-model-json-sentinel"
+
+        sentinel = "raw-model-json-sentinel"
+        urlopen.return_value = Response()
+
+        with self.assertRaises(ModelProviderError) as ctx:
+            discover_models("nvidia", "super-secret-key", "https://nvidia.test/v1")
+
+        self.assertEqual(ctx.exception.code, "invalid_response")
+        self.assertNotIn(sentinel, str(ctx.exception))
+        self.assertNotIn(sentinel, repr(ctx.exception.__dict__))
+        self.assertNotIn(sentinel, "".join(traceback.format_exception(ctx.exception)))
+        self.assertIsNone(ctx.exception.__context__)
 
     @patch("urllib.request.urlopen")
     def test_invalid_base_urls_are_rejected_before_network_call(self, urlopen):
