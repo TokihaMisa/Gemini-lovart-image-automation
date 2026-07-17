@@ -149,10 +149,12 @@ def inspect_gemini_page(page: Any) -> LoginStatus:
         )
 
     payload = raw_payload if isinstance(raw_payload, Mapping) else {}
-    url = _sanitized_url(str(getattr(page, "url", ""))).lower()
-    is_account_or_login_url = any(
-        marker in url
-        for marker in ("accounts.google.com", "account", "/signin", "/login", "/verify", "/challenge")
+    url_parts = urlsplit(_sanitized_url(str(getattr(page, "url", ""))))
+    hostname = (url_parts.hostname or "").lower()
+    path_segments = {segment.lower() for segment in url_parts.path.split("/") if segment}
+    is_account_or_login_url = (
+        hostname in {"accounts.google.com", "myaccount.google.com", "account.google.com"}
+        or bool(path_segments & {"login", "signin", "verify", "verification", "challenge"})
     )
     has_login_prompt = bool(payload.get("has_login_prompt"))
     if is_account_or_login_url or has_login_prompt:
@@ -203,13 +205,7 @@ def wait_for_gemini_ready(
         if status.state in (GeminiPageState.READY, GeminiPageState.WAITING_LOGIN, GeminiPageState.ERROR):
             return status
         if time.monotonic() >= deadline:
-            return _status_for_page(
-                GeminiPageState.ERROR,
-                False,
-                page,
-                {"language": status.language},
-                "Gemini did not become ready before the configured timeout.",
-            )
+            raise TimeoutError("Gemini did not become ready before the configured timeout.")
         waiter = getattr(page, "wait_for_timeout", None)
         if callable(waiter):
             waiter(250)

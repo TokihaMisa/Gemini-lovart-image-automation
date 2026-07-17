@@ -22,9 +22,12 @@ from excel_reader import read_products
 from gemini_api import GeminiAPI
 from gemini_bot import GeminiBot
 from gemini_browser_session import (
+    GeminiPageState,
     build_browser_launch_options,
+    navigate_gemini_with_retry,
     resolve_browser_executable,
     resolve_user_data_dir,
+    retry_policy_from_config,
 )
 from lovart_bot import LOVART_IMAGE_MODELS, LovartBot
 from nvidia_api import NvidiaAPI, resolve_nvidia_model
@@ -924,11 +927,6 @@ def _run_browser_flow(
     prompt_settings=None,
 ):
     browser_cfg = config["browser"]
-    user_data_dir = Path(browser_cfg["user_data_dir"])
-    if not user_data_dir.is_absolute():
-        user_data_dir = Path.cwd() / user_data_dir
-    user_data_dir.mkdir(parents=True, exist_ok=True)
-
     chrome_exe = _resolve_browser_executable_for_run(browser_cfg, interactive=wait_for_ready)
     if chrome_exe:
         logger.info(f"Using browser executable: {chrome_exe}")
@@ -937,27 +935,24 @@ def _run_browser_flow(
 
     with sync_playwright() as pw:
         logger.info("Launching browser for Gemini")
-        launch_options = {
-            "user_data_dir": str(user_data_dir),
-            "headless": False,
-            "no_viewport": True,
-            "args": [
-                "--disable-blink-features=AutomationControlled",
-                "--disable-features=ImprovedCookieControls",
-            ],
-        }
+        launch_options = build_browser_launch_options(config, config_path=Path("config.yaml"))
         if chrome_exe:
             launch_options["executable_path"] = chrome_exe
         context = pw.chromium.launch_persistent_context(**launch_options)
         page = context.pages[0] if context.pages else context.new_page()
-        page.goto(config["gemini"]["base_url"], wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(3000)
-
-        if any(keyword in page.url.lower() for keyword in ["login", "accounts.google.com", "signin"]):
+        policy = retry_policy_from_config(config)
+        status = navigate_gemini_with_retry(
+            page, config["gemini"]["base_url"], policy, logger=logger
+        )
+        if status.state is GeminiPageState.WAITING_LOGIN:
             print("\n  Gemini requires login. Log in, then press Enter.")
             input("  Press Enter...")
-            page.goto(config["gemini"]["base_url"], wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(2000)
+            status = navigate_gemini_with_retry(
+                page, config["gemini"]["base_url"], policy, logger=logger
+            )
+        if not status.ready:
+            context.close()
+            raise RuntimeError("Gemini browser page is not ready.")
 
         logger.info("Gemini browser ready")
         if wait_for_ready:
