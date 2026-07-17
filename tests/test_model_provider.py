@@ -7,6 +7,7 @@ import unittest
 from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
+import model_provider
 from model_provider import (
     DiscoveredModel,
     ModelProviderError,
@@ -192,6 +193,20 @@ class ModelDiscoveryTests(unittest.TestCase):
 class ModelCompatibilityTests(unittest.TestCase):
     def test_selected_model_is_not_collected_as_a_pytest_test(self):
         self.assertFalse(test_selected_model.__test__)
+
+    def test_gemini_response_skips_blank_first_text_part(self):
+        payload = {"candidates": [{"content": {"parts": [
+            {"text": " \t\n "},
+            {"text": " usable Gemini text "},
+        ]}}]}
+        self.assertEqual(model_provider._extract_gemini_text(payload), " usable Gemini text ")
+
+    def test_nvidia_response_skips_blank_first_choice(self):
+        payload = {"choices": [
+            {"message": {"content": "\n  "}},
+            {"message": {"content": " usable NVIDIA text "}},
+        ]}
+        self.assertEqual(model_provider._extract_nvidia_text(payload), " usable NVIDIA text ")
 
     @patch("urllib.request.urlopen")
     def test_gemini_model_test_sends_inline_png_and_small_output_limit(self, urlopen):

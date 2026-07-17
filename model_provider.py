@@ -151,7 +151,7 @@ def _extract_gemini_text(payload: dict[str, Any]) -> str | None:
         if not isinstance(content, dict) or not isinstance(content.get("parts"), list):
             continue
         for part in content["parts"]:
-            if isinstance(part, dict) and isinstance(part.get("text"), str):
+            if isinstance(part, dict) and isinstance(part.get("text"), str) and part["text"].strip():
                 return part["text"]
     return None
 
@@ -164,7 +164,7 @@ def _extract_nvidia_text(payload: dict[str, Any]) -> str | None:
         if not isinstance(choice, dict):
             continue
         message = choice.get("message")
-        if isinstance(message, dict) and isinstance(message.get("content"), str):
+        if isinstance(message, dict) and isinstance(message.get("content"), str) and message["content"].strip():
             return message["content"]
     return None
 
