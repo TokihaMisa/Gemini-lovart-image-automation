@@ -15,6 +15,8 @@ from model_provider import (
     discover_models,
     model_choice_labels,
     test_selected_model,
+    validate_base_url,
+    validate_model_id,
 )
 
 
@@ -33,6 +35,37 @@ class FakeResponse:
 
 
 class ModelDiscoveryTests(unittest.TestCase):
+    @patch("urllib.request.urlopen")
+    def test_invalid_base_urls_are_rejected_before_network_call(self, urlopen):
+        for value in ("google.test/v1beta", "ftp://google.test/v1beta", "https:///v1beta", "https://"):
+            with self.subTest(value=value), self.assertRaises(ModelProviderError) as ctx:
+                validate_base_url(value)
+            self.assertEqual(ctx.exception.code, "invalid_base_url")
+        urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_model_id_rejects_empty_and_line_breaks_before_network_call(self, urlopen):
+        for value, expected_code in (
+            ("", "missing_model"), ("   ", "missing_model"),
+            ("model\rheader", "invalid_model"), ("model\nheader", "invalid_model"),
+            ("model\r", "invalid_model"), ("model\n", "invalid_model"),
+        ):
+            with self.subTest(value=value), self.assertRaises(ModelProviderError) as ctx:
+                validate_model_id(value)
+            self.assertEqual(ctx.exception.code, expected_code)
+        urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_base_url_rejects_trailing_line_break_before_network_call(self, urlopen):
+        with self.assertRaises(ModelProviderError) as ctx:
+            validate_base_url("https://google.test/v1beta\n")
+        self.assertEqual(ctx.exception.code, "invalid_base_url")
+        urlopen.assert_not_called()
+
+    def test_shared_input_validation_returns_normalized_values(self):
+        self.assertEqual(validate_base_url(" https://google.test/v1beta/ "), "https://google.test/v1beta")
+        self.assertEqual(validate_model_id(" gemini-2.5-flash "), "gemini-2.5-flash")
+
     @patch("urllib.request.urlopen")
     def test_gemini_discovery_paginates_and_keeps_generate_content_models(self, urlopen):
         urlopen.side_effect = [
@@ -110,6 +143,28 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.assertNotIn("super-secret-key", str(ctx.exception))
 
     @patch("urllib.request.urlopen")
+    def test_nvidia_discovery_404_reports_unsupported_models_endpoint(self, urlopen):
+        urlopen.side_effect = HTTPError(
+            "https://nvidia.test/v1/models", 404, "missing", {}, io.BytesIO(b"secret")
+        )
+        with self.assertRaises(ModelProviderError) as ctx:
+            discover_models("nvidia", "super-secret-key", "https://nvidia.test/v1")
+        self.assertEqual(ctx.exception.code, "models_endpoint_unsupported")
+        self.assertIn("不支持模型列表接口", ctx.exception.user_message)
+        self.assertNotIn("super-secret-key", ctx.exception.user_message)
+
+    @patch("urllib.request.urlopen")
+    def test_gemini_discovery_404_reports_address_or_endpoint_error(self, urlopen):
+        urlopen.side_effect = HTTPError(
+            "https://google.test/v1beta/models", 404, "missing", {}, io.BytesIO(b"secret")
+        )
+        with self.assertRaises(ModelProviderError) as ctx:
+            discover_models("gemini", "super-secret-key", "https://google.test/v1beta")
+        self.assertEqual(ctx.exception.code, "not_found")
+        self.assertIn("地址或模型列表接口", ctx.exception.user_message)
+        self.assertNotIn("super-secret-key", ctx.exception.user_message)
+
+    @patch("urllib.request.urlopen")
     def test_url_error_wrapped_timeout_dns_and_tls_are_secret_safe(self, urlopen):
         failures = [
             ("timeout", socket.timeout("super-secret-key"), "timeout"),
@@ -143,13 +198,13 @@ class ModelDiscoveryTests(unittest.TestCase):
     def test_malformed_gemini_base_url_never_exposes_key(self):
         with self.assertRaises(ModelProviderError) as ctx:
             discover_models("gemini", "super-secret-key", "not a valid url")
-        self.assertEqual(ctx.exception.code, "network")
+        self.assertEqual(ctx.exception.code, "invalid_base_url")
         self.assertNotIn("super-secret-key", str(ctx.exception))
 
     def test_invalid_ipv6_gemini_base_url_never_exposes_key(self):
         with self.assertRaises(ModelProviderError) as ctx:
             discover_models("gemini", "super-secret-key", "https://[bad")
-        self.assertEqual(ctx.exception.code, "network")
+        self.assertEqual(ctx.exception.code, "invalid_base_url")
         self.assertNotIn("super-secret-key", str(ctx.exception))
 
     @patch("urllib.request.urlopen")
@@ -191,6 +246,28 @@ class ModelDiscoveryTests(unittest.TestCase):
 
 
 class ModelCompatibilityTests(unittest.TestCase):
+    @patch("urllib.request.urlopen")
+    def test_probe_rejects_invalid_inputs_before_network_call(self, urlopen):
+        for base_url, model_id in (
+            ("not-a-url", "model"),
+            ("https:///v1", "model"),
+            ("https://provider.test/v1", "model\nheader"),
+        ):
+            with self.subTest(base_url=base_url, model_id=model_id), self.assertRaises(ModelProviderError):
+                test_selected_model("nvidia", "key", base_url, model_id)
+        urlopen.assert_not_called()
+
+    @patch("urllib.request.urlopen")
+    def test_probe_404_reports_selected_model_unavailable(self, urlopen):
+        urlopen.side_effect = HTTPError(
+            "https://nvidia.test/v1/chat/completions", 404, "missing", {}, io.BytesIO(b"secret")
+        )
+        with self.assertRaises(ModelProviderError) as ctx:
+            test_selected_model("nvidia", "super-secret-key", "https://nvidia.test/v1", "missing-model")
+        self.assertEqual(ctx.exception.code, "model_unavailable")
+        self.assertIn("模型不存在或不可用", ctx.exception.user_message)
+        self.assertNotIn("super-secret-key", ctx.exception.user_message)
+
     def test_selected_model_is_not_collected_as_a_pytest_test(self):
         self.assertFalse(test_selected_model.__test__)
 

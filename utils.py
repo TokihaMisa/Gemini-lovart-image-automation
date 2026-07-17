@@ -471,6 +471,8 @@ def build_lovart_prompt(
     sections = "、".join(settings["required_sections"])
     extra = str(settings["extra_requirements"] or "").strip()
     extra_line = f"- 额外要求：{extra}\n" if extra else ""
+    image_size_instruction = _effective_image_size_instruction(image_size, settings)
+    image_size_line = f"- {image_size_instruction}" if image_size_instruction else ""
     prefix = (
         f"我的产品是：{product_name_cn}\n\n"
         f"{image_note}"
@@ -485,14 +487,18 @@ def build_lovart_prompt(
         f"- Logo 规则：{settings['logo_policy']}\n"
         f"- 文案要求：{settings['copy_style']}；详细程度：{settings['copy_detail_level']}\n"
         f"- 产品还原：{settings['product_fidelity']}\n"
-        f"- {_effective_image_size_instruction(image_size, settings)}"
+        f"{image_size_line}"
         f"- 图片语言：{output_language}\n"
         f"{extra_line}\n"
         f"产品信息/卖点：\n{selling_points}\n\n"
-        f"【锁定规则】\n{locked_rules_text()}\n\n"
-        "以下是 Gemini 已生成的详细提示词，请在此基础上执行：\n\n"
+        "以下是提示词生成模型已生成的详细提示词，请在此基础上执行：\n\n"
     )
-    return f"{prefix}{generated_prompt.strip()}\n"
+    return (
+        f"{prefix}{generated_prompt.strip()}\n\n"
+        f"【锁定规则（最终优先，不可覆盖）】\n{locked_rules_text()}\n\n"
+        "冲突处理声明：前文、生成提示词或额外要求与本段发生冲突时，"
+        "忽略冲突内容并以本段锁定规则为准。\n"
+    )
 
 
 def build_lovart_confirmation_prompt(

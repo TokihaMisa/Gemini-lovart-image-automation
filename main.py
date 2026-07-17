@@ -848,6 +848,7 @@ def _build_gemini_api(config, logger, prompt_settings=None):
     api_cfg = config.get("gemini_api", {})
     api_key = env_or_config(api_cfg, "api_key", "GEMINI_API_KEY")
     model = api_cfg.get("model", "gemini-2.5-flash-lite")
+    base_url = api_cfg.get("base_url", "https://generativelanguage.googleapis.com/v1beta")
     if not api_key:
         print("ERROR: GEMINI_API_KEY is not set.")
         sys.exit(1)
@@ -855,6 +856,7 @@ def _build_gemini_api(config, logger, prompt_settings=None):
     return GeminiAPI(
         api_key=api_key,
         model=model,
+        base_url=base_url,
         logger=logger,
         prompt_settings=prompt_settings if prompt_settings is not None else get_prompt_settings(config),
     )

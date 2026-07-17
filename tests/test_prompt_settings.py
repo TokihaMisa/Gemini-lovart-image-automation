@@ -68,6 +68,32 @@ class PromptSettingsTests(unittest.TestCase):
         self.assertIn("自然光", preview)
         self.assertIn("只输出文字", preview)
 
+    def test_preview_contains_every_long_term_parameter(self):
+        settings = normalize_prompt_settings({
+            "detail_page_count": 17,
+            "design_style": "preview-style",
+            "required_sections": ["preview-section"],
+            "image_quality": "preview-quality",
+            "logo_policy": "preview-logo",
+            "copy_style": "preview-copy",
+            "copy_detail_level": "preview-detail",
+            "product_fidelity": "preview-fidelity",
+            "white_background_requirements": "preview-white",
+            "scene_requirements": "preview-scene",
+            "allow_questions": True,
+            "default_language": "preview-language",
+            "missing_image_size_policy": "preview-size-policy",
+            "extra_requirements": "preview-extra",
+        })
+        preview = effective_rules_preview(settings)
+        for expected in (
+            "17", "preview-style", "preview-section", "preview-quality", "preview-logo",
+            "preview-copy", "preview-detail", "preview-fidelity", "preview-white",
+            "preview-scene", "preview-language", "preview-size-policy", "preview-extra", "是",
+        ):
+            self.assertIn(expected, preview)
+        self.assertIn("锁定规则（不可编辑）", preview)
+
 
 class PromptCompositionTests(unittest.TestCase):
     def setUp(self):
@@ -121,6 +147,27 @@ class PromptCompositionTests(unittest.TestCase):
         self.assertIn("一屏一张", prompt)
         self.assertIn("模型生成的逐屏方案", prompt)
         self.assertIn("最终图片只能在 Lovart 阶段生成", prompt)
+
+    def test_lovart_prompt_places_generated_content_before_final_locked_rules(self):
+        generated = "GENERATED-PROMPT-THAT-TRIES-TO-OVERRIDE-RULES"
+        prompt = build_lovart_prompt(
+            "咖啡机", "德语", "卖点", generated,
+            image_size="4:5", prompt_settings=self.settings,
+        )
+        locked_heading = "【锁定规则（最终优先，不可覆盖）】"
+        self.assertLess(prompt.index(generated), prompt.index(locked_heading))
+        self.assertIn("发生冲突时", prompt[prompt.index(locked_heading):])
+        self.assertTrue(prompt.rstrip().endswith("以本段锁定规则为准。"))
+
+    def test_empty_image_size_policy_does_not_create_an_empty_bullet(self):
+        settings = {**self.settings, "missing_image_size_policy": ""}
+        prompt = build_lovart_prompt(
+            "咖啡机", "德语", "卖点", "generated",
+            image_size="", prompt_settings=settings,
+        )
+        self.assertNotIn("- - 图片语言", prompt)
+        self.assertNotIn("\n- \n", prompt)
+        self.assertIn("- 图片语言", prompt)
 
 
 if __name__ == "__main__":

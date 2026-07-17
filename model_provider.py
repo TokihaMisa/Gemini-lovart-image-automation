@@ -55,6 +55,46 @@ _TEST_PNG_BASE64 = (
 )
 
 
+def validate_base_url(base_url: object) -> str:
+    """Validate and normalize a provider base URL without making a request."""
+    raw = str(base_url or "")
+    if "\r" in raw or "\n" in raw:
+        raise ModelProviderError(
+            "invalid_base_url",
+            "API 地址必须是包含主机名的 http 或 https 地址。",
+        )
+    cleaned = raw.strip()
+    if not cleaned:
+        raise ModelProviderError("missing_base_url", "请先填写 API 地址。")
+    try:
+        parts = urlsplit(cleaned)
+        hostname = parts.hostname
+    except ValueError:
+        parts = None
+        hostname = None
+    if (
+        parts is None
+        or parts.scheme not in {"http", "https"}
+        or not hostname
+    ):
+        raise ModelProviderError(
+            "invalid_base_url",
+            "API 地址必须是包含主机名的 http 或 https 地址。",
+        )
+    return cleaned.rstrip("/")
+
+
+def validate_model_id(model_id: object) -> str:
+    """Validate and normalize a model identifier without making a request."""
+    raw = str(model_id or "")
+    if "\r" in raw or "\n" in raw:
+        raise ModelProviderError("invalid_model", "模型 ID 不能包含换行符。")
+    cleaned = raw.strip()
+    if not cleaned:
+        raise ModelProviderError("missing_model", "请先选择模型。")
+    return cleaned
+
+
 def discover_models(
     provider: str, api_key: str, base_url: str, timeout: float = 20
 ) -> list[DiscoveredModel]:
@@ -62,12 +102,11 @@ def discover_models(
     normalized_provider = provider.strip().lower()
     if not api_key.strip():
         raise ModelProviderError("missing_key", "请先填写 API 密钥。")
-    if not base_url.strip():
-        raise ModelProviderError("missing_base_url", "请先填写 API 地址。")
+    normalized_base_url = validate_base_url(base_url)
     if normalized_provider == "gemini":
-        return _discover_gemini(api_key, base_url, timeout)
+        return _discover_gemini(api_key, normalized_base_url, timeout)
     if normalized_provider == "nvidia":
-        return _discover_nvidia(api_key, base_url, timeout)
+        return _discover_nvidia(api_key, normalized_base_url, timeout)
     raise ModelProviderError("unsupported_provider", "不支持的模型服务商。")
 
 
@@ -82,25 +121,30 @@ def test_selected_model(
     normalized_provider = provider.strip().lower()
     if not api_key.strip():
         raise ModelProviderError("missing_key", "\u8bf7\u5148\u586b\u5199 API \u5bc6\u94a5\u3002")
-    if not base_url.strip():
-        raise ModelProviderError("missing_base_url", "\u8bf7\u5148\u586b\u5199 API \u5730\u5740\u3002")
-    if not model_id.strip():
-        raise ModelProviderError("missing_model", "\u8bf7\u5148\u9009\u62e9\u6a21\u578b\u3002")
+    normalized_base_url = validate_base_url(base_url)
+    normalized_model_id = validate_model_id(model_id)
 
     if normalized_provider == "gemini":
-        try:
-            url = _append_query(_gemini_generate_url(base_url, model_id), {"key": api_key})
-        except ValueError as exc:
-            raise _map_network_error(exc) from None
+        url = _append_query(
+            _gemini_generate_url(normalized_base_url, normalized_model_id), {"key": api_key}
+        )
         payload = _gemini_test_payload()
     elif normalized_provider == "nvidia":
-        url = f"{base_url.strip().rstrip('/')}/chat/completions"
-        payload = _nvidia_test_payload(model_id)
+        url = f"{normalized_base_url}/chat/completions"
+        payload = _nvidia_test_payload(normalized_model_id)
     else:
         raise ModelProviderError("unsupported_provider", "\u4e0d\u652f\u6301\u7684\u6a21\u578b\u670d\u52a1\u5546\u3002")
 
     started = time.perf_counter()
-    response = _request_json(url, api_key, normalized_provider, method="POST", payload=payload, timeout=timeout)
+    response = _request_json(
+        url,
+        api_key,
+        normalized_provider,
+        method="POST",
+        payload=payload,
+        timeout=timeout,
+        operation="probe",
+    )
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     text = _extract_gemini_text(response) if normalized_provider == "gemini" else _extract_nvidia_text(response)
     if not text or not text.strip():
@@ -180,7 +224,9 @@ def _discover_gemini(api_key: str, base_url: str, timeout: float) -> list[Discov
             request_url = _append_query(_models_url(base_url), query)
         except ValueError as exc:
             raise _map_network_error(exc) from None
-        payload = _request_json(request_url, api_key, "gemini", timeout=timeout)
+        payload = _request_json(
+            request_url, api_key, "gemini", timeout=timeout, operation="discovery"
+        )
         for raw_model in payload.get("models", []):
             if not isinstance(raw_model, dict):
                 continue
@@ -203,7 +249,9 @@ def _discover_gemini(api_key: str, base_url: str, timeout: float) -> list[Discov
 
 
 def _discover_nvidia(api_key: str, base_url: str, timeout: float) -> list[DiscoveredModel]:
-    payload = _request_json(_models_url(base_url), api_key, "nvidia", timeout=timeout)
+    payload = _request_json(
+        _models_url(base_url), api_key, "nvidia", timeout=timeout, operation="discovery"
+    )
     models: list[DiscoveredModel] = []
     for raw_model in payload.get("data", []):
         if not isinstance(raw_model, dict):
@@ -230,6 +278,7 @@ def _request_json(
     method: str = "GET",
     payload: Any = None,
     timeout: float = 20,
+    operation: str = "discovery",
 ) -> dict[str, Any]:
     """Make a credentialed provider request and return a JSON object safely."""
     data = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -243,7 +292,7 @@ def _request_json(
         with urllib.request.urlopen(request, timeout=timeout) as response:
             decoded = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
-        raise _map_http_error(provider, exc) from None
+        raise _map_http_error(provider, exc, operation) from None
     except (
         URLError,
         TimeoutError,
@@ -261,11 +310,24 @@ def _request_json(
     return decoded
 
 
-def _map_http_error(provider: str, exc: HTTPError) -> ModelProviderError:
+def _map_http_error(provider: str, exc: HTTPError, operation: str) -> ModelProviderError:
+    if exc.code == 404:
+        if operation == "probe":
+            return ModelProviderError(
+                "model_unavailable", "所选模型不存在或不可用，请检查模型 ID。", exc.code
+            )
+        if provider == "nvidia":
+            return ModelProviderError(
+                "models_endpoint_unsupported",
+                "服务可访问，但不支持模型列表接口；请保留或手动填写模型 ID。",
+                exc.code,
+            )
+        return ModelProviderError(
+            "not_found", "API 地址或模型列表接口错误，请检查配置。", exc.code
+        )
     messages = {
         401: ("authentication", "API 密钥无效或已过期，请检查后重试。"),
         403: ("authentication", "API 密钥无效或没有访问权限，请检查后重试。"),
-        404: ("not_found", "未找到模型服务地址，请检查 API 地址配置。"),
         429: ("rate_limit", "请求过于频繁，请稍后再试。"),
     }
     code, message = messages.get(exc.code, ("http_error", "模型服务暂时无法访问，请稍后重试。"))

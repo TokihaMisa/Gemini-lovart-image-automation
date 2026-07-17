@@ -12,15 +12,19 @@ from webui import (
     form_to_prompt_settings,
     load_config,
     persist_selected_model,
+    persist_provider_settings,
+    probe_provider_model,
     prompt_settings_to_form,
     refresh_provider_models,
     reset_prompt_settings_form,
     retain_workspace_model_selection,
     resolve_model_dropdown,
     run_process,
+    save_api_settings,
     save_config,
     save_prompt_settings_from_form,
     test_provider_model,
+    update_catalog_image_status,
 )
 
 
@@ -67,11 +71,20 @@ class WebUIModelSettingsTests(unittest.TestCase):
             saved = yaml.safe_load(path.read_text(encoding="utf-8"))
         self.assertIn("已保存", status)
         self.assertEqual(saved["excel"]["path"], "data/products.xlsx")
-        self.assertEqual(saved["prompt_settings"]["detail_page_count"], 14)
-        self.assertEqual(saved["prompt_settings"]["required_sections"], ["主标题", "规格表"])
-        self.assertFalse(saved["prompt_settings"]["allow_questions"])
-        self.assertEqual(saved["prompt_settings"]["extra_requirements"], "避免夸张促销词")
+        expected = form_to_prompt_settings(*self._form_values())
+        self.assertEqual(saved["prompt_settings"], expected)
+        self.assertEqual(len(saved["prompt_settings"]), 14)
         self.assertIn("只输出文字", preview)
+
+    def test_custom_required_sections_save_and_reload_from_multiline_text(self):
+        values = list(self._form_values())
+        values[2] = "主标题\n自定义规格模块, 售后说明"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            status, _preview = save_prompt_settings_from_form(*values, config_path=path)
+            reloaded = prompt_settings_to_form(load_config(path))
+        self.assertIn("已保存", status)
+        self.assertEqual(reloaded[2], ["主标题", "自定义规格模块", "售后说明"])
 
     def test_invalid_page_count_does_not_modify_config_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -126,9 +139,10 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertIn("锁定规则（不可编辑）", preview["props"]["value"])
 
         sections = by_label["每屏必须包含的内容"]
-        self.assertEqual(sections["props"]["value"], ["主标题", "自定义规格模块"])
-        section_values = [choice[1] for choice in sections["props"]["choices"]]
-        self.assertIn("自定义规格模块", section_values)
+        self.assertEqual(sections["type"], "textbox")
+        self.assertTrue(sections["props"]["interactive"])
+        self.assertIn("主标题", sections["props"]["value"])
+        self.assertIn("自定义规格模块", sections["props"]["value"])
 
         markdown_values = [
             str(item.get("props", {}).get("value", ""))
@@ -139,6 +153,45 @@ class WebUIModelSettingsTests(unittest.TestCase):
         api_names = {item["api_name"] for item in demo.config["dependencies"]}
         self.assertIn("save_prompt_settings_from_form", api_names)
         self.assertIn("reset_prompt_settings_form", api_names)
+
+    @patch("webui.load_config")
+    def test_api_save_probe_and_run_events_include_endpoint_model_and_catalog_controls(self, load_config_mock):
+        load_config_mock.return_value = {
+            "gemini_api": {
+                "base_url": "https://gemini.test/v1beta", "model": "gemini-model"
+            },
+            "nvidia_api": {
+                "base_url": "https://nvidia.test/v1", "model": "nvidia-model"
+            },
+        }
+        demo = build_ui()
+        component_labels = {
+            item["id"]: item.get("props", {}).get("label")
+            for item in demo.config["components"]
+        }
+        dependencies = {item["api_name"]: item for item in demo.config["dependencies"]}
+
+        save_event = dependencies["save_api_settings"]
+        save_labels = {component_labels[item] for item in save_event["inputs"]}
+        self.assertIn("Gemini API 地址", save_labels)
+        self.assertIn("Gemini 模型", save_labels)
+        self.assertIn("NVIDIA API 地址", save_labels)
+        self.assertIn("NVIDIA 模型", save_labels)
+
+        for api_name, endpoint_label in (
+            ("probe_gemini_model", "Gemini API 地址"),
+            ("probe_nvidia_model", "NVIDIA API 地址"),
+        ):
+            event = dependencies[api_name]
+            input_labels = {component_labels[item] for item in event["inputs"]}
+            self.assertIn(endpoint_label, input_labels)
+            self.assertIn("提示词引擎", input_labels)
+            self.assertEqual(len(event["outputs"]), 4)
+
+        run_event = dependencies["run_process"]
+        run_labels = {component_labels[item] for item in run_event["inputs"]}
+        self.assertIn("Gemini API 地址", run_labels)
+        self.assertIn("NVIDIA API 地址", run_labels)
 
     @patch("webui.discover_models")
     def test_refresh_returns_choices_and_preserves_current_model_when_present(self, discover):
@@ -162,6 +215,17 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertEqual(selected, "saved-model")
         self.assertEqual(catalog, [])
 
+    @patch("webui.discover_models")
+    def test_refresh_prefers_recommended_model_when_current_model_disappeared(self, discover):
+        discover.return_value = [
+            DiscoveredModel("gemini", "available-first", "Available", True, None, "unknown", "available"),
+            DiscoveredModel("gemini", "recommended-second", "Recommended", True, None, "unknown", "recommended"),
+        ]
+        _status, _choices, selected, _catalog = refresh_provider_models(
+            "gemini", "key", "https://google.test/v1beta", "removed-model"
+        )
+        self.assertEqual(selected, "recommended-second")
+
     def test_browser_source_returns_read_only_page_managed_model(self):
         choices, selected, interactive = resolve_model_dropdown(
             "gemini_browser", [], [], {"gemini_api": {}, "nvidia_api": {}}
@@ -179,6 +243,17 @@ class WebUIModelSettingsTests(unittest.TestCase):
         nvidia = [{**gemini_model("nvidia-saved").__dict__, "provider": "nvidia"}]
         self.assertEqual(resolve_model_dropdown("gemini_api", gemini, nvidia, config)[1], "gemini-saved")
         self.assertEqual(resolve_model_dropdown("nvidia", gemini, nvidia, config)[1], "nvidia-saved")
+
+    def test_initial_resolution_prefers_recommended_model_when_saved_model_is_absent(self):
+        catalog = [
+            DiscoveredModel("gemini", "available-first", "Available", True, None, "unknown", "available").__dict__,
+            DiscoveredModel("gemini", "recommended-second", "Recommended", True, None, "unknown", "recommended").__dict__,
+        ]
+        config = {"gemini_api": {"model": "removed-model"}, "nvidia_api": {}}
+        choices, selected, interactive = resolve_model_dropdown("gemini_api", catalog, [], config)
+        self.assertEqual(selected, "recommended-second")
+        self.assertNotIn("removed-model", [value for _, value in choices])
+        self.assertTrue(interactive)
 
     def test_legacy_nvidia_selection_restores_model_id(self):
         config = {
@@ -232,23 +307,95 @@ class WebUIModelSettingsTests(unittest.TestCase):
         updated = persist_selected_model({}, "nvidia", "moonshotai/kimi-k2.5")
         self.assertEqual(updated["nvidia_api"]["model"], "moonshotai/kimi-k2.5")
 
+    def test_provider_settings_validate_and_persist_base_urls_with_models(self):
+        updated = persist_provider_settings(
+            {"other": {"keep": True}},
+            "https://gemini.proxy.test/v1beta/", "gemini-custom",
+            "https://nvidia.proxy.test/v1/", "nvidia/custom",
+        )
+        self.assertEqual(updated["gemini_api"], {
+            "base_url": "https://gemini.proxy.test/v1beta", "model": "gemini-custom"
+        })
+        self.assertEqual(updated["nvidia_api"], {
+            "base_url": "https://nvidia.proxy.test/v1", "model": "nvidia/custom"
+        })
+        self.assertTrue(updated["other"]["keep"])
+
+    @patch("webui.save_env")
+    def test_save_api_settings_atomically_persists_both_provider_addresses_and_models(self, save_env_mock):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text("other:\n  keep: true\n", encoding="utf-8")
+            status = save_api_settings(
+                "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                "https://gemini.proxy.test/v1beta", "gemini-custom",
+                "https://nvidia.proxy.test/v1", "nvidia/custom",
+                config_path=path,
+            )
+            saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+        self.assertIn("已保存", status)
+        self.assertEqual(saved["gemini_api"]["base_url"], "https://gemini.proxy.test/v1beta")
+        self.assertEqual(saved["gemini_api"]["model"], "gemini-custom")
+        self.assertEqual(saved["nvidia_api"]["base_url"], "https://nvidia.proxy.test/v1")
+        self.assertEqual(saved["nvidia_api"]["model"], "nvidia/custom")
+        save_env_mock.assert_called_once()
+
+    @patch("webui.save_env")
+    def test_invalid_api_settings_do_not_modify_config_or_env(self, save_env_mock):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text("original: true\n", encoding="utf-8")
+            before = path.read_bytes()
+            status = save_api_settings(
+                "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                "not-a-url", "gemini-custom",
+                "https://nvidia.proxy.test/v1", "nvidia/custom",
+                config_path=path,
+            )
+            self.assertEqual(path.read_bytes(), before)
+        self.assertIn("地址", status)
+        save_env_mock.assert_not_called()
+
     @patch("webui.save_config")
     @patch("webui.load_config")
     @patch("webui.save_env")
-    def test_run_process_persists_selected_model_before_starting(self, _save_env, load_config, save_config_mock):
+    def test_run_process_persists_selected_model_and_current_base_urls_before_starting(self, _save_env, load_config, save_config_mock):
         load_config.return_value = {
             "gemini_api": {"model": "gemini-old"},
             "nvidia_api": {"model": "nvidia-old"},
         }
         process = run_process(
             None, "output", "gemini_api", "gemini-new", "unlimited", "auto",
+            "https://gemini.current.test/v1beta", "https://nvidia.current.test/v1",
             "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
         )
 
         self.assertIn("Starting", next(process))
         saved = save_config_mock.call_args.args[0]
         self.assertEqual(saved["gemini_api"]["model"], "gemini-new")
+        self.assertEqual(saved["gemini_api"]["base_url"], "https://gemini.current.test/v1beta")
         self.assertEqual(saved["nvidia_api"]["model"], "nvidia-old")
+        self.assertEqual(saved["nvidia_api"]["base_url"], "https://nvidia.current.test/v1")
+
+    @patch("webui.save_config")
+    @patch("webui.load_config")
+    @patch("webui.save_env")
+    def test_run_process_rejects_invalid_endpoint_without_writing_or_starting(
+        self, save_env_mock, load_config, save_config_mock
+    ):
+        load_config.return_value = {
+            "gemini_api": {"model": "gemini-model"},
+            "nvidia_api": {"model": "nvidia-model"},
+        }
+        process = run_process(
+            None, "output", "gemini_api", "gemini-model", "unlimited", "auto",
+            "not-a-url", "https://nvidia.test/v1",
+            "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+        )
+        status = next(process)
+        self.assertIn("API 地址", status)
+        save_env_mock.assert_not_called()
+        save_config_mock.assert_not_called()
 
     @patch("webui.os.replace", side_effect=OSError("replace failed"))
     def test_atomic_save_failure_preserves_original_config(self, _replace):
@@ -271,6 +418,28 @@ class WebUIModelSettingsTests(unittest.TestCase):
             self.assertFalse(path.exists())
             self.assertFalse((Path(tmp) / ".config.yaml.tmp").exists())
 
+    def test_malformed_yaml_prompt_save_returns_actionable_error_and_preserves_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text("prompt_settings: [unterminated", encoding="utf-8")
+            before = path.read_bytes()
+            status, preview = save_prompt_settings_from_form(*self._form_values(), config_path=path)
+            self.assertEqual(path.read_bytes(), before)
+        self.assertIn("读取", status)
+        self.assertIn("config", status)
+        self.assertIn("锁定规则", preview)
+
+    @patch("webui.os.replace", side_effect=OSError("replace failed"))
+    def test_prompt_save_write_failure_returns_error_and_preserves_original(self, _replace):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text("original: true\n", encoding="utf-8")
+            before = path.read_bytes()
+            status, _preview = save_prompt_settings_from_form(*self._form_values(), config_path=path)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse((Path(tmp) / ".config.yaml.tmp").exists())
+        self.assertIn("保存失败", status)
+
     @patch("webui.test_selected_model")
     def test_test_provider_model_returns_usage_notice_and_result(self, test_model):
         test_model.return_value = ModelTestResult(True, "模型可用", 42)
@@ -288,3 +457,47 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertIn("❌", status)
         self.assertNotIn("✅", status)
         self.assertIn("模型不可用", status)
+
+    def test_catalog_status_update_is_pure_and_preserves_selection_data(self):
+        original = [gemini_model("gemini-a").__dict__, gemini_model("gemini-b").__dict__]
+        updated = update_catalog_image_status(original, "gemini-b", "verified")
+        self.assertEqual(original[1]["image_input_status"], "unknown")
+        self.assertEqual(updated[0]["image_input_status"], "unknown")
+        self.assertEqual(updated[1]["image_input_status"], "verified")
+        self.assertEqual(updated[1]["model_id"], "gemini-b")
+
+    @patch("webui.test_selected_model")
+    def test_probe_success_marks_catalog_verified_and_updates_label(self, test_model):
+        test_model.return_value = ModelTestResult(True, "模型可用", 21)
+        status, choices, selected, catalog = probe_provider_model(
+            "gemini", "key", "https://google.test/v1beta", "gemini-a",
+            [gemini_model("gemini-a").__dict__],
+        )
+        self.assertIn("模型可用", status)
+        self.assertEqual(selected, "gemini-a")
+        self.assertEqual(catalog[0]["image_input_status"], "verified")
+        self.assertIn("图片已验证支持", choices[0][0])
+
+    @patch("webui.test_selected_model")
+    def test_probe_non_ok_result_marks_catalog_failed_and_preserves_selection(self, test_model):
+        test_model.return_value = ModelTestResult(False, "模型不可用", 17)
+        status, choices, selected, catalog = probe_provider_model(
+            "gemini", "key", "https://google.test/v1beta", "gemini-a",
+            [gemini_model("gemini-a").__dict__],
+        )
+        self.assertIn("模型不可用", status)
+        self.assertEqual(selected, "gemini-a")
+        self.assertEqual(catalog[0]["image_input_status"], "failed")
+        self.assertIn("图片不支持", choices[0][0])
+
+    @patch("webui.test_selected_model")
+    def test_probe_provider_error_marks_catalog_failed_and_preserves_selection(self, test_model):
+        test_model.side_effect = ModelProviderError("model_unavailable", "模型不存在或不可用")
+        status, choices, selected, catalog = probe_provider_model(
+            "nvidia", "key", "https://nvidia.test/v1", "nvidia-a",
+            [{**gemini_model("nvidia-a").__dict__, "provider": "nvidia"}],
+        )
+        self.assertIn("模型不存在或不可用", status)
+        self.assertEqual(selected, "nvidia-a")
+        self.assertEqual(catalog[0]["image_input_status"], "failed")
+        self.assertIn("图片不支持", choices[0][0])

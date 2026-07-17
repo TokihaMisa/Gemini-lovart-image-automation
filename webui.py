@@ -16,6 +16,8 @@ from model_provider import (
     discover_models,
     model_choice_labels,
     test_selected_model,
+    validate_base_url,
+    validate_model_id,
 )
 from prompt_settings import (
     DEFAULT_PROMPT_SETTINGS,
@@ -186,7 +188,15 @@ def form_to_prompt_settings(
 
 def save_prompt_settings_from_form(*values, config_path="config.yaml") -> tuple[str, str]:
     target = Path(config_path)
-    current = yaml.safe_load(target.read_text(encoding="utf-8")) or {} if target.exists() else {}
+    try:
+        current = yaml.safe_load(target.read_text(encoding="utf-8")) or {} if target.exists() else {}
+        if not isinstance(current, dict):
+            raise ValueError("config.yaml 顶层必须是配置对象")
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        return (
+            f"❌ 读取 config.yaml 失败，请修复文件后重试：{exc}",
+            effective_rules_preview(DEFAULT_PROMPT_SETTINGS),
+        )
     try:
         settings = form_to_prompt_settings(*values)
         updated = merge_prompt_settings(current, settings)
@@ -194,13 +204,18 @@ def save_prompt_settings_from_form(*values, config_path="config.yaml") -> tuple[
         existing_settings = get_prompt_settings(current)
         return f"❌ {exc}", effective_rules_preview(existing_settings)
 
-    save_config(updated, target)
+    try:
+        save_config(updated, target)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        return f"❌ 配置保存失败，原文件已保留：{exc}", effective_rules_preview(get_prompt_settings(current))
     return "✅ 提示词设置已保存", effective_rules_preview(settings)
 
 
 def reset_prompt_settings_form() -> tuple:
     defaults = normalize_prompt_settings(DEFAULT_PROMPT_SETTINGS)
-    return (*tuple(deepcopy(defaults[field]) for field in PROMPT_FORM_FIELDS), effective_rules_preview(defaults))
+    values = [deepcopy(defaults[field]) for field in PROMPT_FORM_FIELDS]
+    values[PROMPT_FORM_FIELDS.index("required_sections")] = "\n".join(defaults["required_sections"])
+    return (*values, effective_rules_preview(defaults))
 
 
 def refresh_provider_models(provider, api_key, base_url, current_model):
@@ -212,10 +227,30 @@ def refresh_provider_models(provider, api_key, base_url, current_model):
 
     choices = model_choice_labels(models)
     model_ids = [model.model_id for model in models]
-    selected = current_model if current_model in model_ids else (model_ids[0] if model_ids else current_model)
-    if selected and selected not in model_ids:
+    selected = select_model_id(models, current_model)
+    if selected and selected not in model_ids and not models:
         choices.append((selected, selected))
     return f"✅ 成功获取 {len(models)} 个可用模型。", choices, selected, [asdict(model) for model in models]
+
+
+def select_model_id(models, current_model=""):
+    """Select the current model, then a recommendation, then the first model."""
+    model_ids = [model.model_id for model in models]
+    if current_model in model_ids:
+        return current_model
+    recommended = next(
+        (model.model_id for model in models if model.recommendation == "recommended"), None
+    )
+    return recommended or (model_ids[0] if model_ids else current_model)
+
+
+def update_catalog_image_status(catalog, model_id, image_input_status):
+    """Return a copied runtime catalog with one model's probe status updated."""
+    updated = deepcopy(catalog or [])
+    for item in updated:
+        if item.get("model_id") == model_id:
+            item["image_input_status"] = image_input_status
+    return updated
 
 
 def test_provider_model(provider, api_key, base_url, model_id):
@@ -225,6 +260,26 @@ def test_provider_model(provider, api_key, base_url, model_id):
         return f"❌ {exc.user_message} 测试可能产生极少量 API 用量。"
     status_icon = "✅" if result.ok else "❌"
     return f"{status_icon} {result.message}（{result.latency_ms} ms）。测试可能产生极少量 API 用量。"
+
+
+def probe_provider_model(provider, api_key, base_url, model_id, catalog):
+    """Probe one model and return status plus a relabeled, selection-preserving catalog."""
+    try:
+        result = test_selected_model(provider, api_key, base_url, model_id)
+        succeeded = bool(result.ok)
+        status_icon = "✅" if succeeded else "❌"
+        status = (
+            f"{status_icon} {result.message}（{result.latency_ms} ms）。"
+            "测试可能产生极少量 API 用量。"
+        )
+    except ModelProviderError as exc:
+        succeeded = False
+        status = f"❌ {exc.user_message} 测试可能产生极少量 API 用量。"
+    updated_catalog = update_catalog_image_status(
+        catalog, model_id, "verified" if succeeded else "failed"
+    )
+    models = [DiscoveredModel(**item) for item in updated_catalog]
+    return status, model_choice_labels(models), model_id, updated_catalog
 
 
 test_provider_model.__test__ = False
@@ -259,10 +314,9 @@ def resolve_model_dropdown(prompt_source, gemini_catalog, nvidia_catalog, config
     models = [DiscoveredModel(**item) for item in catalog]
     choices = model_choice_labels(models)
     model_ids = [model.model_id for model in models]
-    selected = _configured_provider_model(config, prompt_source)
-    if not selected and model_ids:
-        selected = model_ids[0]
-    if selected and selected not in model_ids:
+    configured = _configured_provider_model(config, prompt_source)
+    selected = select_model_id(models, configured)
+    if selected and selected not in model_ids and not models:
         choices.append((selected, selected))
     return choices, selected, True
 
@@ -284,6 +338,58 @@ def persist_selected_model(config, prompt_source, model_id):
     if config_section:
         updated.setdefault(config_section, {})["model"] = model_id
     return updated
+
+
+def persist_provider_settings(
+    config,
+    gemini_base_url,
+    gemini_model,
+    nvidia_base_url,
+    nvidia_model,
+):
+    """Validate and copy both providers' long-term endpoint/model settings."""
+    normalized_gemini_url = validate_base_url(gemini_base_url)
+    normalized_gemini_model = validate_model_id(gemini_model)
+    normalized_nvidia_url = validate_base_url(nvidia_base_url)
+    normalized_nvidia_model = validate_model_id(nvidia_model)
+    updated = deepcopy(config)
+    updated.setdefault("gemini_api", {}).update({
+        "base_url": normalized_gemini_url,
+        "model": normalized_gemini_model,
+    })
+    updated.setdefault("nvidia_api", {}).update({
+        "base_url": normalized_nvidia_url,
+        "model": normalized_nvidia_model,
+    })
+    return updated
+
+
+def save_api_settings(
+    gemini_key,
+    nvidia_key,
+    lovart_access,
+    lovart_secret,
+    gemini_base_url,
+    gemini_model,
+    nvidia_base_url,
+    nvidia_model,
+    config_path="config.yaml",
+):
+    """Validate and persist provider endpoints/models, then save credentials."""
+    target = Path(config_path)
+    try:
+        current = yaml.safe_load(target.read_text(encoding="utf-8")) or {} if target.exists() else {}
+        if not isinstance(current, dict):
+            raise ValueError("config.yaml 顶层必须是配置对象")
+        updated = persist_provider_settings(
+            current, gemini_base_url, gemini_model, nvidia_base_url, nvidia_model
+        )
+        save_env(gemini_key, nvidia_key, lovart_access, lovart_secret)
+        save_config(updated, target)
+    except (ModelProviderError, OSError, ValueError, yaml.YAMLError) as exc:
+        message = exc.user_message if isinstance(exc, ModelProviderError) else str(exc)
+        return f"❌ API 与模型设置保存失败，原配置未被部分覆盖：{message}"
+    return "✅ 密钥、API 地址和模型已保存"
 
 
 def save_env(gemini_key: str, nvidia_key: str, lovart_access: str, lovart_secret: str):
@@ -313,16 +419,41 @@ def get_env(key: str) -> str:
     return ""
 
 
-def run_process(excel_file, custom_output_dir, prompt_source, prompt_model, lovart_mode, lovart_image_model, gemini_key, nvidia_key, lovart_access, lovart_secret):
-    # Save env and configs
-    save_env(gemini_key, nvidia_key, lovart_access, lovart_secret)
-    
-    config = persist_selected_model(load_config(), prompt_source, prompt_model)
-    if "lovart" not in config:
-        config["lovart"] = {}
-    config["lovart"]["image_model"] = lovart_image_model
-    config["output_dir"] = custom_output_dir.strip() if custom_output_dir else ""
-    save_config(config)
+def run_process(
+    excel_file,
+    custom_output_dir,
+    prompt_source,
+    prompt_model,
+    lovart_mode,
+    lovart_image_model,
+    gemini_base_url,
+    nvidia_base_url,
+    gemini_key,
+    nvidia_key,
+    lovart_access,
+    lovart_secret,
+):
+    try:
+        config = persist_selected_model(load_config(), prompt_source, prompt_model)
+        gemini_model = _configured_provider_model(config, "gemini_api") or "gemini-2.5-flash-lite"
+        nvidia_model = _configured_provider_model(config, "nvidia") or "moonshotai/kimi-k2.5"
+        config = persist_provider_settings(
+            config,
+            gemini_base_url,
+            gemini_model,
+            nvidia_base_url,
+            nvidia_model,
+        )
+        if "lovart" not in config:
+            config["lovart"] = {}
+        config["lovart"]["image_model"] = lovart_image_model
+        config["output_dir"] = custom_output_dir.strip() if custom_output_dir else ""
+        save_config(config)
+        save_env(gemini_key, nvidia_key, lovart_access, lovart_secret)
+    except (ModelProviderError, OSError, ValueError, yaml.YAMLError) as exc:
+        message = exc.user_message if isinstance(exc, ModelProviderError) else str(exc)
+        yield f"❌ 启动前配置保存失败：{message}"
+        return
 
     # Save Excel
     if excel_file is not None:
@@ -936,10 +1067,6 @@ def build_ui():
     default_output_dir = config.get("output_dir", str(Path("output").absolute()))
     prompt_form_values = prompt_settings_to_form(config)
     prompt_preview_value = effective_rules_preview(get_prompt_settings(config))
-    required_section_choices = list(DEFAULT_PROMPT_SETTINGS["required_sections"])
-    for section in prompt_form_values[2]:
-        if section not in required_section_choices:
-            required_section_choices.append(section)
     gemini_config = config.get("gemini_api", {})
     nvidia_config = config.get("nvidia_api", {})
     gemini_saved_model = _configured_provider_model(config, "gemini_api")
@@ -959,6 +1086,21 @@ def build_ui():
             else gr.skip()
         )
         return status, provider_update, workspace_update, catalog
+
+    def probe_provider_controls(
+        provider, api_key, base_url, current_model, prompt_source_value, catalog
+    ):
+        status, choices, selected, updated_catalog = probe_provider_model(
+            provider, api_key, base_url, current_model, catalog
+        )
+        provider_update = gr.update(choices=choices, value=selected)
+        active_source = "gemini_api" if provider == "gemini" else "nvidia"
+        workspace_update = (
+            gr.update(choices=choices, value=selected, interactive=True)
+            if prompt_source_value == active_source
+            else gr.skip()
+        )
+        return status, provider_update, workspace_update, updated_catalog
 
     def resolve_workspace_model(prompt_source_value, gemini_catalog, nvidia_catalog, gemini_model, nvidia_model):
         live_config = deepcopy(config)
@@ -1085,11 +1227,21 @@ def build_ui():
                     lovart_access = gr.Textbox(label="LOVART_ACCESS_KEY", value=get_env("LOVART_ACCESS_KEY"), type="password")
                     lovart_secret = gr.Textbox(label="LOVART_SECRET_KEY", value=get_env("LOVART_SECRET_KEY"), type="password")
                     
-                    save_keys_btn = gr.Button("💾 保存密钥 (Save Keys)", variant="primary")
+                    save_keys_btn = gr.Button("💾 保存密钥、API 地址和模型", variant="primary")
                     save_status = gr.Markdown("")
                     
                     key_inputs = [gemini_key, nvidia_key, lovart_access, lovart_secret]
-                    save_keys_btn.click(fn=manual_save_keys, inputs=key_inputs, outputs=save_status)
+                    save_keys_btn.click(
+                        fn=save_api_settings,
+                        inputs=[
+                            *key_inputs,
+                            gemini_base_url,
+                            gemini_model,
+                            nvidia_base_url,
+                            nvidia_model,
+                        ],
+                        outputs=save_status,
+                    )
 
                     gemini_refresh_btn.click(
                         fn=lambda key, url, model, source: refresh_provider_controls("gemini", key, url, model, source),
@@ -1102,14 +1254,30 @@ def build_ui():
                         outputs=[nvidia_status, nvidia_model, prompt_model, nvidia_catalog_state],
                     )
                     gemini_test_btn.click(
-                        fn=lambda key, url, model: test_provider_model("gemini", key, url, model),
-                        inputs=[gemini_key, gemini_base_url, gemini_model],
-                        outputs=gemini_status,
+                        fn=lambda key, url, model, source, catalog: probe_provider_controls(
+                            "gemini", key, url, model, source, catalog
+                        ),
+                        inputs=[
+                            gemini_key, gemini_base_url, gemini_model,
+                            prompt_source, gemini_catalog_state,
+                        ],
+                        outputs=[
+                            gemini_status, gemini_model, prompt_model, gemini_catalog_state,
+                        ],
+                        api_name="probe_gemini_model",
                     )
                     nvidia_test_btn.click(
-                        fn=lambda key, url, model: test_provider_model("nvidia", key, url, model),
-                        inputs=[nvidia_key, nvidia_base_url, nvidia_model],
-                        outputs=nvidia_status,
+                        fn=lambda key, url, model, source, catalog: probe_provider_controls(
+                            "nvidia", key, url, model, source, catalog
+                        ),
+                        inputs=[
+                            nvidia_key, nvidia_base_url, nvidia_model,
+                            prompt_source, nvidia_catalog_state,
+                        ],
+                        outputs=[
+                            nvidia_status, nvidia_model, prompt_model, nvidia_catalog_state,
+                        ],
+                        api_name="probe_nvidia_model",
                     )
 
             # ================= TAB 3: 提示词设置 =================
@@ -1139,10 +1307,12 @@ def build_ui():
                         label="整体设计风格",
                         value=prompt_form_values[1],
                     )
-                    prompt_required_sections = gr.CheckboxGroup(
-                        choices=required_section_choices,
-                        value=prompt_form_values[2],
+                    prompt_required_sections = gr.Textbox(
+                        value="\n".join(prompt_form_values[2]),
                         label="每屏必须包含的内容",
+                        lines=5,
+                        interactive=True,
+                        info="每行或逗号分隔一项，可输入任意自定义内容",
                     )
 
                     with gr.Row():
@@ -1262,6 +1432,7 @@ def build_ui():
             fn=run_process,
             inputs=[
                 excel_file, custom_output_dir, prompt_source, prompt_model, lovart_mode, lovart_image_model,
+                gemini_base_url, nvidia_base_url,
                 gemini_key, nvidia_key, lovart_access, lovart_secret
             ],
             outputs=progress_dashboard

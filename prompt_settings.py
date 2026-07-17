@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from typing import Mapping
 
 
@@ -72,7 +73,7 @@ def normalize_prompt_settings(raw: Mapping[str, object] | None) -> dict[str, obj
 
     sections = result.get("required_sections", [])
     if isinstance(sections, str):
-        sections = sections.replace("，", ",").split(",")
+        sections = re.split(r"[,，\r\n]+", sections)
     if not isinstance(sections, (list, tuple)):
         raise PromptSettingsError("required_sections 必须是文本列表")
     cleaned_sections = []
@@ -118,6 +119,11 @@ def effective_rules_preview(settings: Mapping[str, object]) -> str:
         f"Logo 规则：{normalized['logo_policy']}\n"
         f"文案要求：{normalized['copy_style']}；{normalized['copy_detail_level']}\n"
         f"产品还原：{normalized['product_fidelity']}\n"
-        f"允许反问：{'是' if normalized['allow_questions'] else '否'}"
+        f"白底图要求：{normalized['white_background_requirements']}\n"
+        f"场景图要求：{normalized['scene_requirements']}\n"
+        f"允许反问：{'是' if normalized['allow_questions'] else '否'}\n"
+        f"默认语言：{normalized['default_language']}\n"
+        f"缺失图片尺寸策略：{normalized['missing_image_size_policy']}\n"
+        f"额外要求：{normalized['extra_requirements']}"
     )
     return f"【可编辑长期参数】\n{editable}\n\n【锁定规则（不可编辑）】\n{locked_rules_text()}"
