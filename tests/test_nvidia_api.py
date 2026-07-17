@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from gemini_api import GeminiAPI
 from main import _build_gemini_api, _build_nvidia_api, _choose_prompt_source, parse_args
+from model_provider import ModelProviderError
 from nvidia_api import NvidiaAPI, resolve_nvidia_model
 
 
@@ -83,6 +84,20 @@ class NvidiaAPIBehaviorTests(unittest.TestCase):
         self.assertEqual(content[0], {"type": "text", "text": "hello"})
         self.assertEqual(content[1]["type"], "image_url")
         self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
+
+    def test_nvidia_client_rejects_invalid_base_url(self):
+        with self.assertRaises(ModelProviderError) as ctx:
+            NvidiaAPI(api_key="key", model="nvidia/model", base_url="not-a-url")
+        self.assertEqual(ctx.exception.code, "invalid_base_url")
+
+    def test_nvidia_client_rejects_model_id_line_breaks(self):
+        with self.assertRaises(ModelProviderError) as ctx:
+            NvidiaAPI(
+                api_key="key",
+                model="nvidia/model\r\nInjected: value",
+                base_url="https://nvidia.test/v1",
+            )
+        self.assertEqual(ctx.exception.code, "invalid_model")
 
     def test_build_nvidia_api_sends_images_for_kimi(self):
         cfg = {

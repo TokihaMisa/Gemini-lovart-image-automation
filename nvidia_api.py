@@ -5,6 +5,7 @@ from pathlib import Path
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from model_provider import validate_base_url, validate_model_id
 from prompt_settings import normalize_prompt_settings
 from utils import (
     build_design_prompt,
@@ -42,8 +43,8 @@ class NvidiaAPI:
         prompt_settings=None,
     ):
         self.api_key = api_key
-        self.model = model
-        self.base_url = base_url.rstrip("/")
+        self.model = validate_model_id(model)
+        self.base_url = validate_base_url(base_url)
         self.logger = logger
         self.send_images = send_images
         self.prompt_settings = normalize_prompt_settings(prompt_settings)

@@ -1,3 +1,5 @@
+import inspect
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,6 +24,7 @@ from webui import (
     run_process,
     save_api_settings,
     save_config,
+    save_env,
     save_prompt_settings_from_form,
     test_provider_model,
     update_catalog_image_status,
@@ -178,20 +181,33 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertIn("NVIDIA API 地址", save_labels)
         self.assertIn("NVIDIA 模型", save_labels)
 
-        for api_name, endpoint_label in (
-            ("probe_gemini_model", "Gemini API 地址"),
-            ("probe_nvidia_model", "NVIDIA API 地址"),
+        for api_name, endpoint_label, provider_model_label in (
+            ("probe_gemini_model", "Gemini API 地址", "Gemini 模型"),
+            ("probe_nvidia_model", "NVIDIA API 地址", "NVIDIA 模型"),
         ):
             event = dependencies[api_name]
             input_labels = {component_labels[item] for item in event["inputs"]}
+            output_labels = [component_labels[item] for item in event["outputs"]]
             self.assertIn(endpoint_label, input_labels)
             self.assertIn("提示词引擎", input_labels)
             self.assertEqual(len(event["outputs"]), 4)
+            self.assertIn(provider_model_label, output_labels)
+            self.assertIn("提示词模型", output_labels)
+            self.assertIn(None, output_labels)  # runtime catalog State
 
         run_event = dependencies["run_process"]
         run_labels = {component_labels[item] for item in run_event["inputs"]}
         self.assertIn("Gemini API 地址", run_labels)
         self.assertIn("NVIDIA API 地址", run_labels)
+
+    def test_api_save_and_run_offer_injectable_env_and_config_paths_without_new_ui_inputs(self):
+        save_parameters = inspect.signature(save_api_settings).parameters
+        run_parameters = inspect.signature(run_process).parameters
+        self.assertIn("config_path", save_parameters)
+        self.assertIn("env_path", save_parameters)
+        self.assertIn("config_path", run_parameters)
+        self.assertIn("env_path", run_parameters)
+        self.assertIn("env_path", inspect.signature(save_env).parameters)
 
     @patch("webui.discover_models")
     def test_refresh_returns_choices_and_preserves_current_model_when_present(self, discover):
@@ -488,7 +504,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertIn("模型不可用", status)
         self.assertEqual(selected, "gemini-a")
         self.assertEqual(catalog[0]["image_input_status"], "failed")
-        self.assertIn("图片不支持", choices[0][0])
+        self.assertIn("测试失败", choices[0][0])
 
     @patch("webui.test_selected_model")
     def test_probe_provider_error_marks_catalog_failed_and_preserves_selection(self, test_model):
@@ -500,4 +516,194 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertIn("模型不存在或不可用", status)
         self.assertEqual(selected, "nvidia-a")
         self.assertEqual(catalog[0]["image_input_status"], "failed")
-        self.assertIn("图片不支持", choices[0][0])
+        self.assertIn("测试失败", choices[0][0])
+
+    @patch("webui.test_selected_model")
+    def test_probe_success_keeps_custom_model_when_runtime_catalog_is_empty(self, test_model):
+        test_model.return_value = ModelTestResult(True, "模型可用", 9)
+        status, choices, selected, catalog = probe_provider_model(
+            "gemini", "key", "https://google.test/v1beta", "custom/gemini-model", []
+        )
+        self.assertIn("模型可用", status)
+        self.assertEqual(selected, "custom/gemini-model")
+        self.assertEqual([value for _, value in choices], ["custom/gemini-model"])
+        self.assertEqual(catalog[0]["model_id"], "custom/gemini-model")
+        self.assertEqual(catalog[0]["provider"], "gemini")
+        self.assertEqual(catalog[0]["image_input_status"], "verified")
+        self.assertIn("图片已验证支持", choices[0][0])
+
+    @patch("webui.test_selected_model")
+    def test_probe_error_keeps_custom_model_and_uses_test_failed_label(self, test_model):
+        test_model.side_effect = ModelProviderError("network", "网络连接失败")
+        status, choices, selected, catalog = probe_provider_model(
+            "nvidia", "key", "https://nvidia.test/v1", "custom/nvidia-model", []
+        )
+        self.assertIn("网络连接失败", status)
+        self.assertEqual(selected, "custom/nvidia-model")
+        self.assertEqual([value for _, value in choices], ["custom/nvidia-model"])
+        self.assertEqual(catalog[0]["image_input_status"], "failed")
+        self.assertIn("测试失败", choices[0][0])
+        self.assertNotIn("图片不支持", choices[0][0])
+
+    def test_save_api_settings_rolls_back_both_files_when_second_replace_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original_cwd = Path.cwd()
+            os.chdir(tmp)
+            try:
+                config_path = Path("config.yaml")
+                env_path = Path(".env")
+                config_path.write_text("original: config\n", encoding="utf-8")
+                env_path.write_text("ORIGINAL_ENV=1\n", encoding="utf-8")
+                before_config = config_path.read_bytes()
+                before_env = env_path.read_bytes()
+                real_replace = os.replace
+                replace_count = 0
+
+                def fail_second_replace(source, destination):
+                    nonlocal replace_count
+                    replace_count += 1
+                    if replace_count == 2:
+                        raise OSError("second target failed")
+                    return real_replace(source, destination)
+
+                with patch("webui.os.replace", side_effect=fail_second_replace):
+                    status = save_api_settings(
+                        "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                        "https://gemini.test/v1beta", "gemini-model",
+                        "https://nvidia.test/v1", "nvidia-model",
+                    )
+
+                self.assertIn("second target failed", status)
+                self.assertEqual(config_path.read_bytes(), before_config)
+                self.assertEqual(env_path.read_bytes(), before_env)
+            finally:
+                os.chdir(original_cwd)
+
+    def test_run_process_rolls_back_both_files_when_second_replace_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original_cwd = Path.cwd()
+            os.chdir(tmp)
+            try:
+                config_path = Path("config.yaml")
+                env_path = Path(".env")
+                config_path.write_text(
+                    "gemini_api:\n  model: gemini-old\n"
+                    "nvidia_api:\n  model: nvidia-old\n",
+                    encoding="utf-8",
+                )
+                env_path.write_text("ORIGINAL_ENV=1\n", encoding="utf-8")
+                before_config = config_path.read_bytes()
+                before_env = env_path.read_bytes()
+                real_replace = os.replace
+                replace_count = 0
+
+                def fail_second_replace(source, destination):
+                    nonlocal replace_count
+                    replace_count += 1
+                    if replace_count == 2:
+                        raise OSError("second target failed")
+                    return real_replace(source, destination)
+
+                with patch("webui.os.replace", side_effect=fail_second_replace):
+                    process = run_process(
+                        None, "output", "gemini_api", "gemini-new", "unlimited", "auto",
+                        "https://gemini.test/v1beta", "https://nvidia.test/v1",
+                        "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                    )
+                    status = next(process)
+
+                self.assertIn("second target failed", status)
+                self.assertEqual(config_path.read_bytes(), before_config)
+                self.assertEqual(env_path.read_bytes(), before_env)
+            finally:
+                os.chdir(original_cwd)
+
+    def test_transaction_removes_new_files_when_second_replace_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original_cwd = Path.cwd()
+            os.chdir(tmp)
+            try:
+                real_replace = os.replace
+                replace_count = 0
+
+                def fail_second_replace(source, destination):
+                    nonlocal replace_count
+                    replace_count += 1
+                    if replace_count == 2:
+                        raise OSError("second target failed")
+                    return real_replace(source, destination)
+
+                with patch("webui.os.replace", side_effect=fail_second_replace):
+                    status = save_api_settings(
+                        "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                        "https://gemini.test/v1beta", "gemini-model",
+                        "https://nvidia.test/v1", "nvidia-model",
+                    )
+
+                self.assertIn("second target failed", status)
+                self.assertFalse(Path("config.yaml").exists())
+                self.assertFalse(Path(".env").exists())
+            finally:
+                os.chdir(original_cwd)
+
+    def test_run_transaction_removes_new_files_when_second_replace_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original_cwd = Path.cwd()
+            os.chdir(tmp)
+            try:
+                real_replace = os.replace
+                replace_count = 0
+
+                def fail_second_transaction_replace(source, destination):
+                    nonlocal replace_count
+                    replace_count += 1
+                    # load_config creates its default with call 1; config transaction save is call 2.
+                    # Fail the environment transaction save after allowing those two config writes.
+                    if replace_count == 3:
+                        raise OSError("second target failed")
+                    return real_replace(source, destination)
+
+                with patch("webui.os.replace", side_effect=fail_second_transaction_replace):
+                    process = run_process(
+                        None, "output", "gemini_api", "gemini-new", "unlimited", "auto",
+                        "https://gemini.test/v1beta", "https://nvidia.test/v1",
+                        "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                    )
+                    status = next(process)
+
+                self.assertIn("second target failed", status)
+                self.assertFalse(Path("config.yaml").exists())
+                self.assertFalse(Path(".env").exists())
+            finally:
+                os.chdir(original_cwd)
+
+    def test_transaction_reports_primary_and_restore_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original_cwd = Path.cwd()
+            os.chdir(tmp)
+            try:
+                Path("config.yaml").write_text("original: config\n", encoding="utf-8")
+                Path(".env").write_text("ORIGINAL_ENV=1\n", encoding="utf-8")
+                real_replace = os.replace
+                replace_count = 0
+
+                def fail_second_save_and_first_restore(source, destination):
+                    nonlocal replace_count
+                    replace_count += 1
+                    if replace_count == 2:
+                        raise OSError("env write failed")
+                    if replace_count == 3:
+                        raise OSError("rollback denied")
+                    return real_replace(source, destination)
+
+                with patch("webui.os.replace", side_effect=fail_second_save_and_first_restore):
+                    status = save_api_settings(
+                        "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                        "https://gemini.test/v1beta", "gemini-model",
+                        "https://nvidia.test/v1", "nvidia-model",
+                    )
+            finally:
+                os.chdir(original_cwd)
+        self.assertIn("env write failed", status)
+        self.assertIn("恢复也失败", status)
+        self.assertIn("rollback denied", status)

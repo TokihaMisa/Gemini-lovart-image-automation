@@ -239,7 +239,7 @@ class ModelDiscoveryTests(unittest.TestCase):
             [
                 "Reported · 图片已报告支持",
                 "Verified · 图片已验证支持",
-                "Failed · 图片不支持",
+                "Failed · 测试失败",
                 "Unknown · 图片未验证",
             ],
         )

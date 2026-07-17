@@ -351,7 +351,7 @@ def model_choice_labels(models: list[DiscoveredModel]) -> list[tuple[str, str]]:
         image_status_label = {
             "reported": "图片已报告支持",
             "verified": "图片已验证支持",
-            "failed": "图片不支持",
+            "failed": "测试失败",
             "unknown": "图片未验证",
         }.get(model.image_input_status, "图片未验证")
         details.append(image_status_label)

@@ -147,6 +147,64 @@ def save_config(config_data: dict, path: str | Path = "config.yaml"):
             temp.unlink()
 
 
+def _capture_file_snapshot(path: str | Path) -> tuple[bool, bytes]:
+    target = Path(path)
+    return (target.exists(), target.read_bytes() if target.exists() else b"")
+
+
+def _restore_file_snapshot(path: str | Path, snapshot: tuple[bool, bytes]):
+    target = Path(path)
+    existed, data = snapshot
+    if not existed:
+        target.unlink(missing_ok=True)
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(f".{target.name}.rollback.tmp")
+    try:
+        temp.write_bytes(data)
+        os.replace(temp, target)
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
+def _restore_file_snapshots(snapshots) -> list[str]:
+    restore_errors = []
+    for path, snapshot in snapshots.items():
+        try:
+            _restore_file_snapshot(path, snapshot)
+        except Exception as restore_error:
+            restore_errors.append(f"{path}: {restore_error}")
+    return restore_errors
+
+
+def _save_config_and_env_transaction(
+    config_data,
+    gemini_key,
+    nvidia_key,
+    lovart_access,
+    lovart_secret,
+    config_path="config.yaml",
+    env_path=".env",
+    snapshots=None,
+):
+    """Save config and credentials as one compensating two-file transaction."""
+    if snapshots is None:
+        snapshots = {
+            Path(config_path): _capture_file_snapshot(config_path),
+            Path(env_path): _capture_file_snapshot(env_path),
+        }
+    try:
+        save_config(config_data, config_path)
+        save_env(gemini_key, nvidia_key, lovart_access, lovart_secret, env_path=env_path)
+    except Exception as primary:
+        restore_errors = _restore_file_snapshots(snapshots)
+        message = str(primary)
+        if restore_errors:
+            message += "；恢复也失败：" + "；".join(restore_errors)
+        raise OSError(message) from primary
+
+
 def prompt_settings_to_form(config) -> tuple:
     settings = get_prompt_settings(config)
     return tuple(deepcopy(settings[field]) for field in PROMPT_FORM_FIELDS)
@@ -264,6 +322,23 @@ def test_provider_model(provider, api_key, base_url, model_id):
 
 def probe_provider_model(provider, api_key, base_url, model_id, catalog):
     """Probe one model and return status plus a relabeled, selection-preserving catalog."""
+    working_catalog = deepcopy(catalog or [])
+    try:
+        normalized_model_id = validate_model_id(model_id)
+    except ModelProviderError:
+        normalized_model_id = None
+    if normalized_model_id and not any(
+        item.get("model_id") == normalized_model_id for item in working_catalog
+    ):
+        working_catalog.append(asdict(DiscoveredModel(
+            provider=str(provider or "").strip().lower(),
+            model_id=normalized_model_id,
+            display_name=normalized_model_id,
+            supports_generation=True,
+            supports_thinking=None,
+            image_input_status="unknown",
+            recommendation="available",
+        )))
     try:
         result = test_selected_model(provider, api_key, base_url, model_id)
         succeeded = bool(result.ok)
@@ -276,7 +351,7 @@ def probe_provider_model(provider, api_key, base_url, model_id, catalog):
         succeeded = False
         status = f"❌ {exc.user_message} 测试可能产生极少量 API 用量。"
     updated_catalog = update_catalog_image_status(
-        catalog, model_id, "verified" if succeeded else "failed"
+        working_catalog, model_id, "verified" if succeeded else "failed"
     )
     models = [DiscoveredModel(**item) for item in updated_catalog]
     return status, model_choice_labels(models), model_id, updated_catalog
@@ -374,6 +449,7 @@ def save_api_settings(
     nvidia_base_url,
     nvidia_model,
     config_path="config.yaml",
+    env_path=".env",
 ):
     """Validate and persist provider endpoints/models, then save credentials."""
     target = Path(config_path)
@@ -384,18 +460,32 @@ def save_api_settings(
         updated = persist_provider_settings(
             current, gemini_base_url, gemini_model, nvidia_base_url, nvidia_model
         )
-        save_env(gemini_key, nvidia_key, lovart_access, lovart_secret)
-        save_config(updated, target)
+        _save_config_and_env_transaction(
+            updated,
+            gemini_key,
+            nvidia_key,
+            lovart_access,
+            lovart_secret,
+            config_path=target,
+            env_path=env_path,
+        )
     except (ModelProviderError, OSError, ValueError, yaml.YAMLError) as exc:
         message = exc.user_message if isinstance(exc, ModelProviderError) else str(exc)
         return f"❌ API 与模型设置保存失败，原配置未被部分覆盖：{message}"
     return "✅ 密钥、API 地址和模型已保存"
 
 
-def save_env(gemini_key: str, nvidia_key: str, lovart_access: str, lovart_secret: str):
+def save_env(
+    gemini_key: str,
+    nvidia_key: str,
+    lovart_access: str,
+    lovart_secret: str,
+    env_path: str | Path = ".env",
+):
+    target = Path(env_path)
     lines = []
-    if os.path.exists(".env"):
-        with open(".env", "r", encoding="utf-8") as f:
+    if target.exists():
+        with target.open("r", encoding="utf-8") as f:
             for line in f.readlines():
                 if any(line.startswith(k) for k in ["GEMINI_API_KEY=", "NVIDIA_API_KEY=", "LOVART_ACCESS_KEY=", "LOVART_SECRET_KEY="]):
                     continue
@@ -406,8 +496,14 @@ def save_env(gemini_key: str, nvidia_key: str, lovart_access: str, lovart_secret
     lines.append(f"LOVART_ACCESS_KEY={lovart_access}\n")
     lines.append(f"LOVART_SECRET_KEY={lovart_secret}\n")
     
-    with open(".env", "w", encoding="utf-8") as f:
-        f.writelines(lines)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(f".{target.name}.tmp")
+    try:
+        temp.write_text("".join(lines), encoding="utf-8")
+        os.replace(temp, target)
+    finally:
+        if temp.exists():
+            temp.unlink()
 
 
 def get_env(key: str) -> str:
@@ -432,9 +528,19 @@ def run_process(
     nvidia_key,
     lovart_access,
     lovart_secret,
+    *,
+    config_path="config.yaml",
+    env_path=".env",
 ):
+    config_target = Path(config_path)
+    env_target = Path(env_path)
+    transaction_snapshots = {
+        config_target: _capture_file_snapshot(config_target),
+        env_target: _capture_file_snapshot(env_target),
+    }
+    transaction_started = False
     try:
-        config = persist_selected_model(load_config(), prompt_source, prompt_model)
+        config = persist_selected_model(load_config(config_path), prompt_source, prompt_model)
         gemini_model = _configured_provider_model(config, "gemini_api") or "gemini-2.5-flash-lite"
         nvidia_model = _configured_provider_model(config, "nvidia") or "moonshotai/kimi-k2.5"
         config = persist_provider_settings(
@@ -448,10 +554,25 @@ def run_process(
             config["lovart"] = {}
         config["lovart"]["image_model"] = lovart_image_model
         config["output_dir"] = custom_output_dir.strip() if custom_output_dir else ""
-        save_config(config)
-        save_env(gemini_key, nvidia_key, lovart_access, lovart_secret)
+        transaction_started = True
+        _save_config_and_env_transaction(
+            config,
+            gemini_key,
+            nvidia_key,
+            lovart_access,
+            lovart_secret,
+            config_path=config_path,
+            env_path=env_path,
+            snapshots=transaction_snapshots,
+        )
     except (ModelProviderError, OSError, ValueError, yaml.YAMLError) as exc:
         message = exc.user_message if isinstance(exc, ModelProviderError) else str(exc)
+        if not transaction_started and not transaction_snapshots[config_target][0]:
+            restore_errors = _restore_file_snapshots({
+                config_target: transaction_snapshots[config_target]
+            })
+            if restore_errors:
+                message += "；恢复也失败：" + "；".join(restore_errors)
         yield f"❌ 启动前配置保存失败：{message}"
         return
 
