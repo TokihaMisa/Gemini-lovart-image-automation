@@ -3,6 +3,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 import unicodedata
+import re
 
 from playwright.sync_api import Page
 
@@ -81,12 +82,22 @@ def _safe_controls(page: Page) -> list[str]:
         text = " ".join(str(item).split())[:160]
         # A label containing an email address is not a safe diagnostic.
         normalized = normalize_ui_text(text)
-        if "@" in text or "token" in normalized or "password" in normalized or not text or text in unique:
+        unsafe = (
+            "@" in text or "?" in text or "token" in normalized or "password" in normalized
+            or "secret" in normalized or "err_" in normalized or re.search(r"[a-z]:\\|/(?:tmp|home|users)/", text, re.I)
+            or text.startswith(("http://", "https://"))
+        )
+        if unsafe or not text or text in unique:
             continue
         unique.append(text)
         if len(unique) >= 20:
             break
     return unique
+
+
+def _safe_language(value: object) -> str:
+    language = str(value or "")
+    return language if re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,2}", language) else "unknown"
 
 
 def save_gemini_diagnostics(
@@ -106,7 +117,8 @@ def save_gemini_diagnostics(
     base = debug_dir / f"{stamp}-{safe_label}"
     # A screenshot can expose a signed-in account or page content. Keep a
     # safe placeholder rather than persisting unredactable browser pixels.
-    base.with_suffix(".png").write_bytes(b"")
+    from PIL import Image
+    Image.new("RGBA", (1, 1), (0, 0, 0, 0)).save(base.with_suffix(".png"), format="PNG")
     # DOM content can contain account data and cannot be safely reconstructed
     # after the fact. Retain a deliberately content-free HTML diagnostic.
     base.with_suffix(".html").write_text(
@@ -118,7 +130,7 @@ def save_gemini_diagnostics(
         inspected = {}
     metadata = {
         "url": _safe_origin_path(getattr(page, "url", "")),
-        "language": str(inspected.get("language", "")) if isinstance(inspected, dict) else "",
+        "language": _safe_language(inspected.get("language", "") if isinstance(inspected, dict) else ""),
         "controls": _safe_controls(page),
         "attempts": max(1, int(attempts)),
         "error_kind": (
@@ -160,7 +172,13 @@ class GeminiBot:
         )
         if any(marker in message for marker in permanent_markers):
             return False
-        return classify_network_error(error) is RetryKind.TRANSIENT
+        if isinstance(error, (TimeoutError, ConnectionError)):
+            return True
+        return any(marker in message for marker in (
+            "err_connection_reset", "err_connection_closed", "err_connection_timed_out",
+            "err_network_changed", "err_name_not_resolved", "temporary dns",
+            "err_ssl_protocol_error", "connection reset", "connection timed out",
+        ))
 
     def _select_thinking_mode_with_recovery(self, product_id: str) -> None:
         if self._select_thinking_mode():
@@ -211,9 +229,15 @@ class GeminiBot:
                 return result
             except Exception as exc:
                 last_error = exc
-                if not self._is_retryable_product_error(exc) or attempt >= product_attempts:
+                retryable = self._is_retryable_product_error(exc)
+                if not retryable:
                     self._save_debug_snapshot(product_id, "exception", attempt, self._error_kind(exc))
                     raise
+                if attempt >= product_attempts:
+                    self._save_debug_snapshot(product_id, "exception", attempt, self._error_kind(exc))
+                    if isinstance(exc, GeminiPageStructureError):
+                        raise
+                    raise GeminiPageNotReadyError() from None
                 self.logger.warning(f"Gemini: retrying product prompt attempt {attempt + 1}/{product_attempts}")
                 delay = policy.delay_after(attempt)
                 if delay:
@@ -330,6 +354,56 @@ class GeminiBot:
         )
         return decision
 
+    def _click_normalized_dom_term(self, terms, label: str) -> bool:
+        """Structural selector fallback using normalized visible control attributes."""
+        normalized_terms = [normalize_ui_text(term) for term in terms]
+        script = rf"""
+        () => {{
+            const terms = {json.dumps(normalized_terms, ensure_ascii=False)};
+            const normalize = (value) => (value || '').normalize('NFKD')
+                .replace(/[\\u0300-\\u036f]/g, '').toLowerCase().replace(/\\s+/g, ' ').trim();
+            const visible = (node) => {{
+                const rect = node.getBoundingClientRect(); const style = getComputedStyle(node);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+            }};
+            const candidates = [...document.querySelectorAll('button, [role="button"], [role="menuitem"], gem-menu-item, mat-option, [aria-label], [title], [data-tooltip]')]
+                .filter(visible)
+                .map((node) => ({{ node, text: normalize([node.innerText, node.getAttribute('aria-label'), node.getAttribute('title'), node.getAttribute('data-tooltip')].filter(Boolean).join(' ')) }}))
+                .filter((item) => terms.some((term) => item.text.includes(term)));
+            if (!candidates.length) return null;
+            candidates[0].node.click();
+            return candidates[0].text;
+        }}
+        """
+        try:
+            if self.page.evaluate(script):
+                self.logger.info(f"Gemini: clicked {label} via normalized DOM scan")
+                return True
+        except Exception:
+            self.logger.warning(f"Gemini: {label} normalized DOM scan was unavailable")
+        return False
+
+    def _normalized_dom_term_is_selected(self, terms) -> bool:
+        normalized_terms = [normalize_ui_text(term) for term in terms]
+        script = rf"""
+        () => {{
+            const terms = {json.dumps(normalized_terms, ensure_ascii=False)};
+            const normalize = (value) => (value || '').normalize('NFKD')
+                .replace(/[\\u0300-\\u036f]/g, '').toLowerCase().replace(/\\s+/g, ' ').trim();
+            const visible = (node) => {{ const rect = node.getBoundingClientRect(); const style = getComputedStyle(node); return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'; }};
+            return [...document.querySelectorAll('button, [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [aria-label], [title], [data-tooltip]')]
+                .filter(visible).some((node) => {{
+                    const text = normalize([node.innerText, node.getAttribute('aria-label'), node.getAttribute('title'), node.getAttribute('data-tooltip')].filter(Boolean).join(' '));
+                    const selected = [node.getAttribute('aria-checked'), node.getAttribute('aria-selected'), node.getAttribute('data-selected'), node.getAttribute('selected'), node.className].filter(Boolean).join(' ');
+                    return terms.some((term) => text.includes(term)) && /true|selected|checked|active/i.test(selected);
+                }});
+        }}
+        """
+        try:
+            return bool(self.page.evaluate(script))
+        except Exception:
+            return False
+
     def _start_temporary_chat(self) -> bool:
         """Open Gemini temporary chat/session when the UI exposes that control."""
         selectors = [
@@ -356,6 +430,10 @@ class GeminiBot:
                     return True
             except Exception:
                 continue
+
+        if self._click_normalized_dom_term(TEMPORARY_CHAT_TERMS, "temporary chat"):
+            self.page.wait_for_timeout(1500)
+            return True
 
         script = """
         () => {
@@ -456,6 +534,8 @@ class GeminiBot:
         return False
 
     def _extended_thinking_option_is_checked(self) -> bool:
+        if self._normalized_dom_term_is_selected(EXTENDED_THINKING_TERMS):
+            return True
         script = """
         () => {
             const textMatches = (text) => /\\u6269\\u5c55\\u601d\\u8003|extended\\s+thinking/i.test(text || '');
@@ -518,6 +598,8 @@ class GeminiBot:
             '[role="menuitem"]:has-text("Pensamiento ampliado")',
             'button:has-text("Pensamiento ampliado")',
         ]
+        if self._click_normalized_dom_term(EXTENDED_THINKING_TERMS, "extended thinking option"):
+            return True
         if self._click_gemini_control(
             selectors,
             r'[/\u6269\u5c55\u601d\u8003/, /extended\s+thinking/i, /pensamiento\s+ampliado/i]',
@@ -562,6 +644,8 @@ class GeminiBot:
             '[role="menuitem"]:has-text("Nivel de pensamiento")',
             'button:has-text("Nivel de pensamiento")',
         ]
+        if self._click_normalized_dom_term(("思考等级", "thinking level", "nivel de pensamiento"), "thinking level menu"):
+            return True
         return self._click_gemini_control(selectors, r'[/思考等级/, /thinking level/i, /nivel de pensamiento/i]', "thinking level menu")
 
     def _click_extended_thinking_level(self) -> bool:
@@ -575,6 +659,8 @@ class GeminiBot:
             'button:has-text("Extended")',
             '[role="button"]:has-text("Extended")',
         ]
+        if self._click_normalized_dom_term(("扩展", "extended", "ampliado"), "extended thinking level"):
+            return True
         return self._click_gemini_control(selectors, r'[/^扩展\b/, /^Extended\b/i]', "extended thinking level")
 
     def _click_thinking_control(self) -> bool:
@@ -605,6 +691,9 @@ class GeminiBot:
                     return True
             except Exception:
                 continue
+
+        if self._click_normalized_dom_term(("思考", "thinking", "pensamiento"), "thinking mode"):
+            return True
 
         script = """
         () => {
@@ -829,6 +918,9 @@ class GeminiBot:
             except Exception:
                 continue
 
+        if self._click_normalized_dom_term(MODE_TERMS, "mode menu"):
+            return True
+
         script = """
         () => {
             const patterns = [/打开模式选择器/, /快速模式/, /^快速$/, /fast mode/i, /^fast$/i, /^flash$/i, /mode/i, /模式/, /^pro$/i, /^rapido$/i, /modo rapido/i];
@@ -1022,13 +1114,14 @@ class GeminiBot:
             self.page.wait_for_timeout(1000)
             try:
                 state = self.page.evaluate(
-                    """
+                    r"""
                     () => {
-                        const text = document.body.innerText || '';
-                        const busy = /(上传中|正在上传|处理中|正在处理|uploading|processing|attaching)/i.test(text)
+                        const normalize = (value) => (value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+                        const text = normalize(document.body.innerText || '');
+                        const busy = /(上传中|正在上传|处理中|正在处理|uploading|processing|attaching|subiendo|procesando|adjuntando)/i.test(text)
                             || [...document.querySelectorAll('[role="progressbar"], mat-progress-spinner, mat-spinner, [aria-busy="true"], [data-loading="true"]')]
                                 .some((node) => { const rect = node.getBoundingClientRect(); const style = getComputedStyle(node); return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'; });
-                        const verifiedAttachments = [...document.querySelectorAll('[data-attachment-id], [data-testid*="attachment"], [data-test-id*="attachment"], attachment-preview, .attachment-preview, mat-chip.attachment, .attachment-chip')]
+                        const attachmentNodes = [...document.querySelectorAll('[data-attachment-id], [data-testid*="attachment"], [data-test-id*="attachment"], attachment-preview, .attachment-preview, mat-chip.attachment, .attachment-chip')]
                             .filter((el) => {
                                 const rect = el.getBoundingClientRect();
                                 const style = getComputedStyle(el);
@@ -1041,12 +1134,24 @@ class GeminiBot:
                                     el.innerText,
                                 ].filter(Boolean).join(' ');
                                 return /(image|photo|picture|uploaded|attachment|图片|照片|附件|已上传|adjunto|archivo)/i.test(label);
-                            }).length;
-                        return { busy, verifiedAttachments };
+                            });
+                        const unique = [];
+                        for (const node of attachmentNodes) {
+                            const parent = node.closest('[data-attachment-id], attachment-preview, .attachment-preview, mat-chip.attachment, .attachment-chip') || node;
+                            const id = parent.getAttribute('data-attachment-id') || node.getAttribute('data-attachment-id');
+                            if (id && unique.some((item) => item.id === id)) continue;
+                            if (!id && unique.some((item) => item.node === parent || item.node.contains(parent) || parent.contains(item.node))) continue;
+                            unique.push({ id, node: parent });
+                        }
+                        return { busy, attachment_ids: unique.map((item, index) => item.id || `node-${index}`), visible_text: text };
                     }
                     """
                 ) or {}
-                ready = int(state.get("verifiedAttachments", 0) or 0) >= expected_count and not state.get("busy")
+                visible_text = normalize_ui_text(str(state.get("visible_text", "")))
+                text_busy = any(term in visible_text for term in ("uploading", "processing", "attaching", "subiendo", "procesando", "adjuntando", "上传中", "处理中"))
+                attachment_ids = state.get("attachment_ids", [])
+                unique_ids = list(dict.fromkeys(str(item) for item in attachment_ids)) if isinstance(attachment_ids, list) else []
+                ready = len(unique_ids) >= expected_count and not state.get("busy") and not text_busy
                 if ready:
                     stable_ready += 1
                     if stable_ready >= 2:

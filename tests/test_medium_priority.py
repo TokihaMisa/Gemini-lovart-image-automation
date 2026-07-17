@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
+from PIL import Image
 
 import main
 from excel_reader import resolve_image_scan_config
@@ -38,6 +39,7 @@ from main import (
     parse_args,
     resolve_browser_executable,
 )
+from network_retry import RetryKind
 from utils import update_status, write_run_summary
 
 
@@ -125,6 +127,139 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             bot = GeminiBot(Page(value), {"gemini": {"upload_timeout": 1}}, Logger())
             with patch("gemini_bot.time.time", side_effect=[0] * 10 + [2]):
                 self.assertFalse(bot._wait_for_uploads_complete(2))
+
+    def test_upload_wait_deduplicates_nested_attachments_and_respects_spanish_busy_labels(self):
+        class Page:
+            def __init__(self, state):
+                self.state = state
+
+            def wait_for_timeout(self, _milliseconds):
+                pass
+
+            def evaluate(self, _script):
+                return self.state
+
+        class Logger:
+            def warning(self, _message):
+                pass
+
+        nested_one = {"busy": False, "attachment_ids": ["one"]}
+        spanish_busy = {"busy": False, "attachment_ids": ["one", "two"], "visible_text": "  SUBIENDO  "}
+        two_unique = {"busy": False, "attachment_ids": ["one", "two"]}
+        for state, expected in ((nested_one, False), (spanish_busy, False), (two_unique, True)):
+            bot = GeminiBot(Page(state), {"gemini": {"upload_timeout": 1}}, Logger())
+            with patch("gemini_bot.time.time", side_effect=[0] * 10 + [2]):
+                self.assertEqual(bot._wait_for_uploads_complete(2), expected)
+
+    def test_normalized_dom_fallbacks_match_real_spanish_text_and_attributes(self):
+        class EmptyLocator:
+            first = None
+
+            def __init__(self):
+                self.first = self
+
+            def is_visible(self, **_kwargs):
+                return False
+
+        class Page:
+            def locator(self, _selector):
+                return EmptyLocator()
+
+            def wait_for_timeout(self, _milliseconds):
+                pass
+
+            def evaluate(self, script):
+                self.assert_normalized_script(script)
+                if "aria-checked" in script:
+                    return True
+                if "chat temporal" in script.casefold():
+                    return "CHAT   TEMPORAL"
+                if "rapido" in script.casefold():
+                    return "RÁPIDO"
+                if "pensamiento ampliado" in script.casefold():
+                    return "Pensamiento ampliado"
+                if "ampliado" in script.casefold():
+                    return "Ampliado"
+                return False
+
+            @staticmethod
+            def assert_normalized_script(script):
+                if "normalize('NFKD')" not in script or "data-tooltip" not in script:
+                    raise AssertionError("DOM fallback must normalize all visible control attributes")
+
+        page = Page()
+        bot = GeminiBot(page, {"gemini": {}}, FakeFormalLogger())
+        self.assertTrue(bot._start_temporary_chat())
+        self.assertTrue(bot._open_mode_menu())
+        self.assertTrue(bot._click_extended_thinking_option())
+        self.assertTrue(bot._click_extended_thinking_level())
+        self.assertTrue(bot._extended_thinking_option_is_checked())
+
+    def test_product_retry_uses_explicit_browser_allowlist(self):
+        class Bot(GeminiBot):
+            def __init__(self, error):
+                super().__init__(object(), {"gemini": {}, "browser": {"product_attempts": 2, "retry_delays": [0]}}, FakeFormalLogger())
+                self.error = error
+                self.calls = 0
+
+            def _generate_prompt_once(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise self.error
+                return "ok"
+
+        with patch("gemini_bot.classify_network_error", return_value=RetryKind.TRANSIENT):
+            for marker in ("net::ERR_INVALID_URL", "net::ERR_TOO_MANY_REDIRECTS", "net::ERR_FILE_NOT_FOUND"):
+                bot = Bot(RuntimeError(marker))
+                with self.assertRaises(RuntimeError):
+                    bot.generate_prompt("产品", "Spanish", "卖点", [])
+                self.assertEqual(bot.calls, 1)
+        for marker in ("net::ERR_CONNECTION_RESET", "net::ERR_NETWORK_CHANGED", "net::ERR_NAME_NOT_RESOLVED", "net::ERR_SSL_PROTOCOL_ERROR"):
+            bot = Bot(RuntimeError(marker))
+            self.assertEqual(bot.generate_prompt("产品", "Spanish", "卖点", []), "ok")
+            self.assertEqual(bot.calls, 2)
+
+    def test_diagnostics_reject_untrusted_language_controls_and_write_valid_safe_png(self):
+        sentinels = ("secret@example.com", "token=private", "C:\\Users\\private", "/tmp/private", "https://x.test/app?key=private")
+
+        class Page:
+            url = "https://gemini.google.com/app?token=private"
+
+            def evaluate(self, _script):
+                return {"language": "secret@example.com", "controls": list(sentinels) + ["Adjuntar archivos"]}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata_path = save_gemini_diagnostics(Page(), tmp, "SKU", "private", 1, "private")
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["language"], "unknown")
+            self.assertEqual(payload["controls"], ["Adjuntar archivos"])
+            with Image.open(metadata_path.with_suffix(".png")) as image:
+                image.load()
+                self.assertEqual(image.size, (1, 1))
+            for artifact in metadata_path.parent.iterdir():
+                data = artifact.read_bytes().decode("utf-8", errors="ignore")
+                for sentinel in sentinels:
+                    self.assertNotIn(sentinel, data)
+
+    def test_final_retryable_exception_is_safe_and_traceback_has_no_raw_detail(self):
+        sentinel = "net::ERR_CONNECTION_RESET token=private@example.com"
+
+        class Bot(GeminiBot):
+            def __init__(self):
+                super().__init__(object(), {"gemini": {}, "browser": {"product_attempts": 2, "retry_delays": [0]}}, FakeFormalLogger())
+                self.calls = 0
+
+            def _generate_prompt_once(self, *_args, **_kwargs):
+                self.calls += 1
+                raise RuntimeError(sentinel)
+
+        bot = Bot()
+        with self.assertRaises(GeminiPageNotReadyError) as raised:
+            bot.generate_prompt("产品", "Spanish", "卖点", [])
+        self.assertEqual(bot.calls, 2)
+        trace = "".join(traceback.format_exception(raised.exception))
+        self.assertNotIn(sentinel, str(raised.exception))
+        self.assertNotIn(sentinel, trace)
 
     def test_temporary_chat_failure_stops_each_attempt_before_preamble(self):
         class Bot(GeminiBot):
