@@ -161,10 +161,26 @@ class GeminiBot:
 
     @staticmethod
     def _error_kind(error: BaseException) -> str:
+        if isinstance(error, GeminiAuthenticationError):
+            return "auth"
+        if isinstance(error, GeminiResourceNotFoundError):
+            return "not_found"
         if isinstance(error, GeminiLoginRequiredError):
             return "login_required"
+        if isinstance(error, GeminiPermanentTlsError):
+            return "permanent_tls"
         if isinstance(error, GeminiPageStructureError):
             return "page_structure"
+        if isinstance(error, HTTPError):
+            if error.code in {401, 403}:
+                return "auth"
+            if error.code == 404:
+                return "not_found"
+        message = str(error).casefold()
+        if "err_access_denied" in message or "access denied" in message:
+            return "auth"
+        if "err_file_not_found" in message or "not found" in message:
+            return "not_found"
         return classify_network_error(error).value
 
     @staticmethod

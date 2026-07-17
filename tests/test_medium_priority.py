@@ -104,6 +104,19 @@ def run_formal_flow_for_test(*, wait_for_ready=False):
 
 
 class MediumPriorityBehaviorTests(unittest.TestCase):
+    def test_gemini_diagnostic_error_kind_aligns_auth_and_not_found_domains(self):
+        cases = (
+            (GeminiAuthenticationError(), "auth"),
+            (RuntimeError("net::ERR_ACCESS_DENIED private@example.com"), "auth"),
+            (HTTPError("https://x", 403, "private@example.com", {}, None), "auth"),
+            (GeminiResourceNotFoundError(), "not_found"),
+            (RuntimeError("net::ERR_FILE_NOT_FOUND C:\\private"), "not_found"),
+            (HTTPError("https://x", 404, "private@example.com", {}, None), "not_found"),
+        )
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__, expected=expected):
+                self.assertEqual(GeminiBot._error_kind(error), expected)
+
     def test_upload_completion_fails_closed_for_evaluate_errors_files_and_unrelated_images(self):
         class Page:
             def __init__(self, value):
