@@ -3,15 +3,23 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 from model_provider import DiscoveredModel, ModelProviderError, ModelTestResult
+from prompt_settings import DEFAULT_PROMPT_SETTINGS
 from webui import (
+    build_ui,
+    form_to_prompt_settings,
     load_config,
     persist_selected_model,
+    prompt_settings_to_form,
     refresh_provider_models,
+    reset_prompt_settings_form,
     retain_workspace_model_selection,
     resolve_model_dropdown,
     run_process,
     save_config,
+    save_prompt_settings_from_form,
     test_provider_model,
 )
 
@@ -29,6 +37,100 @@ def gemini_model(model_id="gemini-2.5-flash"):
 
 
 class WebUIModelSettingsTests(unittest.TestCase):
+    def _form_values(self, page_count=14):
+        return (
+            page_count, "自然高级", ["主标题", "规格表"], "2K", "不新增 Logo",
+            "具体可信", "详细", "严格还原", "纯白背景精修", "家庭场景",
+            False, "英文", "不固定比例", "避免夸张促销词",
+        )
+
+    def test_prompt_settings_form_round_trip_preserves_all_fields(self):
+        settings = form_to_prompt_settings(*self._form_values())
+        config = {"prompt_settings": settings}
+        form = prompt_settings_to_form(config)
+        self.assertEqual(form, self._form_values())
+
+    def test_save_prompt_settings_persists_normalized_values_and_returns_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text("excel:\n  path: data/products.xlsx\n", encoding="utf-8")
+            status, preview = save_prompt_settings_from_form(*self._form_values(), config_path=path)
+            saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+        self.assertIn("已保存", status)
+        self.assertEqual(saved["excel"]["path"], "data/products.xlsx")
+        self.assertEqual(saved["prompt_settings"]["detail_page_count"], 14)
+        self.assertEqual(saved["prompt_settings"]["required_sections"], ["主标题", "规格表"])
+        self.assertFalse(saved["prompt_settings"]["allow_questions"])
+        self.assertEqual(saved["prompt_settings"]["extra_requirements"], "避免夸张促销词")
+        self.assertIn("只输出文字", preview)
+
+    def test_invalid_page_count_does_not_modify_config_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text("original: true\n", encoding="utf-8")
+            before = path.read_bytes()
+            status, _preview = save_prompt_settings_from_form(*self._form_values(99), config_path=path)
+            self.assertEqual(path.read_bytes(), before)
+        self.assertIn("❌", status)
+
+    def test_reset_returns_defaults_without_writing_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text("original: true\n", encoding="utf-8")
+            before = path.read_bytes()
+            values = reset_prompt_settings_form()
+            self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(values[0], DEFAULT_PROMPT_SETTINGS["detail_page_count"])
+        self.assertIn("锁定规则", values[-1])
+
+    def test_locked_preview_mentions_all_providers_excel_and_lovart(self):
+        preview = reset_prompt_settings_form()[-1]
+        self.assertIn("所有提示词生成模型", preview)
+        self.assertIn("Excel", preview)
+        self.assertIn("Lovart", preview)
+        self.assertIn("不可编辑", preview)
+
+    @patch("webui.load_config")
+    def test_prompt_settings_tab_is_complete_read_only_and_preserves_custom_sections(self, load_config_mock):
+        load_config_mock.return_value = {
+            "prompt_settings": {
+                "detail_page_count": 14,
+                "required_sections": ["主标题", "自定义规格模块"],
+                "extra_requirements": "避免夸张促销词",
+            }
+        }
+
+        demo = build_ui()
+        components = demo.config["components"]
+        tabs = [item["props"]["label"] for item in components if item["type"] == "tabitem"]
+        self.assertLess(tabs.index("📝 提示词设置"), tabs.index("⚙️ 系统更新 (OTA)"))
+
+        by_label = {
+            item.get("props", {}).get("label"): item
+            for item in components
+            if item.get("props", {}).get("label")
+        }
+        preview = by_label["当前最终生效规则预览"]
+        self.assertEqual(preview["type"], "textbox")
+        self.assertFalse(preview["props"]["interactive"])
+        self.assertEqual(preview["props"]["lines"], 18)
+        self.assertIn("锁定规则（不可编辑）", preview["props"]["value"])
+
+        sections = by_label["每屏必须包含的内容"]
+        self.assertEqual(sections["props"]["value"], ["主标题", "自定义规格模块"])
+        section_values = [choice[1] for choice in sections["props"]["choices"]]
+        self.assertIn("自定义规格模块", section_values)
+
+        markdown_values = [
+            str(item.get("props", {}).get("value", ""))
+            for item in components
+            if item["type"] == "markdown"
+        ]
+        self.assertTrue(any("Excel" in value and "优先" in value for value in markdown_values))
+        api_names = {item["api_name"] for item in demo.config["dependencies"]}
+        self.assertIn("save_prompt_settings_from_form", api_names)
+        self.assertIn("reset_prompt_settings_form", api_names)
+
     @patch("webui.discover_models")
     def test_refresh_returns_choices_and_preserves_current_model_when_present(self, discover):
         discover.return_value = [gemini_model("gemini-a"), gemini_model("gemini-b")]

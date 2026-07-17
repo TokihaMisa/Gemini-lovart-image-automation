@@ -17,6 +17,31 @@ from model_provider import (
     model_choice_labels,
     test_selected_model,
 )
+from prompt_settings import (
+    DEFAULT_PROMPT_SETTINGS,
+    effective_rules_preview,
+    get_prompt_settings,
+    merge_prompt_settings,
+    normalize_prompt_settings,
+)
+
+
+PROMPT_FORM_FIELDS = (
+    "detail_page_count",
+    "design_style",
+    "required_sections",
+    "image_quality",
+    "logo_policy",
+    "copy_style",
+    "copy_detail_level",
+    "product_fidelity",
+    "white_background_requirements",
+    "scene_requirements",
+    "allow_questions",
+    "default_language",
+    "missing_image_size_policy",
+    "extra_requirements",
+)
 
 active_processes = []
 
@@ -100,6 +125,64 @@ def save_config(config_data: dict, path: str | Path = "config.yaml"):
     finally:
         if temp.exists():
             temp.unlink()
+
+
+def prompt_settings_to_form(config) -> tuple:
+    settings = get_prompt_settings(config)
+    return tuple(deepcopy(settings[field]) for field in PROMPT_FORM_FIELDS)
+
+
+def form_to_prompt_settings(
+    detail_page_count,
+    design_style,
+    required_sections,
+    image_quality,
+    logo_policy,
+    copy_style,
+    copy_detail_level,
+    product_fidelity,
+    white_background_requirements,
+    scene_requirements,
+    allow_questions,
+    default_language,
+    missing_image_size_policy,
+    extra_requirements,
+):
+    return normalize_prompt_settings({
+        "detail_page_count": detail_page_count,
+        "design_style": design_style,
+        "required_sections": required_sections,
+        "image_quality": image_quality,
+        "logo_policy": logo_policy,
+        "copy_style": copy_style,
+        "copy_detail_level": copy_detail_level,
+        "product_fidelity": product_fidelity,
+        "white_background_requirements": white_background_requirements,
+        "scene_requirements": scene_requirements,
+        "allow_questions": allow_questions,
+        "default_language": default_language,
+        "missing_image_size_policy": missing_image_size_policy,
+        "extra_requirements": extra_requirements,
+    })
+
+
+def save_prompt_settings_from_form(*values, config_path="config.yaml") -> tuple[str, str]:
+    target = Path(config_path)
+    current = yaml.safe_load(target.read_text(encoding="utf-8")) or {} if target.exists() else {}
+    try:
+        settings = form_to_prompt_settings(*values)
+        updated = merge_prompt_settings(current, settings)
+    except (TypeError, ValueError) as exc:
+        existing_settings = get_prompt_settings(current)
+        return f"❌ {exc}", effective_rules_preview(existing_settings)
+
+    save_config(updated, target)
+    return "✅ 提示词设置已保存", effective_rules_preview(settings)
+
+
+def reset_prompt_settings_form() -> tuple:
+    defaults = normalize_prompt_settings(DEFAULT_PROMPT_SETTINGS)
+    return (*tuple(deepcopy(defaults[field]) for field in PROMPT_FORM_FIELDS), effective_rules_preview(defaults))
 
 
 def refresh_provider_models(provider, api_key, base_url, current_model):
@@ -833,6 +916,12 @@ def pick_directory(current_dir):
 def build_ui():
     config = load_config()
     default_output_dir = config.get("output_dir", str(Path("output").absolute()))
+    prompt_form_values = prompt_settings_to_form(config)
+    prompt_preview_value = effective_rules_preview(get_prompt_settings(config))
+    required_section_choices = list(DEFAULT_PROMPT_SETTINGS["required_sections"])
+    for section in prompt_form_values[2]:
+        if section not in required_section_choices:
+            required_section_choices.append(section)
     gemini_config = config.get("gemini_api", {})
     nvidia_config = config.get("nvidia_api", {})
     gemini_saved_model = _configured_provider_model(config, "gemini_api")
@@ -1005,7 +1094,123 @@ def build_ui():
                         outputs=nvidia_status,
                     )
 
-            # ================= TAB 3: 系统更新 =================
+            # ================= TAB 3: 提示词设置 =================
+            with gr.Tab("📝 提示词设置"):
+                with gr.Column(elem_classes="glass-panel"):
+                    gr.Markdown("### 📝 长期提示词参数")
+                    gr.Markdown(
+                        "⚠️ **优先级说明：Excel 中已填写的商品名、语言、图片尺寸/比例、卖点和参考图属性始终优先；这里的设置仅作为 Excel 未填写时的长期默认值。**"
+                    )
+
+                    with gr.Row():
+                        prompt_detail_page_count = gr.Number(
+                            label="详情页屏数（1-50，一屏一张成品图）",
+                            value=prompt_form_values[0],
+                            precision=0,
+                        )
+                        prompt_image_quality = gr.Textbox(
+                            label="图片画质",
+                            value=prompt_form_values[3],
+                        )
+                        prompt_allow_questions = gr.Checkbox(
+                            label="允许模型反问",
+                            value=prompt_form_values[10],
+                        )
+
+                    prompt_design_style = gr.Textbox(
+                        label="整体设计风格",
+                        value=prompt_form_values[1],
+                    )
+                    prompt_required_sections = gr.CheckboxGroup(
+                        choices=required_section_choices,
+                        value=prompt_form_values[2],
+                        label="每屏必须包含的内容",
+                    )
+
+                    with gr.Row():
+                        prompt_logo_policy = gr.Textbox(
+                            label="Logo 规则",
+                            value=prompt_form_values[4],
+                        )
+                        prompt_copy_style = gr.Textbox(
+                            label="文案风格",
+                            value=prompt_form_values[5],
+                        )
+                        prompt_copy_detail_level = gr.Textbox(
+                            label="文案详细程度",
+                            value=prompt_form_values[6],
+                        )
+
+                    prompt_product_fidelity = gr.Textbox(
+                        label="产品还原强调程度",
+                        value=prompt_form_values[7],
+                    )
+                    prompt_white_background_requirements = gr.Textbox(
+                        label="白底图精修要求",
+                        value=prompt_form_values[8],
+                        lines=4,
+                    )
+                    prompt_scene_requirements = gr.Textbox(
+                        label="场景图生成要求",
+                        value=prompt_form_values[9],
+                        lines=4,
+                    )
+
+                    with gr.Row():
+                        prompt_default_language = gr.Textbox(
+                            label="Excel 未填写语言时的默认语言",
+                            value=prompt_form_values[11],
+                        )
+                        prompt_missing_image_size_policy = gr.Textbox(
+                            label="Excel 未填写图片尺寸时的处理规则",
+                            value=prompt_form_values[12],
+                        )
+
+                    prompt_extra_requirements = gr.Textbox(
+                        label="自定义额外要求",
+                        value=prompt_form_values[13],
+                        lines=5,
+                    )
+
+                    prompt_form_inputs = [
+                        prompt_detail_page_count,
+                        prompt_design_style,
+                        prompt_required_sections,
+                        prompt_image_quality,
+                        prompt_logo_policy,
+                        prompt_copy_style,
+                        prompt_copy_detail_level,
+                        prompt_product_fidelity,
+                        prompt_white_background_requirements,
+                        prompt_scene_requirements,
+                        prompt_allow_questions,
+                        prompt_default_language,
+                        prompt_missing_image_size_policy,
+                        prompt_extra_requirements,
+                    ]
+                    with gr.Row():
+                        prompt_save_btn = gr.Button("💾 保存设置", variant="primary")
+                        prompt_reset_btn = gr.Button("↩️ 恢复默认值")
+                    prompt_save_status = gr.Markdown("")
+                    prompt_effective_preview = gr.Textbox(
+                        label="当前最终生效规则预览",
+                        value=prompt_preview_value,
+                        lines=18,
+                        interactive=False,
+                    )
+
+                    prompt_save_btn.click(
+                        fn=save_prompt_settings_from_form,
+                        inputs=prompt_form_inputs,
+                        outputs=[prompt_save_status, prompt_effective_preview],
+                    )
+                    prompt_reset_btn.click(
+                        fn=reset_prompt_settings_form,
+                        inputs=[],
+                        outputs=[*prompt_form_inputs, prompt_effective_preview],
+                    )
+
+            # ================= TAB 4: 系统更新 =================
             with gr.Tab("⚙️ 系统更新 (OTA)"):
                 with gr.Column(elem_classes="glass-panel"):
                     from version import VERSION
