@@ -35,6 +35,52 @@ class FakeResponse:
 
 
 class ModelDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.retry_sleep = patch("network_retry.time.sleep")
+        self.retry_sleep.start()
+
+    def tearDown(self):
+        self.retry_sleep.stop()
+
+    @patch("network_retry.time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_task6_discovery_retries_503_without_leaking_key(self, urlopen, _sleep):
+        urlopen.side_effect = [
+            HTTPError("https://nvidia.test/v1/models", 503, "down", {}, io.BytesIO(b"super-secret-key")),
+            FakeResponse({"data": [{"id": "moonshotai/kimi-k2.5"}]}),
+        ]
+
+        models = discover_models("nvidia", "super-secret-key", "https://nvidia.test/v1")
+
+        self.assertEqual([model.model_id for model in models], ["moonshotai/kimi-k2.5"])
+        self.assertEqual(urlopen.call_count, 2)
+
+    @patch("network_retry.time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_task6_pagination_retries_only_the_failed_page(self, urlopen, _sleep):
+        urlopen.side_effect = [
+            FakeResponse({
+                "models": [{
+                    "name": "models/gemini-3.5-flash",
+                    "supportedGenerationMethods": ["generateContent"],
+                }],
+                "nextPageToken": "page-2",
+            }),
+            HTTPError("https://google.test/v1beta/models?pageToken=page-2", 503, "down", {}, None),
+            FakeResponse({"models": [{
+                "name": "models/gemini-3.5-pro",
+                "supportedGenerationMethods": ["generateContent"],
+            }]}),
+        ]
+
+        models = discover_models("gemini", "key", "https://google.test/v1beta")
+
+        self.assertEqual([model.model_id for model in models], ["gemini-3.5-flash", "gemini-3.5-pro"])
+        self.assertEqual(urlopen.call_count, 3)
+        self.assertNotIn("pageToken=page-2", urlopen.call_args_list[0].args[0].full_url)
+        self.assertIn("pageToken=page-2", urlopen.call_args_list[1].args[0].full_url)
+        self.assertIn("pageToken=page-2", urlopen.call_args_list[2].args[0].full_url)
+
     @patch("urllib.request.urlopen")
     def test_invalid_base_urls_are_rejected_before_network_call(self, urlopen):
         for value in ("google.test/v1beta", "ftp://google.test/v1beta", "https:///v1beta", "https://"):
@@ -246,6 +292,13 @@ class ModelDiscoveryTests(unittest.TestCase):
 
 
 class ModelCompatibilityTests(unittest.TestCase):
+    def setUp(self):
+        self.retry_sleep = patch("network_retry.time.sleep")
+        self.retry_sleep.start()
+
+    def tearDown(self):
+        self.retry_sleep.stop()
+
     @patch("urllib.request.urlopen")
     def test_probe_rejects_invalid_inputs_before_network_call(self, urlopen):
         for base_url, model_id in (

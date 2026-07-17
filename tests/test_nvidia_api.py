@@ -1,8 +1,11 @@
 import json
+import io
 import os
+import ssl
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.error import HTTPError
 from unittest.mock import MagicMock, patch
 
 from gemini_api import GeminiAPI
@@ -12,6 +15,52 @@ from nvidia_api import NvidiaAPI, resolve_nvidia_model
 
 
 class NvidiaAPIBehaviorTests(unittest.TestCase):
+    @patch("network_retry.time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_task6_gemini_retries_transient_ssl_protocol_error(self, urlopen, _sleep):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "candidates": [{"content": {"parts": [{"text": "result"}]}}]
+                }).encode("utf-8")
+
+        urlopen.side_effect = [ssl.SSLError("protocol interrupted"), Response()]
+        client = GeminiAPI(api_key="super-secret-key", model="gemini-custom", base_url="https://gemini.test/v1beta")
+
+        self.assertEqual(client._call("hello", []), "result")
+        self.assertEqual(urlopen.call_count, 2)
+        _sleep.assert_called_once_with(3.0)
+
+    @patch("network_retry.time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_task6_nvidia_does_not_retry_401_or_log_secret(self, urlopen, _sleep):
+        class Logger:
+            def __init__(self):
+                self.messages = []
+
+            def warning(self, message):
+                self.messages.append(message)
+
+            def error(self, message):
+                self.messages.append(message)
+
+        secret = "super-secret-key"
+        logger = Logger()
+        urlopen.side_effect = HTTPError("https://nvidia.test/v1/chat/completions", 401, secret, {}, io.BytesIO(secret.encode()))
+        client = NvidiaAPI(api_key=secret, model="moonshotai/kimi-k2.5", base_url="https://nvidia.test/v1", logger=logger)
+
+        with self.assertRaises(HTTPError):
+            client._call("hello", [])
+
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertTrue(all(secret not in message for message in logger.messages))
+
     def test_parse_args_supports_kimi_nvidia_model(self):
         args = parse_args(["--prompt-source", "nvidia", "--nvidia-model", "kimi"])
         self.assertEqual(args.prompt_source, "nvidia")

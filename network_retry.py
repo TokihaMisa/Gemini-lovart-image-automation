@@ -56,6 +56,9 @@ def classify_network_error(exc: BaseException) -> RetryKind:
     ):
         return RetryKind.PERMANENT_TLS
 
+    if isinstance(exc, ssl.SSLError):
+        return RetryKind.TRANSIENT
+
     if isinstance(exc, HTTPError):
         if exc.code in (401, 403):
             return RetryKind.AUTH

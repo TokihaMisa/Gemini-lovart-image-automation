@@ -1,9 +1,12 @@
+import io
 import json
 import os
+import ssl
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from urllib.error import HTTPError
 from unittest.mock import patch
 
 import openpyxl
@@ -11,11 +14,52 @@ from PIL import Image
 
 from excel_reader import _build_dispimg_map, parse_reference_images_are_product, read_products
 from lovart_bot import LovartBot, build_lovart_project_name, resolve_lovart_tool_config
+from lovart_api import AgentSkill, AgentSkillError
 from main import _dry_run_products, _choose_lovart_tool_options, parse_args
 from utils import read_status
 
 
 class LowPriorityBehaviorTests(unittest.TestCase):
+    def test_task6_lovart_retries_transient_ssl_with_resigning_and_shared_delay(self):
+        class LovartResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({"code": 0, "data": {"ok": True}}).encode("utf-8")
+
+        client = AgentSkill("https://lovart.test", "access-key", "secret-key")
+        with patch.object(client, "_sign", wraps=client._sign) as sign, patch(
+            "lovart_api.urllib.request.urlopen",
+            side_effect=[ssl.SSLError("protocol interrupted"), LovartResponse()],
+        ) as urlopen, patch("network_retry.time.sleep") as sleep:
+            result = client._request("GET", "/status")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertEqual(sign.call_count, 2)
+        sleep.assert_called_once_with(3.0)
+
+    def test_task6_lovart_does_not_retry_permanent_tls_or_expose_response_body(self):
+        secret = "super-secret-key"
+        client = AgentSkill("https://lovart.test", "access-key", secret)
+        with patch("lovart_api.urllib.request.urlopen", side_effect=ssl.SSLCertVerificationError(secret)) as urlopen:
+            with self.assertRaises(AgentSkillError) as ctx:
+                client._request("GET", "/status")
+
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertNotIn(secret, ctx.exception.message)
+
+        error = HTTPError("https://lovart.test/status", 401, "denied", {}, io.BytesIO(secret.encode()))
+        with patch("lovart_api.urllib.request.urlopen", side_effect=error):
+            with self.assertRaises(AgentSkillError) as ctx:
+                client._request("GET", "/status")
+        self.assertEqual(ctx.exception.code, 401)
+        self.assertNotIn(secret, ctx.exception.message)
+
     def test_parse_reference_images_are_product_yes_no_values(self):
         for value in ("是", "yes", "Y", "true", "1"):
             self.assertTrue(parse_reference_images_are_product(value))

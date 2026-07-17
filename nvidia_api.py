@@ -3,9 +3,8 @@ import json
 import urllib.request
 from pathlib import Path
 
-from tenacity import retry, stop_after_attempt, wait_exponential
-
 from model_provider import validate_base_url, validate_model_id
+from network_retry import RetryPolicy, classify_network_error, run_with_retry
 from prompt_settings import normalize_prompt_settings
 from utils import (
     build_design_prompt,
@@ -141,7 +140,6 @@ class NvidiaAPI:
             "max_tokens": 8192,
         }
 
-    @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=2, max=10))
     def _call(self, text: str, image_paths: list[str] | None = None) -> str:
         payload = self._build_payload(text, image_paths)
         body = json.dumps(payload).encode("utf-8")
@@ -155,22 +153,29 @@ class NvidiaAPI:
             },
         )
 
-        try:
+        def request_operation():
             with urllib.request.urlopen(req, timeout=180) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                return json.loads(resp.read().decode("utf-8"))
+
+        try:
+            data = run_with_retry(
+                request_operation,
+                RetryPolicy(),
+                on_retry=self._retry_notice,
+            )
         except Exception as exc:
-            if hasattr(exc, "code") and exc.code in (400, 401, 403, 404):
-                if self.logger:
-                    self.logger.error(f"NVIDIA API client error {exc.code}: {exc}")
-                raise
             if self.logger:
-                self.logger.warning(f"NVIDIA API call failed, will retry: {exc}")
+                self.logger.error(f"NVIDIA API request failed ({classify_network_error(exc).value})")
             raise
 
         result = self._extract_text(data)
         if self.logger:
             self.logger.info(f"NVIDIA API: response ({len(result)} chars)")
         return result
+
+    def _retry_notice(self, message: str) -> None:
+        if self.logger:
+            self.logger.warning(f"NVIDIA API retry: {message}")
 
     @staticmethod
     def _extract_text(data: dict) -> str:

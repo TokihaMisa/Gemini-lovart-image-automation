@@ -17,6 +17,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import urllib.request
 
+from network_retry import RetryPolicy, run_with_retry
+
 
 @dataclass(frozen=True)
 class DiscoveredModel:
@@ -282,15 +284,19 @@ def _request_json(
 ) -> dict[str, Any]:
     """Make a credentialed provider request and return a JSON object safely."""
     data = None if payload is None else json.dumps(payload).encode("utf-8")
-    try:
-        request = urllib.request.Request(url, data=data, method=method)
-        request.add_header("Accept", "application/json")
-        if data is not None:
-            request.add_header("Content-Type", "application/json")
-        if provider == "nvidia":
-            request.add_header("Authorization", f"Bearer {api_key}")
+    request = urllib.request.Request(url, data=data, method=method)
+    request.add_header("Accept", "application/json")
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+    if provider == "nvidia":
+        request.add_header("Authorization", f"Bearer {api_key}")
+
+    def request_operation() -> dict[str, Any]:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            decoded = json.loads(response.read().decode("utf-8"))
+            return json.loads(response.read().decode("utf-8"))
+
+    try:
+        decoded = run_with_retry(request_operation, RetryPolicy())
     except HTTPError as exc:
         raise _map_http_error(provider, exc, operation) from None
     except (

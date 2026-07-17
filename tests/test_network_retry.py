@@ -27,6 +27,7 @@ class NetworkRetryTests(unittest.TestCase):
             socket.timeout(),
             ConnectionResetError(),
             URLError("temporary DNS failure"),
+            ssl.SSLError("protocol interrupted"),
             RuntimeError("net::ERR_NETWORK_CHANGED"),
             RuntimeError("net::ERR_SSL_PROTOCOL_ERROR"),
             HTTPError("https://example.test", 429, "rate", {}, None),

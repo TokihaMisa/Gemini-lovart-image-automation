@@ -16,6 +16,8 @@ from typing import Optional
 
 import os
 
+from network_retry import RetryKind, RetryPolicy, classify_network_error, run_with_retry
+
 # SSL context — verification ON by default. Opt-out via LOVART_INSECURE_SSL=1
 # for users behind corporate proxies/VPNs that do TLS interception.
 _ssl_ctx = ssl.create_default_context()
@@ -74,46 +76,36 @@ class AgentSkill:
             url += "?" + urllib.parse.urlencode(params)
 
         data = json.dumps(body).encode() if body is not None else None
-        last_err = None
-
-        for attempt in range(retries):
+        def request_operation():
             # Re-sign on each attempt (timestamp freshness)
             headers = self._sign(method, path)
             headers["Content-Type"] = "application/json"
             headers["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) LovartAgentSkill/1.0"
             req = urllib.request.Request(url, data=data, headers=headers, method=method)
+            with urllib.request.urlopen(req, timeout=self.timeout, context=_ssl_ctx) as resp:
+                return json.loads(resp.read().decode())
 
-            try:
-                with urllib.request.urlopen(req, timeout=self.timeout, context=_ssl_ctx) as resp:
-                    result = json.loads(resp.read().decode())
-                    break
-            except urllib.error.HTTPError as e:
-                err = e.read().decode()
-                # Retry on gateway errors (404 route mismatch, 502, 503, 429)
-                if e.code in (404, 429, 502, 503) and attempt < retries - 1:
-                    last_err = e
-                    time.sleep(2 * (attempt + 1))
-                    continue
-                try:
-                    d = json.loads(err)
-                    msg = d.get("message", d.get("error", str(e)))
-                    details = d.get("details", "")
-                    if details:
-                        msg = f"{msg}: {details}"
-                    raise AgentSkillError(msg, e.code)
-                except (json.JSONDecodeError, KeyError):
-                    raise AgentSkillError(f"HTTP {e.code}: {err}", e.code)
-            except (urllib.error.URLError, ssl.SSLError, ConnectionError, OSError) as e:
-                last_err = e
-                if attempt < retries - 1:
-                    time.sleep(2 * (attempt + 1))
-                    continue
-                raise AgentSkillError(f"Connection failed after {retries} attempts: {e}")
-        else:
-            raise AgentSkillError(f"Connection failed: {last_err}")
+        attempts = RetryPolicy().network_attempts if retries == 3 else max(1, retries)
+        try:
+            result = run_with_retry(
+                request_operation,
+                RetryPolicy(network_attempts=attempts),
+            )
+        except urllib.error.HTTPError as exc:
+            messages = {
+                400: "Lovart 请求无效。",
+                401: "Lovart 访问凭据无效。",
+                403: "Lovart 访问被拒绝。",
+                404: "Lovart API 路径不存在。",
+            }
+            raise AgentSkillError(messages.get(exc.code, "Lovart 服务暂时不可用，请稍后重试。"), exc.code) from None
+        except Exception as exc:
+            if classify_network_error(exc) is RetryKind.PERMANENT_TLS:
+                raise AgentSkillError("证书验证失败，请检查系统时间、证书或代理设置。") from None
+            raise AgentSkillError("无法连接 Lovart 服务，请检查网络后重试。") from None
 
         if isinstance(result, dict) and result.get("code", 0) != 0:
-            raise AgentSkillError(result.get("message", "Unknown error"), result.get("code", -1))
+            raise AgentSkillError("Lovart 服务返回错误。", result.get("code", -1))
 
         return result.get("data", result) if isinstance(result, dict) else result
 
