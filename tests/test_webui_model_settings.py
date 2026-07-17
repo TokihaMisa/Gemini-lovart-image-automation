@@ -37,6 +37,15 @@ def gemini_model(model_id="gemini-2.5-flash"):
 
 
 class WebUIModelSettingsTests(unittest.TestCase):
+    def test_example_and_embedded_defaults_expose_prompt_settings_and_direct_models(self):
+        example = Path("config.example.yaml").read_text(encoding="utf-8")
+        webui = Path("webui.py").read_text(encoding="utf-8")
+        for text in (example, webui):
+            self.assertIn("prompt_settings:", text)
+            self.assertIn("detail_page_count: 12", text)
+            self.assertIn("model: gemini-2.5-flash-lite", text)
+            self.assertIn("model: moonshotai/kimi-k2.5", text)
+
     def _form_values(self, page_count=14):
         return (
             page_count, "自然高级", ["主标题", "规格表"], "2K", "不新增 Logo",

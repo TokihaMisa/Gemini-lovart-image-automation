@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 from setup_wizard import (
     ensure_local_setup_files,
     missing_or_placeholder_env_keys,
@@ -14,13 +16,26 @@ class SetupWizardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / ".env.example").write_text("GEMINI_API_KEY=your_gemini_api_key\n", encoding="utf-8")
-            (root / "config.example.yaml").write_text("excel:\n  path: data\\\\products.xlsx\n", encoding="utf-8")
+            (root / "config.example.yaml").write_text(
+                """gemini_api:
+  model: gemini-2.5-flash-lite
+nvidia_api:
+  model: moonshotai/kimi-k2.5
+prompt_settings:
+  detail_page_count: 12
+""",
+                encoding="utf-8",
+            )
 
             actions = ensure_local_setup_files(root)
 
             self.assertTrue((root / ".env").exists())
             self.assertTrue((root / "config.yaml").exists())
             self.assertTrue((root / "data").is_dir())
+            created_config = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+            self.assertIn("prompt_settings", created_config)
+            self.assertEqual(created_config["gemini_api"]["model"], "gemini-2.5-flash-lite")
+            self.assertEqual(created_config["nvidia_api"]["model"], "moonshotai/kimi-k2.5")
             self.assertIn("created .env from .env.example", actions)
             self.assertIn("created config.yaml from config.example.yaml", actions)
 

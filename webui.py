@@ -87,13 +87,31 @@ gemini:
   upload_timeout: 120
   upload_attempts: 3
 gemini_api:
+  base_url: https://generativelanguage.googleapis.com/v1beta
   model: gemini-2.5-flash-lite
 nvidia_api:
   base_url: https://integrate.api.nvidia.com/v1
+  model: moonshotai/kimi-k2.5
+  # model_choice/models are retained for legacy configuration compatibility only.
   model_choice: kimi
   send_images: true
   models:
     kimi: moonshotai/kimi-k2.5
+prompt_settings:
+  detail_page_count: 12
+  design_style: "温馨感、高级感"
+  required_sections: ["主标题", "副标题", "信息布局", "排版形式"]
+  image_quality: "1K"
+  logo_policy: "不出现 Logo"
+  copy_style: "适合跨境电商，具体、不空泛"
+  copy_detail_level: "详细"
+  product_fidelity: "严格还原"
+  white_background_requirements: "白底、超清摄影、突出高级感，产品造型与原图一致"
+  scene_requirements: "重新设计场景，产品特征与原图保持一致，超清摄影"
+  allow_questions: false
+  default_language: "巴西葡萄牙语"
+  missing_image_size_policy: "不使用默认固定图片比例"
+  extra_requirements: ""
 lovart:
   base_url: https://lgw.lovart.ai
   image_model: auto
