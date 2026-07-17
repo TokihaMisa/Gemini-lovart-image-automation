@@ -10,6 +10,15 @@ if sys.stderr is None:
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    if "--gemini-login-helper" in sys.argv:
+        from gemini_browser_session import run_login_helper
+        config_index = sys.argv.index("--config") if "--config" in sys.argv else -1
+        config_path = (
+            sys.argv[config_index + 1]
+            if config_index >= 0 and config_index + 1 < len(sys.argv)
+            else "config.yaml"
+        )
+        raise SystemExit(run_login_helper(config_path))
     if "--run-main" in sys.argv:
         sys.argv.remove("--run-main")
         try:

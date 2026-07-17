@@ -5,9 +5,13 @@ from enum import Enum
 import json
 import os
 from pathlib import Path
+import sys
 import time
 from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
+
+import yaml
+from playwright.sync_api import sync_playwright
 
 from network_retry import RetryPolicy, retry_policy_from_config, run_with_retry
 
@@ -360,11 +364,111 @@ def build_browser_launch_options(
     return launch_options
 
 
+def build_login_helper_command(
+    config_path: str | Path,
+    *,
+    executable: str | None = None,
+    frozen: bool | None = None,
+) -> list[str]:
+    """Build the source or packaged entry point for the isolated login helper."""
+    config = str(Path(config_path).resolve())
+    is_frozen = getattr(sys, "frozen", False) if frozen is None else frozen
+    program = executable or sys.executable
+    if is_frozen:
+        return [program, "--gemini-login-helper", "--config", config]
+    return [program, str(Path(__file__).with_name("app.py").resolve()), "--gemini-login-helper", "--config", config]
+
+
+def _read_helper_config(config_path: str | Path) -> dict[str, object]:
+    try:
+        value = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _write_helper_status(
+    paths: LoginRuntimePaths,
+    state: GeminiPageState,
+    ready: bool,
+    message: str,
+    *,
+    page: Any = None,
+) -> LoginStatus:
+    return_status = LoginStatus.create(
+        state,
+        ready,
+        getattr(page, "url", ""),
+        "",
+        message,
+    )
+    write_login_status(paths.status_path, return_status)
+    return return_status
+
+
+def run_login_helper(config_path: str | Path) -> int:
+    """Own one configured Gemini profile until the ready helper is asked to close."""
+    paths = login_runtime_paths(config_path)
+    clear_stale_login_runtime(paths)
+    if login_helper_is_active(paths):
+        return 1
+
+    _write_helper_status(paths, GeminiPageState.STARTING, False, "Starting Gemini login helper.")
+    config = _read_helper_config(config_path)
+    policy = retry_policy_from_config(config)
+    gemini_config = config.get("gemini", {})
+    gemini_config = gemini_config if isinstance(gemini_config, Mapping) else {}
+    target_url = str(gemini_config.get("base_url", "https://gemini.google.com") or "https://gemini.google.com")
+    context = None
+    page = None
+    try:
+        with sync_playwright() as playwright:
+            launch_options = build_browser_launch_options(config, config_path=config_path)
+            context = playwright.chromium.launch_persistent_context(**launch_options)
+            pages = getattr(context, "pages", [])
+            page = pages[0] if pages else context.new_page()
+            status = navigate_gemini_with_retry(page, target_url, policy)
+            write_login_status(paths.status_path, status)
+
+            while True:
+                if paths.close_request_path.exists() and status.ready:
+                    _write_helper_status(paths, GeminiPageState.CLOSING, False, "Closing Gemini login helper.", page=page)
+                    context.close()
+                    context = None
+                    try:
+                        paths.close_request_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    _write_helper_status(paths, GeminiPageState.CLOSED, False, "Gemini login helper closed.")
+                    return 0
+
+                is_closed = getattr(page, "is_closed", None)
+                if callable(is_closed) and is_closed():
+                    _write_helper_status(paths, GeminiPageState.CLOSED, False, "Gemini browser was closed.")
+                    return 0
+
+                status = inspect_gemini_page(page)
+                write_login_status(paths.status_path, status)
+                if status.state == GeminiPageState.ERROR:
+                    return 1
+                time.sleep(1)
+    except Exception:
+        _write_helper_status(paths, GeminiPageState.ERROR, False, "Gemini login helper stopped safely.", page=page)
+        return 1
+    finally:
+        if context is not None:
+            try:
+                context.close()
+            except Exception:
+                pass
+
+
 __all__ = [
     "GeminiPageState",
     "LoginRuntimePaths",
     "LoginStatus",
     "build_browser_launch_options",
+    "build_login_helper_command",
     "clear_stale_login_runtime",
     "inspect_gemini_page",
     "login_helper_is_active",
@@ -376,6 +480,7 @@ __all__ = [
     "resolve_browser_executable",
     "resolve_user_data_dir",
     "retry_policy_from_config",
+    "run_login_helper",
     "wait_for_gemini_ready",
     "write_login_status",
 ]

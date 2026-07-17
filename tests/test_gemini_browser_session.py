@@ -8,12 +8,14 @@ import main
 from gemini_browser_session import (
     GeminiPageState,
     LoginStatus,
+    build_login_helper_command,
     clear_stale_login_runtime,
     inspect_gemini_page,
     login_runtime_paths,
     navigate_gemini_with_retry,
     read_login_status,
     request_login_helper_close,
+    run_login_helper,
     write_login_status,
 )
 from network_retry import RetryPolicy
@@ -212,3 +214,74 @@ class GeminiBrowserSessionTests(unittest.TestCase):
         build_options.assert_called_once_with(config, config_path=config_path)
         navigate.assert_called_once()
         self.assertEqual(context.launch_options, launch_options)
+
+    def test_helper_command_matches_source_and_frozen_entry_points(self):
+        source = build_login_helper_command("config.yaml", executable="python.exe", frozen=False)
+        frozen = build_login_helper_command("config.yaml", executable="Lovart_Auto.exe", frozen=True)
+
+        self.assertEqual(source[:2], ["python.exe", str(Path("app.py").resolve())])
+        self.assertEqual(
+            source[2:],
+            ["--gemini-login-helper", "--config", str(Path("config.yaml").resolve())],
+        )
+        self.assertEqual(
+            frozen,
+            ["Lovart_Auto.exe", "--gemini-login-helper", "--config", str(Path("config.yaml").resolve())],
+        )
+
+    @patch("gemini_browser_session.time.sleep", side_effect=lambda _seconds: None)
+    @patch("gemini_browser_session.navigate_gemini_with_retry")
+    @patch("gemini_browser_session.build_browser_launch_options")
+    @patch("gemini_browser_session.clear_stale_login_runtime")
+    @patch("gemini_browser_session.login_helper_is_active", return_value=False)
+    @patch("gemini_browser_session.sync_playwright")
+    def test_login_helper_closes_ready_context_after_close_request(
+        self,
+        sync_playwright,
+        _active,
+        _clear_stale,
+        build_options,
+        navigate,
+        _sleep,
+    ):
+        class Context:
+            def __init__(self):
+                self.closed = False
+
+            def new_page(self):
+                return object()
+
+            def close(self):
+                self.closed = True
+
+        class Manager:
+            def __init__(self, context):
+                self.context = context
+
+            def __enter__(self):
+                return type("Playwright", (), {
+                    "chromium": type("Chromium", (), {
+                        "launch_persistent_context": lambda _self, **_kwargs: self.context,
+                    })(),
+                })()
+
+            def __exit__(self, *_args):
+                return False
+
+        ready = LoginStatus.create(GeminiPageState.READY, True, "https://gemini.google.com/app", "en", "ready")
+        context = Context()
+        sync_playwright.return_value = Manager(context)
+        build_options.return_value = {"user_data_dir": "profile"}
+        navigate.return_value = ready
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            request_login_helper_close(login_runtime_paths(config).close_request_path)
+            with patch("gemini_browser_session.inspect_gemini_page", return_value=ready):
+                result = run_login_helper(config)
+            status = read_login_status(login_runtime_paths(config).status_path)
+
+        self.assertEqual(result, 0)
+        self.assertTrue(context.closed)
+        self.assertEqual(status.state, GeminiPageState.CLOSED)
+        self.assertFalse(status.ready)

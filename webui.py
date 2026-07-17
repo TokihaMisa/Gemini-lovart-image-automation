@@ -26,6 +26,15 @@ from prompt_settings import (
     merge_prompt_settings,
     normalize_prompt_settings,
 )
+from gemini_browser_session import (
+    GeminiPageState,
+    build_login_helper_command,
+    clear_stale_login_runtime,
+    login_helper_is_active,
+    login_runtime_paths,
+    read_login_status,
+    request_login_helper_close,
+)
 
 
 PROMPT_FORM_FIELDS = (
@@ -46,6 +55,44 @@ PROMPT_FORM_FIELDS = (
 )
 
 active_processes = []
+
+
+def open_gemini_login_browser(config_path: str | Path = "config.yaml") -> str:
+    paths = login_runtime_paths(config_path)
+    if login_helper_is_active(paths):
+        return "Gemini 登录浏览器已经打开，请在浏览器窗口中完成登录。"
+    clear_stale_login_runtime(paths)
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    kwargs: dict[str, object] = {"env": env}
+    import sys
+    if os.name == "nt" and getattr(sys, "frozen", False):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        subprocess.Popen(build_login_helper_command(config_path), **kwargs)
+    except OSError:
+        return "无法打开 Gemini 登录浏览器，请检查本地安装后重试。"
+    return "Gemini 登录浏览器已打开，请在新窗口中完成登录后再检查。"
+
+
+def check_gemini_login_and_close(config_path: str | Path = "config.yaml") -> str:
+    paths = login_runtime_paths(config_path)
+    status = read_login_status(paths.status_path)
+    if not login_helper_is_active(paths):
+        return "Gemini 登录助手未运行；请先打开登录浏览器。"
+    if status is None or status.state != GeminiPageState.READY or not status.ready:
+        return "Gemini 尚未完成登录，请继续在登录浏览器中操作。"
+    request_login_helper_close(paths.close_request_path)
+    return "Gemini 登录已确认，正在安全关闭登录浏览器。"
+
+
+def guard_gemini_browser_task(
+    prompt_source: str, config_path: str | Path = "config.yaml"
+) -> str | None:
+    if prompt_source == "gemini_browser" and login_helper_is_active(login_runtime_paths(config_path)):
+        return "Gemini 登录浏览器仍在运行，请先检查登录并关闭浏览器。"
+    return None
 
 def cleanup_processes():
     for p in active_processes:
@@ -537,6 +584,10 @@ def run_process(
     config_path="config.yaml",
     env_path=".env",
 ):
+    guard_message = guard_gemini_browser_task(prompt_source, config_path=config_path)
+    if guard_message:
+        yield f"❌ {guard_message}"
+        return
     config_target = Path(config_path)
     env_target = Path(env_path)
     transaction_snapshots = {
@@ -1330,6 +1381,12 @@ def build_ui():
                 with gr.Column(elem_classes="glass-panel"):
                     gr.Markdown("### 🔒 API 密钥与模型管理")
                     gr.Markdown("在下方输入您的密钥，修改完成后请点击**保存密钥**按钮，系统将加密写入 `.env` 文件。")
+
+                    gr.Markdown("### Gemini 浏览器账户")
+                    gemini_login_status = gr.Markdown("Gemini 登录浏览器尚未打开。")
+                    with gr.Row():
+                        open_gemini_login_btn = gr.Button("打开 Gemini 登录浏览器")
+                        check_gemini_login_btn = gr.Button("检查登录并关闭浏览器")
                     
                     gemini_key = gr.Textbox(label="GEMINI_API_KEY", value=get_env("GEMINI_API_KEY"), type="password")
                     gemini_base_url = gr.Textbox(label="Gemini API 地址", value=gemini_base_url_value)
@@ -1374,6 +1431,16 @@ def build_ui():
                             nvidia_model,
                         ],
                         outputs=save_status,
+                    )
+                    open_gemini_login_btn.click(
+                        fn=open_gemini_login_browser,
+                        outputs=gemini_login_status,
+                        api_name="open_gemini_login_browser",
+                    )
+                    check_gemini_login_btn.click(
+                        fn=check_gemini_login_and_close,
+                        outputs=gemini_login_status,
+                        api_name="check_gemini_login_and_close",
                     )
 
                     gemini_refresh_btn.click(
