@@ -141,7 +141,7 @@ class GeminiAPI:
                 on_retry=self._retry_notice,
             )
         except Exception as exc:
-            failure = safe_provider_request_error("gemini", exc)
+            failure = safe_provider_request_error("gemini", exc, operation="generate")
         if failure is not None:
             if self.logger:
                 self.logger.error(f"Gemini API request failed ({failure.code})")

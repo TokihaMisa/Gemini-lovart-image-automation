@@ -62,6 +62,22 @@ class NetworkRetryTests(unittest.TestCase):
             RetryKind.NOT_FOUND,
         )
 
+    def test_wrapped_network_reasons_are_classified_by_their_safe_root_cause(self):
+        certificate = URLError(ssl.SSLCertVerificationError("certificate verify failed"))
+        unknown_ssl = URLError(ssl.SSLError("unexpected ssl library failure"))
+        permission = URLError(PermissionError("access denied"))
+        connection = URLError(ConnectionResetError("connection reset"))
+        dns = URLError(socket.gaierror("name resolution failed"))
+        cycle = URLError("unknown")
+        cycle.reason = cycle
+
+        self.assertEqual(classify_network_error(certificate), RetryKind.PERMANENT_TLS)
+        self.assertEqual(classify_network_error(unknown_ssl), RetryKind.OTHER)
+        self.assertEqual(classify_network_error(permission), RetryKind.OTHER)
+        self.assertEqual(classify_network_error(connection), RetryKind.TRANSIENT)
+        self.assertEqual(classify_network_error(dns), RetryKind.TRANSIENT)
+        self.assertEqual(classify_network_error(cycle), RetryKind.OTHER)
+
     def test_retry_executor_uses_exact_delays_and_returns_success(self):
         calls, delays, notices = [], [], []
 

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
 import openpyxl
@@ -92,6 +92,40 @@ class LowPriorityBehaviorTests(unittest.TestCase):
                 client._request("GET", "/status")
         self.assertEqual(ctx.exception.code, 401)
         self.assertNotIn(secret, ctx.exception.message)
+
+    @patch("network_retry.time.sleep")
+    def test_task6_lovart_wrapped_reason_boundaries(self, _sleep):
+        class LovartResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({"code": 0, "data": {"ok": True}}).encode("utf-8")
+
+        client = AgentSkill("https://lovart.test", "access-key", "secret-key")
+        for reason in (
+            ssl.SSLCertVerificationError("wrapped-lovart-tls-sentinel"),
+            ssl.SSLError("unknown ssl failure"),
+            PermissionError("permission denied"),
+        ):
+            with self.subTest(reason=type(reason).__name__), patch(
+                "lovart_api.urllib.request.urlopen", side_effect=URLError(reason)
+            ) as urlopen:
+                with self.assertRaises(AgentSkillError) as ctx:
+                    client._request("GET", "/status")
+            self.assertEqual(urlopen.call_count, 1)
+            if isinstance(reason, ssl.SSLCertVerificationError):
+                self.assertIn("系统时间", ctx.exception.message)
+
+        with patch("lovart_api.urllib.request.urlopen", side_effect=[
+            URLError(ConnectionResetError("temporary reset")), LovartResponse(),
+        ]) as urlopen:
+            result = client._request("GET", "/status")
+        self.assertTrue(result["ok"])
+        self.assertEqual(urlopen.call_count, 2)
 
     def test_parse_reference_images_are_product_yes_no_values(self):
         for value in ("是", "yes", "Y", "true", "1"):

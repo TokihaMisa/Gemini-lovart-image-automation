@@ -332,6 +332,10 @@ def _map_http_error(provider: str, exc: HTTPError, operation: str) -> ModelProvi
             return ModelProviderError(
                 "model_unavailable", "所选模型不存在或不可用，请检查模型 ID。", exc.code
             )
+        if operation in {"generate", "chat_completion"}:
+            return ModelProviderError(
+                "model_unavailable", "所选模型或 API 地址不存在，请检查模型 ID 和 API 地址。", exc.code
+            )
         if provider == "nvidia":
             return ModelProviderError(
                 "models_endpoint_unsupported",

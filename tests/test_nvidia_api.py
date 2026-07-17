@@ -6,7 +6,7 @@ import tempfile
 import traceback
 import unittest
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from unittest.mock import MagicMock, patch
 
 import main
@@ -100,6 +100,83 @@ class NvidiaAPIBehaviorTests(unittest.TestCase):
                 self.assertIn("VPN", ctx.exception.user_message)
                 self.assertIn("杀毒软件", ctx.exception.user_message)
                 self.assertIn("企业证书", ctx.exception.user_message)
+                urlopen.reset_mock()
+
+    @patch("urllib.request.urlopen")
+    def test_task6_gemini_and_nvidia_wrapped_tls_errors_are_single_attempt_and_safe(self, urlopen):
+        sentinel = "wrapped-formal-tls-sentinel"
+        for client in (
+            GeminiAPI("super-secret-key", "gemini", "https://gemini.test/v1beta"),
+            NvidiaAPI("super-secret-key", "nvidia/model", "https://nvidia.test/v1"),
+        ):
+            with self.subTest(client=type(client).__name__):
+                urlopen.side_effect = URLError(ssl.SSLCertVerificationError(sentinel))
+                with self.assertRaises(ModelProviderError) as ctx:
+                    client._call("hello", [])
+                self.assertEqual(urlopen.call_count, 1)
+                self.assertEqual(ctx.exception.code, "tls_certificate")
+                self.assertNotIn(sentinel, str(ctx.exception))
+                self.assertIn("系统时间", ctx.exception.user_message)
+                urlopen.reset_mock()
+
+    @patch("network_retry.time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_task6_gemini_and_nvidia_retry_wrapped_connection_reasons(self, urlopen, _sleep):
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        cases = [
+            (GeminiAPI("key", "gemini", "https://gemini.test/v1beta"), {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}),
+            (NvidiaAPI("key", "nvidia/model", "https://nvidia.test/v1"), {"choices": [{"message": {"content": "ok"}}]}),
+        ]
+        for client, payload in cases:
+            with self.subTest(client=type(client).__name__):
+                urlopen.side_effect = [URLError(ConnectionResetError("temporary reset")), Response(payload)]
+                self.assertEqual(client._call("hello", []), "ok")
+                self.assertEqual(urlopen.call_count, 2)
+                urlopen.reset_mock()
+
+    @patch("urllib.request.urlopen")
+    def test_task6_gemini_and_nvidia_do_not_retry_wrapped_unknown_ssl_or_permission(self, urlopen):
+        for client in (
+            GeminiAPI("key", "gemini", "https://gemini.test/v1beta"),
+            NvidiaAPI("key", "nvidia/model", "https://nvidia.test/v1"),
+        ):
+            for reason in (ssl.SSLError("unknown ssl failure"), PermissionError("permission denied")):
+                with self.subTest(client=type(client).__name__, reason=type(reason).__name__):
+                    urlopen.side_effect = URLError(reason)
+                    with self.assertRaises(ModelProviderError):
+                        client._call("hello", [])
+                    self.assertEqual(urlopen.call_count, 1)
+                    urlopen.reset_mock()
+
+    @patch("urllib.request.urlopen")
+    def test_task6_generation_404_uses_model_endpoint_semantics(self, urlopen):
+        sentinel = "raw-generation-404-sentinel"
+        for client in (
+            GeminiAPI("super-secret-key", "gemini", "https://gemini.test/v1beta"),
+            NvidiaAPI("super-secret-key", "nvidia/model", "https://nvidia.test/v1"),
+        ):
+            with self.subTest(client=type(client).__name__):
+                urlopen.reset_mock()
+                urlopen.side_effect = HTTPError("https://provider.test", 404, sentinel, {}, io.BytesIO(sentinel.encode()))
+                with self.assertRaises(ModelProviderError) as ctx:
+                    client._call("hello", [])
+                self.assertEqual(urlopen.call_count, 1)
+                self.assertEqual(ctx.exception.code, "model_unavailable")
+                self.assertIn("模型", ctx.exception.user_message)
+                self.assertNotIn("模型列表", ctx.exception.user_message)
+                self.assertNotIn(sentinel, str(ctx.exception))
                 urlopen.reset_mock()
 
     @patch("urllib.request.urlopen")

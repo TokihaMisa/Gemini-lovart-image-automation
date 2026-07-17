@@ -54,21 +54,39 @@ _TRANSIENT_SSL_PROTOCOL_MARKERS = (
     "ssl protocol error",
 )
 
+_DNS_MARKERS = (
+    "temporary dns",
+    "name resolution",
+    "name or service not known",
+    "getaddrinfo failed",
+)
+
+_MAX_URL_ERROR_REASON_DEPTH = 8
+
 PERMANENT_TLS_GUIDANCE = "TLS 证书验证失败，请检查系统时间、代理或 VPN、杀毒软件的 TLS 拦截及企业证书。"
 
 
+def _unwrap_url_error_reason(exc: BaseException) -> tuple[BaseException, str]:
+    """Return a bounded, cycle-safe URLError root cause and its messages."""
+    current = exc
+    seen: set[int] = set()
+    messages: list[str] = []
+    for _ in range(_MAX_URL_ERROR_REASON_DEPTH):
+        identity = id(current)
+        if identity in seen:
+            break
+        seen.add(identity)
+        try:
+            messages.append(str(current).lower())
+        except Exception:
+            messages.append(type(current).__name__.lower())
+        if not isinstance(current, URLError) or not isinstance(current.reason, BaseException):
+            break
+        current = current.reason
+    return current, " ".join(messages)
+
+
 def classify_network_error(exc: BaseException) -> RetryKind:
-    message = str(exc).lower()
-    if isinstance(exc, ssl.SSLCertVerificationError) or any(
-        marker in message for marker in _PERMANENT_TLS_MARKERS
-    ):
-        return RetryKind.PERMANENT_TLS
-
-    if isinstance(exc, ssl.SSLError) and any(
-        marker in message for marker in _TRANSIENT_SSL_PROTOCOL_MARKERS
-    ):
-        return RetryKind.TRANSIENT
-
     if isinstance(exc, HTTPError):
         if exc.code in (401, 403):
             return RetryKind.AUTH
@@ -78,10 +96,24 @@ def classify_network_error(exc: BaseException) -> RetryKind:
             return RetryKind.TRANSIENT
         return RetryKind.OTHER
 
-    if isinstance(exc, http.client.IncompleteRead):
+    root, message = _unwrap_url_error_reason(exc)
+    if isinstance(root, ssl.SSLCertVerificationError) or any(
+        marker in message for marker in _PERMANENT_TLS_MARKERS
+    ):
+        return RetryKind.PERMANENT_TLS
+
+    if isinstance(root, ssl.SSLError) and any(
+        marker in message for marker in _TRANSIENT_SSL_PROTOCOL_MARKERS
+    ):
         return RetryKind.TRANSIENT
 
-    if isinstance(exc, (TimeoutError, socket.timeout, ConnectionError, URLError)):
+    if isinstance(root, http.client.IncompleteRead):
+        return RetryKind.TRANSIENT
+
+    if isinstance(root, (TimeoutError, socket.timeout, socket.gaierror, ConnectionError)):
+        return RetryKind.TRANSIENT
+
+    if any(marker in message for marker in _DNS_MARKERS):
         return RetryKind.TRANSIENT
 
     if "net::err_" in message:

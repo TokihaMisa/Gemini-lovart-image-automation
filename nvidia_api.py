@@ -166,7 +166,7 @@ class NvidiaAPI:
                 on_retry=self._retry_notice,
             )
         except Exception as exc:
-            failure = safe_provider_request_error("nvidia", exc)
+            failure = safe_provider_request_error("nvidia", exc, operation="chat_completion")
         if failure is not None:
             if self.logger:
                 self.logger.error(f"NVIDIA API request failed ({failure.code})")

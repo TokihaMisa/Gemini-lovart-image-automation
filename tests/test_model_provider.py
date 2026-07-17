@@ -152,6 +152,41 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.assertIsNone(ctx.exception.__context__)
 
     @patch("urllib.request.urlopen")
+    def test_task6_model_provider_wrapped_permanent_tls_is_safe_and_single_attempt(self, urlopen):
+        sentinel = "wrapped-model-tls-sentinel"
+        urlopen.side_effect = URLError(ssl.SSLCertVerificationError(sentinel))
+
+        with self.assertRaises(ModelProviderError) as ctx:
+            discover_models("nvidia", "super-secret-key", "https://nvidia.test/v1")
+
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual(ctx.exception.code, "tls_certificate")
+        self.assertNotIn(sentinel, str(ctx.exception))
+        self.assertIn("系统时间", ctx.exception.user_message)
+
+    @patch("urllib.request.urlopen")
+    def test_task6_model_provider_retries_wrapped_connection_reason(self, urlopen):
+        urlopen.side_effect = [
+            URLError(ConnectionResetError("temporary connection reset")),
+            FakeResponse({"data": [{"id": "moonshotai/kimi-k2.5"}]}),
+        ]
+
+        models = discover_models("nvidia", "key", "https://nvidia.test/v1")
+
+        self.assertEqual([model.model_id for model in models], ["moonshotai/kimi-k2.5"])
+        self.assertEqual(urlopen.call_count, 2)
+
+    @patch("urllib.request.urlopen")
+    def test_task6_model_provider_does_not_retry_wrapped_unknown_ssl_or_permission(self, urlopen):
+        for reason in (ssl.SSLError("unknown ssl failure"), PermissionError("permission denied")):
+            with self.subTest(reason=type(reason).__name__):
+                urlopen.side_effect = URLError(reason)
+                with self.assertRaises(ModelProviderError):
+                    discover_models("nvidia", "key", "https://nvidia.test/v1")
+                self.assertEqual(urlopen.call_count, 1)
+                urlopen.reset_mock()
+
+    @patch("urllib.request.urlopen")
     def test_invalid_base_urls_are_rejected_before_network_call(self, urlopen):
         for value in ("google.test/v1beta", "ftp://google.test/v1beta", "https:///v1beta", "https://"):
             with self.subTest(value=value), self.assertRaises(ModelProviderError) as ctx:
