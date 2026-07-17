@@ -22,7 +22,7 @@
 - Gemini product retries happen before the final Lovart detail-page request and must not duplicate final Lovart drawing.
 - Gemini API and NVIDIA sources must remain usable without browser login state.
 - All tests are offline unless a final manual login smoke is explicitly performed; automated tests must not use a real Google account or API quota.
-- After verification, bump `version.py` and `version.json` from `1.2.0` to `1.3.0`, build `update.zip`, verify it, create GitHub Release `v1.3.0`, then push `master` so OTA metadata is published only after the asset exists.
+- After implementation verification, bump `version.py` and `version.json` from `1.2.0` to `1.3.0`, build and verify `update.zip`; create GitHub Release `v1.3.0` and push `master` only after the cumulative final code review passes.
 
 ---
 
@@ -224,7 +224,7 @@ def run_with_retry(operation, policy, *, on_retry=None, sleep=None):
     for attempt in range(1, policy.network_attempts + 1):
         try:
             return operation()
-        except BaseException as exc:
+        except Exception as exc:
             kind = classify_network_error(exc)
             if kind is not RetryKind.TRANSIENT or attempt >= policy.network_attempts:
                 raise
@@ -1071,7 +1071,7 @@ git commit -m "docs: explain Gemini login and network recovery"
 
 ---
 
-### Task 8: Manual helper smoke, version 1.3.0, OTA package, and release
+### Task 8: Manual helper smoke, version 1.3.0, and OTA artifact
 
 **Files:**
 - Modify: `version.py`
@@ -1135,25 +1135,9 @@ git add version.py version.json
 git commit -m "release: prepare v1.3.0"
 ```
 
-- [ ] **Step 7: Publish asset before OTA trigger**
+- [ ] **Step 7: Record the verified local release candidate**
 
-Only after checking `gh auth status` and confirming `v1.3.0` does not exist:
-
-```powershell
-git tag -a v1.3.0 -m "Lovart Auto v1.3.0"
-git push origin v1.3.0
-gh release create v1.3.0 "D:\image-automation\update.zip#update.zip" --verify-tag --title "v1.3.0" --notes "新增 Gemini 浏览器账号登录助手、正式任务登录就绪检查、中英西界面兼容，以及弱网络和 SSL/TLS 瞬时错误的均衡重试与中文诊断。"
-```
-
-Verify the release asset name, byte size, and URL exactly match `version.json`. Then and only then run:
-
-```powershell
-git push origin master
-```
-
-- [ ] **Step 8: Verify remote OTA state**
-
-Read remote `master/version.json`, the release asset metadata, and remote `master` SHA. Expected: version `1.3.0`; URL matches the live `update.zip`; remote and local HEAD match; working tree is clean.
+Write the artifact byte size, SHA-256, extracted EXE smoke result, and local commit SHA to the task report. Do not create a tag, GitHub Release, or push `master` in this task; publication is gated on the cumulative final review below.
 
 ---
 
@@ -1172,4 +1156,14 @@ git diff --check
 git status --short
 ```
 
-4. Report exact test/subtest counts, login-helper smoke state, artifact size/SHA-256, Release URL, remote OTA version, and any remaining external account action.
+4. If and only if the reviewer says the branch is ready and the verification commands pass, check `gh auth status` and confirm `v1.3.0` does not exist, then publish in this order:
+
+```powershell
+git tag -a v1.3.0 -m "Lovart Auto v1.3.0"
+git push origin v1.3.0
+gh release create v1.3.0 "D:\image-automation\update.zip#update.zip" --verify-tag --title "v1.3.0" --notes "新增 Gemini 浏览器账号登录助手、正式任务登录就绪检查、中英西界面兼容，以及弱网络和 SSL/TLS 瞬时错误的均衡重试与中文诊断。"
+```
+
+Verify the live asset name, byte size, and URL exactly match `version.json`. Only then merge the feature branch to `master`, re-run the full suite on the merged result, and push `master` so OTA metadata becomes visible after the asset exists.
+
+5. Read remote `master/version.json`, release asset metadata, and remote `master` SHA. Report exact test/subtest counts, login-helper smoke state, artifact size/SHA-256, Release URL, remote OTA version, and any remaining external account action.
