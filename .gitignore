@@ -15,6 +15,7 @@ lovart-skill.zip
 .playwright-mcp/
 .tmp.driveupload/
 .tmp.drivedownload/
+.worktrees/
 
 # PyInstaller
 build/
