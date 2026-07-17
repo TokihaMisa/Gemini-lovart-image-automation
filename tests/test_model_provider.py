@@ -1,7 +1,10 @@
 import io
+import http.client
 import json
+import socket
+import ssl
 import unittest
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
 from model_provider import (
@@ -103,6 +106,37 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "rate_limit")
         self.assertNotIn("super-secret-key", str(ctx.exception))
 
+    @patch("urllib.request.urlopen")
+    def test_url_error_wrapped_timeout_dns_and_tls_are_secret_safe(self, urlopen):
+        failures = [
+            ("timeout", socket.timeout("super-secret-key"), "timeout"),
+            ("dns", socket.gaierror("super-secret-key"), "network"),
+            ("tls", ssl.SSLError("super-secret-key"), "network"),
+        ]
+        for name, reason, expected_code in failures:
+            with self.subTest(name=name):
+                urlopen.side_effect = URLError(reason)
+                with self.assertRaises(ModelProviderError) as ctx:
+                    discover_models("gemini", "super-secret-key", "https://google.test/v1beta")
+                self.assertEqual(ctx.exception.code, expected_code)
+                self.assertNotIn("super-secret-key", ctx.exception.user_message)
+
+    @patch("urllib.request.urlopen")
+    def test_raw_os_error_is_mapped_without_exposing_key(self, urlopen):
+        urlopen.side_effect = ConnectionResetError("super-secret-key")
+        with self.assertRaises(ModelProviderError) as ctx:
+            discover_models("nvidia", "super-secret-key", "https://nvidia.test/v1")
+        self.assertEqual(ctx.exception.code, "network")
+        self.assertNotIn("super-secret-key", str(ctx.exception))
+
+    @patch("urllib.request.urlopen")
+    def test_http_protocol_error_is_mapped_without_exposing_key(self, urlopen):
+        urlopen.side_effect = http.client.HTTPException("super-secret-key")
+        with self.assertRaises(ModelProviderError) as ctx:
+            discover_models("nvidia", "super-secret-key", "https://nvidia.test/v1")
+        self.assertEqual(ctx.exception.code, "network")
+        self.assertNotIn("super-secret-key", str(ctx.exception))
+
     def test_malformed_gemini_base_url_never_exposes_key(self):
         with self.assertRaises(ModelProviderError) as ctx:
             discover_models("gemini", "super-secret-key", "not a valid url")
@@ -128,3 +162,20 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.assertEqual(labels[0][1], "gemini-3.5-flash")
         self.assertIn("Thinking", labels[0][0])
         self.assertIn("图片未验证", labels[0][0])
+
+    def test_model_choice_labels_distinguish_all_image_input_statuses(self):
+        models = [
+            DiscoveredModel("gemini", "reported", "Reported", True, None, "reported", "available"),
+            DiscoveredModel("gemini", "verified", "Verified", True, None, "verified", "available"),
+            DiscoveredModel("gemini", "failed", "Failed", True, None, "failed", "available"),
+            DiscoveredModel("gemini", "unknown", "Unknown", True, None, "unknown", "available"),
+        ]
+        self.assertEqual(
+            [label for label, _ in model_choice_labels(models)],
+            [
+                "Reported · 图片已报告支持",
+                "Verified · 图片已验证支持",
+                "Failed · 图片不支持",
+                "Unknown · 图片未验证",
+            ],
+        )

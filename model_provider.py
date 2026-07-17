@@ -7,6 +7,7 @@ This module deliberately keeps credentials out of its errors.  Callers can show
 from __future__ import annotations
 
 from dataclasses import dataclass
+import http.client
 import json
 import socket
 import ssl
@@ -131,7 +132,15 @@ def _request_json(
             decoded = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         raise _map_http_error(provider, exc) from None
-    except (URLError, TimeoutError, socket.timeout, ssl.SSLError, ValueError) as exc:
+    except (
+        URLError,
+        TimeoutError,
+        socket.timeout,
+        ssl.SSLError,
+        OSError,
+        http.client.HTTPException,
+        ValueError,
+    ) as exc:
         raise _map_network_error(exc) from None
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ModelProviderError("invalid_response", "模型服务返回了无法识别的数据。") from None
@@ -152,7 +161,8 @@ def _map_http_error(provider: str, exc: HTTPError) -> ModelProviderError:
 
 
 def _map_network_error(exc: BaseException) -> ModelProviderError:
-    if isinstance(exc, (TimeoutError, socket.timeout)):
+    reason = exc.reason if isinstance(exc, URLError) else exc
+    if isinstance(reason, (TimeoutError, socket.timeout)):
         return ModelProviderError("timeout", "连接模型服务超时，请稍后重试。")
     return ModelProviderError("network", "无法连接模型服务，请检查网络和 API 地址。")
 
@@ -164,7 +174,13 @@ def model_choice_labels(models: list[DiscoveredModel]) -> list[tuple[str, str]]:
         details: list[str] = []
         if model.supports_thinking:
             details.append("Thinking")
-        details.append("图片已支持" if model.image_input_status == "reported" else "图片未验证")
+        image_status_label = {
+            "reported": "图片已报告支持",
+            "verified": "图片已验证支持",
+            "failed": "图片不支持",
+            "unknown": "图片未验证",
+        }.get(model.image_input_status, "图片未验证")
+        details.append(image_status_label)
         choices.append((f"{model.display_name} · {' · '.join(details)}", model.model_id))
     return choices
 
