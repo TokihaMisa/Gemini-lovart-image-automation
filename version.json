@@ -1,5 +1,5 @@
 {
-  "version": "1.2.0",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.2.0/update.zip",
-  "changelog": "新增 Gemini/NVIDIA API 可用性检测、自动模型发现与模型选择；新增长期提示词参数设置和只读锁定规则预览；统一 Excel 商品要求优先级；增强自定义 API 地址、模型探测、原子配置保存和错误处理；适配 Gradio 6 启动参数并修复 Gemini 扩展思考选项。"
+  "version": "1.3.0",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.0/update.zip",
+  "changelog": "新增 Gemini 浏览器账号登录助手、正式任务登录就绪检查、中英西界面兼容，以及弱网络和 SSL/TLS 瞬时错误的均衡重试与中文诊断。"
 }
