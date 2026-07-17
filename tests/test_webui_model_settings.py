@@ -5,8 +5,10 @@ from unittest.mock import patch
 
 from model_provider import DiscoveredModel, ModelProviderError, ModelTestResult
 from webui import (
+    load_config,
     persist_selected_model,
     refresh_provider_models,
+    retain_workspace_model_selection,
     resolve_model_dropdown,
     run_process,
     save_config,
@@ -67,6 +69,50 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertEqual(resolve_model_dropdown("gemini_api", gemini, nvidia, config)[1], "gemini-saved")
         self.assertEqual(resolve_model_dropdown("nvidia", gemini, nvidia, config)[1], "nvidia-saved")
 
+    def test_legacy_nvidia_selection_restores_model_id(self):
+        config = {
+            "nvidia_api": {
+                "model_choice": "kimi",
+                "models": {"kimi": "moonshotai/kimi-k2.5"},
+            }
+        }
+        nvidia = [
+            {**gemini_model("other-model").__dict__, "provider": "nvidia"},
+            {**gemini_model("moonshotai/kimi-k2.5").__dict__, "provider": "nvidia"},
+        ]
+
+        self.assertEqual(resolve_model_dropdown("nvidia", [], nvidia, config)[1], "moonshotai/kimi-k2.5")
+
+    def test_direct_nvidia_model_takes_precedence_over_legacy_selection(self):
+        config = {
+            "nvidia_api": {
+                "model": "direct-model",
+                "model_choice": "kimi",
+                "models": {"kimi": "legacy-model"},
+            }
+        }
+        nvidia = [
+            {**gemini_model("direct-model").__dict__, "provider": "nvidia"},
+            {**gemini_model("legacy-model").__dict__, "provider": "nvidia"},
+        ]
+
+        self.assertEqual(resolve_model_dropdown("nvidia", [], nvidia, config)[1], "direct-model")
+
+    def test_workspace_selection_survives_switching_away_and_back(self):
+        gemini = [gemini_model("gemini-a").__dict__, gemini_model("gemini-b").__dict__]
+        nvidia = [{**gemini_model("nvidia-a").__dict__, "provider": "nvidia"}]
+
+        gemini_selected, nvidia_selected = retain_workspace_model_selection(
+            "gemini_api", "gemini-b", "gemini-a", "nvidia-a"
+        )
+        live_config = {
+            "gemini_api": {"model": gemini_selected},
+            "nvidia_api": {"model": nvidia_selected},
+        }
+
+        self.assertEqual(resolve_model_dropdown("nvidia", gemini, nvidia, live_config)[1], "nvidia-a")
+        self.assertEqual(resolve_model_dropdown("gemini_api", gemini, nvidia, live_config)[1], "gemini-b")
+
     def test_persist_selected_model_writes_gemini_direct_model(self):
         updated = persist_selected_model({}, "gemini_api", "gemini-3.5-flash")
         self.assertEqual(updated["gemini_api"]["model"], "gemini-3.5-flash")
@@ -103,6 +149,17 @@ class WebUIModelSettingsTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), "original: true\n")
             self.assertFalse((Path(tmp) / ".config.yaml.tmp").exists())
 
+    @patch("webui.os.replace", side_effect=OSError("replace failed"))
+    def test_fresh_config_creation_failure_leaves_no_partial_target(self, _replace):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+
+            with self.assertRaises(OSError):
+                load_config(path)
+
+            self.assertFalse(path.exists())
+            self.assertFalse((Path(tmp) / ".config.yaml.tmp").exists())
+
     @patch("webui.test_selected_model")
     def test_test_provider_model_returns_usage_notice_and_result(self, test_model):
         test_model.return_value = ModelTestResult(True, "模型可用", 42)
@@ -110,3 +167,13 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertIn("模型可用", status)
         self.assertIn("42", status)
         self.assertIn("API 用量", status)
+
+    @patch("webui.test_selected_model")
+    def test_test_provider_model_renders_non_success_when_result_is_not_ok(self, test_model):
+        test_model.return_value = ModelTestResult(False, "模型不可用", 17)
+
+        status = test_provider_model("gemini", "key", "https://google.test/v1beta", "gemini-model")
+
+        self.assertIn("❌", status)
+        self.assertNotIn("✅", status)
+        self.assertIn("模型不可用", status)

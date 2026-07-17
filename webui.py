@@ -34,8 +34,9 @@ def cleanup_processes():
 atexit.register(cleanup_processes)
 
 
-def load_config() -> dict:
-    if not os.path.exists("config.yaml"):
+def load_config(path: str | Path = "config.yaml") -> dict:
+    target = Path(path)
+    if not target.exists():
         default_config = """excel:
   path: data/products.xlsx
   sheet: 0
@@ -83,11 +84,9 @@ lovart:
   upload_retry_delay: 2
 output_dir: output
 """
-        with open("config.yaml", "w", encoding="utf-8") as f:
-            f.write(default_config)
-            
-    with open("config.yaml", "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        save_config(yaml.safe_load(default_config) or {}, target)
+
+    return yaml.safe_load(target.read_text(encoding="utf-8")) or {}
 
 
 def save_config(config_data: dict, path: str | Path = "config.yaml"):
@@ -123,10 +122,25 @@ def test_provider_model(provider, api_key, base_url, model_id):
         result = test_selected_model(provider, api_key, base_url, model_id)
     except ModelProviderError as exc:
         return f"❌ {exc.user_message} 测试可能产生极少量 API 用量。"
-    return f"✅ {result.message}（{result.latency_ms} ms）。测试可能产生极少量 API 用量。"
+    status_icon = "✅" if result.ok else "❌"
+    return f"{status_icon} {result.message}（{result.latency_ms} ms）。测试可能产生极少量 API 用量。"
 
 
 test_provider_model.__test__ = False
+
+
+def _configured_provider_model(config, prompt_source):
+    config_section = "gemini_api" if prompt_source == "gemini_api" else "nvidia_api"
+    provider_config = config.get(config_section, {}) or {}
+    direct_model = provider_config.get("model", "")
+    if direct_model:
+        return direct_model
+    if prompt_source == "nvidia":
+        legacy_models = provider_config.get("models", {})
+        legacy_choice = provider_config.get("model_choice", "")
+        if isinstance(legacy_models, dict):
+            return legacy_models.get(legacy_choice, "")
+    return ""
 
 
 def resolve_model_dropdown(prompt_source, gemini_catalog, nvidia_catalog, config):
@@ -136,22 +150,28 @@ def resolve_model_dropdown(prompt_source, gemini_catalog, nvidia_catalog, config
 
     if prompt_source == "gemini_api":
         catalog = gemini_catalog
-        config_section = "gemini_api"
     elif prompt_source == "nvidia":
         catalog = nvidia_catalog
-        config_section = "nvidia_api"
     else:
         return [], "", False
 
     models = [DiscoveredModel(**item) for item in catalog]
     choices = model_choice_labels(models)
     model_ids = [model.model_id for model in models]
-    selected = config.get(config_section, {}).get("model", "")
+    selected = _configured_provider_model(config, prompt_source)
     if not selected and model_ids:
         selected = model_ids[0]
     if selected and selected not in model_ids:
         choices.append((selected, selected))
     return choices, selected, True
+
+
+def retain_workspace_model_selection(prompt_source, workspace_model, gemini_model, nvidia_model):
+    if prompt_source == "gemini_api" and workspace_model:
+        return workspace_model, nvidia_model
+    if prompt_source == "nvidia" and workspace_model:
+        return gemini_model, workspace_model
+    return gemini_model, nvidia_model
 
 
 def persist_selected_model(config, prompt_source, model_id):
@@ -815,8 +835,8 @@ def build_ui():
     default_output_dir = config.get("output_dir", str(Path("output").absolute()))
     gemini_config = config.get("gemini_api", {})
     nvidia_config = config.get("nvidia_api", {})
-    gemini_saved_model = gemini_config.get("model", "")
-    nvidia_saved_model = nvidia_config.get("model", "")
+    gemini_saved_model = _configured_provider_model(config, "gemini_api")
+    nvidia_saved_model = _configured_provider_model(config, "nvidia")
     gemini_base_url_value = gemini_config.get("base_url", "https://generativelanguage.googleapis.com/v1beta")
     nvidia_base_url_value = nvidia_config.get("base_url", "https://integrate.api.nvidia.com/v1")
 
@@ -844,6 +864,14 @@ def build_ui():
 
     def sync_workspace_model(prompt_source_value, provider_source, model_id):
         return model_id if prompt_source_value == provider_source else gr.skip()
+
+    def retain_workspace_selection(prompt_source_value, workspace_model, gemini_model, nvidia_model):
+        updated_gemini, updated_nvidia = retain_workspace_model_selection(
+            prompt_source_value, workspace_model, gemini_model, nvidia_model
+        )
+        gemini_update = gr.update(value=updated_gemini) if updated_gemini != gemini_model else gr.skip()
+        nvidia_update = gr.update(value=updated_nvidia) if updated_nvidia != nvidia_model else gr.skip()
+        return gemini_update, nvidia_update
 
     with gr.Blocks(title="Lovart Image Automation WebUI", css=CUSTOM_CSS, js="() => document.documentElement.classList.add('dark')") as demo:
         gemini_catalog_state = gr.State([])
@@ -991,6 +1019,11 @@ def build_ui():
             fn=resolve_workspace_model,
             inputs=[prompt_source, gemini_catalog_state, nvidia_catalog_state, gemini_model, nvidia_model],
             outputs=prompt_model,
+        )
+        prompt_model.input(
+            fn=retain_workspace_selection,
+            inputs=[prompt_source, prompt_model, gemini_model, nvidia_model],
+            outputs=[gemini_model, nvidia_model],
         )
         gemini_model.change(
             fn=lambda source, model: sync_workspace_model(source, "gemini_api", model),
