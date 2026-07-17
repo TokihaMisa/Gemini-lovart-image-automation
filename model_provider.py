@@ -11,6 +11,7 @@ import http.client
 import json
 import socket
 import ssl
+import time
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -36,10 +37,21 @@ class ModelProviderError(RuntimeError):
         self.status_code = status_code
 
 
+@dataclass(frozen=True)
+class ModelTestResult:
+    ok: bool
+    message: str
+    latency_ms: int
+
+
 _GEMINI_EXCLUDED = ("embedding", "imagen", "veo", "live", "tts", "speech", "audio")
 _NVIDIA_EXCLUDED = (
     "embed", "rerank", "retrieval", "tts", "speech", "audio", "flux",
     "stable-diffusion", "imagen", "veo",
+)
+_TEST_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+    "/x8AAusB9Y9Z4WQAAAAASUVORK5CYII="
 )
 
 
@@ -57,6 +69,104 @@ def discover_models(
     if normalized_provider == "nvidia":
         return _discover_nvidia(api_key, base_url, timeout)
     raise ModelProviderError("unsupported_provider", "不支持的模型服务商。")
+
+
+def test_selected_model(
+    provider: str,
+    api_key: str,
+    base_url: str,
+    model_id: str,
+    timeout: float = 30,
+) -> ModelTestResult:
+    """Send one small image-and-text request to validate the selected model."""
+    normalized_provider = provider.strip().lower()
+    if not api_key.strip():
+        raise ModelProviderError("missing_key", "\u8bf7\u5148\u586b\u5199 API \u5bc6\u94a5\u3002")
+    if not base_url.strip():
+        raise ModelProviderError("missing_base_url", "\u8bf7\u5148\u586b\u5199 API \u5730\u5740\u3002")
+    if not model_id.strip():
+        raise ModelProviderError("missing_model", "\u8bf7\u5148\u9009\u62e9\u6a21\u578b\u3002")
+
+    if normalized_provider == "gemini":
+        try:
+            url = _append_query(_gemini_generate_url(base_url, model_id), {"key": api_key})
+        except ValueError as exc:
+            raise _map_network_error(exc) from None
+        payload = _gemini_test_payload()
+    elif normalized_provider == "nvidia":
+        url = f"{base_url.strip().rstrip('/')}/chat/completions"
+        payload = _nvidia_test_payload(model_id)
+    else:
+        raise ModelProviderError("unsupported_provider", "\u4e0d\u652f\u6301\u7684\u6a21\u578b\u670d\u52a1\u5546\u3002")
+
+    started = time.perf_counter()
+    response = _request_json(url, api_key, normalized_provider, method="POST", payload=payload, timeout=timeout)
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    text = _extract_gemini_text(response) if normalized_provider == "gemini" else _extract_nvidia_text(response)
+    if not text or not text.strip():
+        raise ModelProviderError("empty_response", "\u6a21\u578b\u63a5\u53d7\u4e86\u8bf7\u6c42\uff0c\u4f46\u6ca1\u6709\u8fd4\u56de\u53ef\u7528\u6587\u5b57\u3002")
+    return ModelTestResult(
+        True,
+        "API \u4e0e\u6240\u9009\u6a21\u578b\u53ef\u7528\uff0c\u652f\u6301\u56fe\u7247\u8f93\u5165\u5e76\u8fd4\u56de\u6587\u5b57",
+        elapsed_ms,
+    )
+
+
+test_selected_model.__test__ = False
+
+
+def _gemini_generate_url(base_url: str, model_id: str) -> str:
+    return f"{base_url.strip().rstrip('/')}/models/{model_id}:generateContent"
+
+
+def _gemini_test_payload() -> dict[str, Any]:
+    return {
+        "contents": [{"parts": [
+            {"text": "Reply with OK."},
+            {"inline_data": {"mime_type": "image/png", "data": _TEST_PNG_BASE64}},
+        ]}],
+        "generationConfig": {"maxOutputTokens": 32},
+    }
+
+
+def _nvidia_test_payload(model_id: str) -> dict[str, Any]:
+    return {
+        "model": model_id,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "Reply with OK."},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{_TEST_PNG_BASE64}"}},
+        ]}],
+        "max_tokens": 32,
+    }
+
+
+def _extract_gemini_text(payload: dict[str, Any]) -> str | None:
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return None
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content")
+        if not isinstance(content, dict) or not isinstance(content.get("parts"), list):
+            continue
+        for part in content["parts"]:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                return part["text"]
+    return None
+
+
+def _extract_nvidia_text(payload: dict[str, Any]) -> str | None:
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return None
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            return message["content"]
+    return None
 
 
 def _discover_gemini(api_key: str, base_url: str, timeout: float) -> list[DiscoveredModel]:

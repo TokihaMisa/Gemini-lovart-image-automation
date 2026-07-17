@@ -10,8 +10,10 @@ from unittest.mock import patch
 from model_provider import (
     DiscoveredModel,
     ModelProviderError,
+    ModelTestResult,
     discover_models,
     model_choice_labels,
+    test_selected_model,
 )
 
 
@@ -185,3 +187,56 @@ class ModelDiscoveryTests(unittest.TestCase):
                 "Unknown · 图片未验证",
             ],
         )
+
+
+class ModelCompatibilityTests(unittest.TestCase):
+    def test_selected_model_is_not_collected_as_a_pytest_test(self):
+        self.assertFalse(test_selected_model.__test__)
+
+    @patch("urllib.request.urlopen")
+    def test_gemini_model_test_sends_inline_png_and_small_output_limit(self, urlopen):
+        urlopen.return_value = FakeResponse({"candidates": [{"content": {"parts": [{"text": "OK"}]}}]})
+        result = test_selected_model("gemini", "key", "https://google.test/v1beta", "gemini-2.5-flash")
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        parts = payload["contents"][0]["parts"]
+        self.assertTrue(result.ok)
+        self.assertTrue(request.full_url.startswith("https://google.test/v1beta/models/gemini-2.5-flash:generateContent"))
+        self.assertEqual(payload["generationConfig"]["maxOutputTokens"], 32)
+        self.assertEqual(parts[1]["inline_data"]["mime_type"], "image/png")
+
+    @patch("urllib.request.urlopen")
+    def test_nvidia_model_test_sends_data_url_and_small_output_limit(self, urlopen):
+        urlopen.return_value = FakeResponse({"choices": [{"message": {"content": "OK"}}]})
+        result = test_selected_model("nvidia", "key", "https://nvidia.test/v1", "moonshotai/kimi-k2.5")
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        content = payload["messages"][0]["content"]
+        self.assertTrue(result.ok)
+        self.assertEqual(request.full_url, "https://nvidia.test/v1/chat/completions")
+        self.assertEqual(payload["max_tokens"], 32)
+        self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    @patch("urllib.request.urlopen")
+    def test_model_test_requires_nonempty_text(self, urlopen):
+        urlopen.return_value = FakeResponse({"choices": [{"message": {"content": ""}}]})
+        with self.assertRaises(ModelProviderError) as ctx:
+            test_selected_model("nvidia", "key", "https://nvidia.test/v1", "model")
+        self.assertEqual(ctx.exception.code, "empty_response")
+
+    @patch("urllib.request.urlopen")
+    def test_model_test_reports_latency_and_success_message(self, urlopen):
+        urlopen.return_value = FakeResponse({"choices": [{"message": {"content": "OK"}}]})
+        result = test_selected_model("nvidia", "key", "https://nvidia.test/v1", "model")
+        self.assertIsInstance(result, ModelTestResult)
+        self.assertGreaterEqual(result.latency_ms, 0)
+        self.assertIn("支持图片输入", result.message)
+
+    @patch("urllib.request.urlopen")
+    def test_model_test_error_does_not_echo_api_key(self, urlopen):
+        urlopen.side_effect = HTTPError(
+            "https://nvidia.test", 403, "super-secret-key", {}, io.BytesIO(b"super-secret-key")
+        )
+        with self.assertRaises(ModelProviderError) as ctx:
+            test_selected_model("nvidia", "super-secret-key", "https://nvidia.test/v1", "model")
+        self.assertNotIn("super-secret-key", ctx.exception.user_message)
