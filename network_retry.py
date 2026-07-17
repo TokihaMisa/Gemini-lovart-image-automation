@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 import http.client
+import re
 import socket
 import ssl
 import time
@@ -44,10 +45,25 @@ def retry_policy_from_config(config: Mapping[str, object]) -> RetryPolicy:
 
 _PERMANENT_TLS_MARKERS = (
     "certificate verify failed",
-    "net::err_cert_authority_invalid",
-    "net::err_cert_common_name_invalid",
-    "net::err_cert_date_invalid",
 )
+
+_AUTH_BROWSER_ERRORS = frozenset((
+    "net::err_access_denied",
+))
+
+_NOT_FOUND_BROWSER_ERRORS = frozenset((
+    "net::err_file_not_found",
+))
+
+_TRANSIENT_BROWSER_ERRORS = frozenset((
+    "net::err_connection_reset",
+    "net::err_connection_closed",
+    "net::err_connection_timed_out",
+    "net::err_timed_out",
+    "net::err_network_changed",
+    "net::err_name_not_resolved",
+    "net::err_ssl_protocol_error",
+))
 
 _TRANSIENT_SSL_PROTOCOL_MARKERS = (
     "protocol interrupted",
@@ -97,10 +113,17 @@ def classify_network_error(exc: BaseException) -> RetryKind:
         return RetryKind.OTHER
 
     root, message = _unwrap_url_error_reason(exc)
+    browser_errors = frozenset(re.findall(r"\bnet::err_[a-z0-9_]+\b", message))
     if isinstance(root, ssl.SSLCertVerificationError) or any(
         marker in message for marker in _PERMANENT_TLS_MARKERS
-    ):
+    ) or any(error.startswith("net::err_cert_") for error in browser_errors):
         return RetryKind.PERMANENT_TLS
+
+    if browser_errors & _AUTH_BROWSER_ERRORS:
+        return RetryKind.AUTH
+
+    if browser_errors & _NOT_FOUND_BROWSER_ERRORS:
+        return RetryKind.NOT_FOUND
 
     if isinstance(root, ssl.SSLError) and any(
         marker in message for marker in _TRANSIENT_SSL_PROTOCOL_MARKERS
@@ -116,7 +139,7 @@ def classify_network_error(exc: BaseException) -> RetryKind:
     if any(marker in message for marker in _DNS_MARKERS):
         return RetryKind.TRANSIENT
 
-    if "net::err_" in message:
+    if browser_errors & _TRANSIENT_BROWSER_ERRORS:
         return RetryKind.TRANSIENT
 
     return RetryKind.OTHER

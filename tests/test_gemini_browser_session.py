@@ -11,6 +11,7 @@ from gemini_browser_session import (
     GeminiPermanentTlsError,
     GeminiPageState,
     LoginStatus,
+    LoginHelperOwner,
     acquire_login_helper_owner,
     build_login_helper_command,
     clear_stale_login_runtime,
@@ -63,6 +64,17 @@ class GeminiBrowserSessionTests(unittest.TestCase):
         self.assertEqual(status.state, GeminiPageState.READY)
         self.assertTrue(status.ready)
         self.assertEqual(status.language, "es-ES")
+
+    def test_captive_portal_editor_can_never_mark_gemini_ready(self):
+        page = FakePage("http://captive.example/portal", {
+            "language": "en", "has_editor": True, "has_login_prompt": False,
+            "has_loading": False, "controls": ["Continue"],
+        })
+
+        status = inspect_gemini_page(page)
+
+        self.assertEqual(status.state, GeminiPageState.PAGE_LOADING)
+        self.assertFalse(status.ready)
 
     def test_non_login_account_path_on_gemini_remains_ready(self):
         page = FakePage("https://gemini.google.com/app/account", {
@@ -142,6 +154,56 @@ class GeminiBrowserSessionTests(unittest.TestCase):
                 navigate_gemini_with_retry(page, "https://gemini.google.com", policy)
 
         self.assertEqual(page.goto_calls, 2)
+
+    def test_navigation_retries_temporary_page_inspection_for_all_five_attempts(self):
+        sentinel = "inspect-private@example.com"
+
+        class Page(FakePage):
+            def __init__(self):
+                super().__init__("https://gemini.google.com/app", {
+                    "language": "en", "has_editor": True, "has_login_prompt": False,
+                    "has_loading": False, "controls": [],
+                })
+                self.inspect_calls = 0
+
+            def evaluate(self, script):
+                self.inspect_calls += 1
+                if self.inspect_calls < 5:
+                    raise RuntimeError(sentinel)
+                return super().evaluate(script)
+
+        page = Page()
+        policy = RetryPolicy(network_attempts=5, retry_delays=(0, 0, 0, 0))
+
+        with patch("network_retry.time.sleep"):
+            status = navigate_gemini_with_retry(
+                page, "https://gemini.google.com/app", policy
+            )
+
+        self.assertTrue(status.ready)
+        self.assertEqual(page.inspect_calls, 5)
+        self.assertEqual(page.goto_calls, 5)
+
+    def test_exhausted_page_inspection_uses_five_attempts_without_raw_detail(self):
+        sentinel = "inspect-private@example.com"
+
+        class Page(FakePage):
+            def __init__(self):
+                super().__init__("https://gemini.google.com/app", {})
+                self.inspect_calls = 0
+
+            def evaluate(self, _script):
+                self.inspect_calls += 1
+                raise RuntimeError(sentinel)
+
+        page = Page()
+        policy = RetryPolicy(network_attempts=5, retry_delays=(0, 0, 0, 0))
+        with patch("network_retry.time.sleep"), self.assertRaises(TimeoutError) as raised:
+            navigate_gemini_with_retry(page, "https://gemini.google.com/app", policy)
+
+        self.assertEqual(page.inspect_calls, 5)
+        self.assertEqual(page.goto_calls, 5)
+        self.assertNotIn(sentinel, "".join(traceback.format_exception(raised.exception)))
 
     def test_navigation_maps_permanent_tls_to_safe_error(self):
         page = FakePage("https://gemini.google.com/app", {})
@@ -335,6 +397,124 @@ class GeminiBrowserSessionTests(unittest.TestCase):
                 self.assertEqual(read_login_status(first_paths.status_path), starting)
             finally:
                 release_login_helper_owner(first_paths, owner)
+
+    def test_formal_flow_owns_profile_during_products_and_releases_afterward(self):
+        class Context:
+            def __init__(self):
+                self.pages = [object()]
+
+            def close(self):
+                pass
+
+        class Logger:
+            def info(self, _message):
+                pass
+
+            def warning(self, _message):
+                pass
+
+        class Manager:
+            def __init__(self, context):
+                self.playwright = type("Playwright", (), {
+                    "chromium": type("Chromium", (), {
+                        "launch_persistent_context": lambda _self, **_kwargs: context,
+                    })(),
+                })()
+
+            def __enter__(self):
+                return self.playwright
+
+            def __exit__(self, _exc_type, _exc, _traceback):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            profile = Path(tmp) / "shared-profile"
+            config = {
+                "browser": {"user_data_dir": str(profile)},
+                "gemini": {"base_url": "https://gemini.google.com"},
+            }
+            config_path.write_text(
+                f"browser:\n  user_data_dir: {profile}\n", encoding="utf-8"
+            )
+            paths = login_runtime_paths(config_path)
+            observed_competitor = []
+
+            def process_while_formal_owns(*_args, **_kwargs):
+                competitor = acquire_login_helper_owner(paths)
+                observed_competitor.append(competitor)
+                if competitor is not None:
+                    release_login_helper_owner(paths, competitor)
+                return (1, 0, 0, 0)
+
+            ready = LoginStatus.create(
+                GeminiPageState.READY, True, "https://gemini.google.com/app", "en", "ready"
+            )
+            context = Context()
+            with patch("main._resolve_browser_executable_for_run", return_value=None), patch(
+                "main.sync_playwright", return_value=Manager(context)
+            ), patch("main.build_browser_launch_options", return_value={}), patch(
+                "main.navigate_gemini_with_retry", return_value=ready
+            ), patch("main._process_products", side_effect=process_while_formal_owns):
+                result = main._run_browser_flow(
+                    config, [object()], object(), Logger(), Path(tmp) / "runs",
+                    wait_for_ready=False, config_path=config_path,
+                )
+
+            self.assertEqual(result, (1, 0, 0, 0))
+            self.assertEqual(observed_competitor, [None])
+            released_owner = acquire_login_helper_owner(paths)
+            self.assertIsNotNone(released_owner)
+            release_login_helper_owner(paths, released_owner)
+
+    def test_helper_owner_blocks_formal_flow_before_browser_launch(self):
+        class Logger:
+            def info(self, _message):
+                pass
+
+            def warning(self, _message):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            profile = Path(tmp) / "shared-profile"
+            config = {
+                "browser": {"user_data_dir": str(profile)},
+                "gemini": {"base_url": "https://gemini.google.com"},
+            }
+            config_path.write_text(
+                f"browser:\n  user_data_dir: {profile}\n", encoding="utf-8"
+            )
+            paths = login_runtime_paths(config_path)
+            owner = acquire_login_helper_owner(paths)
+            self.assertIsNotNone(owner)
+            try:
+                with patch("main._resolve_browser_executable_for_run", return_value=None), patch(
+                    "main.sync_playwright", side_effect=AssertionError("browser must not launch")
+                ) as sync_playwright:
+                    with self.assertRaises(main.GeminiPageNotReadyError) as raised:
+                        main._run_browser_flow(
+                            config, [], object(), Logger(), Path(tmp) / "runs",
+                            wait_for_ready=False, config_path=config_path,
+                        )
+                sync_playwright.assert_not_called()
+                self.assertIn("账户目录", str(raised.exception))
+            finally:
+                release_login_helper_owner(paths, owner)
+
+    def test_profile_owner_release_requires_matching_owner_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = login_runtime_paths(Path(tmp) / "config.yaml")
+            owner = acquire_login_helper_owner(paths)
+            self.assertIsNotNone(owner)
+
+            release_login_helper_owner(
+                paths, LoginHelperOwner(pid=owner.pid, token="not-the-owner")
+            )
+
+            self.assertTrue(paths.owner_lock_path.exists())
+            release_login_helper_owner(paths, owner)
+            self.assertFalse(paths.owner_lock_path.exists())
 
     def test_windows_liveness_check_queries_process_without_signalling_it(self):
         class Kernel32:

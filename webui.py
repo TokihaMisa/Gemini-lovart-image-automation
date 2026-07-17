@@ -58,6 +58,7 @@ active_processes = []
 _gemini_login_launch_lock = threading.Lock()
 _gemini_login_launches: dict[str, float] = {}
 _GEMINI_LOGIN_LAUNCH_GRACE_SECONDS = 10.0
+_GEMINI_PROFILE_BUSY_MESSAGE = "Gemini 浏览器账户目录正在使用中，请等待当前浏览器任务结束后再试。"
 
 
 def open_gemini_login_browser(config_path: str | Path = "config.yaml") -> str:
@@ -70,12 +71,12 @@ def open_gemini_login_browser(config_path: str | Path = "config.yaml") -> str:
             _gemini_login_launches.pop(launch_key, None)
         if login_helper_is_active(paths):
             _gemini_login_launches.pop(launch_key, None)
-            return "Gemini 登录浏览器已经打开，请在浏览器窗口中完成登录。"
+            return _GEMINI_PROFILE_BUSY_MESSAGE
         clear_stale_login_runtime(paths)
         if login_helper_is_active(paths):
-            return "Gemini 登录浏览器已经打开，请在浏览器窗口中完成登录。"
+            return _GEMINI_PROFILE_BUSY_MESSAGE
         if launch_key in _gemini_login_launches:
-            return "Gemini 登录浏览器已经打开，正在启动中，请稍后再检查。"
+            return _GEMINI_PROFILE_BUSY_MESSAGE
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
@@ -106,7 +107,7 @@ def guard_gemini_browser_task(
     prompt_source: str, config_path: str | Path = "config.yaml"
 ) -> str | None:
     if prompt_source == "gemini_browser" and login_helper_is_active(login_runtime_paths(config_path)):
-        return "Gemini 登录浏览器仍在运行，请先检查登录并关闭浏览器。"
+        return _GEMINI_PROFILE_BUSY_MESSAGE
     return None
 
 def cleanup_processes():

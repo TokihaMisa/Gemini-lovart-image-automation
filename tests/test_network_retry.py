@@ -52,6 +52,37 @@ class NetworkRetryTests(unittest.TestCase):
             RetryKind.AUTH,
         )
 
+    def test_browser_permanent_markers_are_explicitly_classified_and_never_retried(self):
+        cases = (
+            (RuntimeError("net::ERR_CERT_REVOKED private@example.com"), RetryKind.PERMANENT_TLS),
+            (RuntimeError("net::ERR_ACCESS_DENIED private@example.com"), RetryKind.AUTH),
+            (RuntimeError("net::ERR_BLOCKED_BY_CLIENT private@example.com"), RetryKind.OTHER),
+            (RuntimeError("net::ERR_BLOCKED_BY_RESPONSE private@example.com"), RetryKind.OTHER),
+            (RuntimeError("net::ERR_FILE_NOT_FOUND C:\\Users\\private"), RetryKind.NOT_FOUND),
+        )
+        for error, expected in cases:
+            with self.subTest(marker=str(error).split()[0]):
+                self.assertEqual(classify_network_error(error), expected)
+                calls = []
+                with self.assertRaises(RuntimeError):
+                    run_with_retry(
+                        lambda: calls.append(1) or (_ for _ in ()).throw(error),
+                        RetryPolicy(),
+                        sleep=lambda _delay: self.fail("permanent browser errors must not sleep"),
+                    )
+                self.assertEqual(calls, [1])
+
+    def test_unlisted_browser_error_is_not_treated_as_transient(self):
+        for marker in (
+            "net::ERR_TOO_MANY_REDIRECTS",
+            "net::ERR_CONNECTION_RESET_BY_PEER",
+        ):
+            with self.subTest(marker=marker):
+                self.assertEqual(
+                    classify_network_error(RuntimeError(marker)),
+                    RetryKind.OTHER,
+                )
+
     def test_unknown_ssl_error_is_not_retried(self):
         self.assertEqual(
             classify_network_error(ssl.SSLError("unexpected ssl library failure")),

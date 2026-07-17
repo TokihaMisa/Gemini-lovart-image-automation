@@ -5,7 +5,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from gemini_browser_session import GeminiPageState, LoginStatus, login_runtime_paths, write_login_status
+from gemini_browser_session import (
+    GeminiPageState,
+    LoginStatus,
+    acquire_login_helper_owner,
+    login_runtime_paths,
+    release_login_helper_owner,
+    write_login_status,
+)
 from webui import (
     build_ui,
     check_gemini_login_and_close,
@@ -48,7 +55,24 @@ class WebUIGeminiLoginTests(unittest.TestCase):
             message = open_gemini_login_browser("config.yaml")
 
         popen.assert_not_called()
-        self.assertIn("已经打开", message)
+        self.assertIn("账户目录正在使用", message)
+
+    def test_formal_profile_owner_makes_open_button_report_safe_busy_message(self):
+        with tempfile.TemporaryDirectory() as tmp, patch("webui.subprocess.Popen") as popen:
+            config = Path(tmp) / "config.yaml"
+            paths = login_runtime_paths(config)
+            owner = acquire_login_helper_owner(paths)
+            self.assertIsNotNone(owner)
+            try:
+                message = open_gemini_login_browser(config)
+            finally:
+                release_login_helper_owner(paths, owner)
+
+        popen.assert_not_called()
+        self.assertEqual(
+            message,
+            "Gemini 浏览器账户目录正在使用中，请等待当前浏览器任务结束后再试。",
+        )
 
     @patch("webui.login_helper_is_active", return_value=False)
     def test_concurrent_open_callbacks_start_at_most_one_helper(self, _active):
@@ -60,7 +84,7 @@ class WebUIGeminiLoginTests(unittest.TestCase):
 
         self.assertEqual(popen.call_count, 1)
         self.assertEqual(sum("已打开" in message for message in messages), 1)
-        self.assertEqual(sum("已经打开" in message for message in messages), 1)
+        self.assertEqual(sum("账户目录正在使用" in message for message in messages), 1)
 
     def test_check_does_not_close_when_not_ready(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -90,7 +114,7 @@ class WebUIGeminiLoginTests(unittest.TestCase):
 
     def test_browser_task_guard_blocks_active_helper_only_for_browser_source(self):
         with patch("webui.login_helper_is_active", return_value=True):
-            self.assertIn("登录浏览器", guard_gemini_browser_task("gemini_browser"))
+            self.assertIn("账户目录正在使用", guard_gemini_browser_task("gemini_browser"))
             self.assertIsNone(guard_gemini_browser_task("gemini_api"))
             self.assertIsNone(guard_gemini_browser_task("nvidia"))
 

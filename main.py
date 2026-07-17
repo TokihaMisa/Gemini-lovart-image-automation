@@ -22,12 +22,17 @@ from excel_reader import read_products
 from gemini_api import GeminiAPI
 from gemini_bot import GeminiBot
 from gemini_browser_session import (
+    GeminiAuthenticationError,
     GeminiLoginRequiredError,
     GeminiPageNotReadyError,
     GeminiPermanentTlsError,
+    GeminiResourceNotFoundError,
     GeminiPageState,
+    acquire_login_helper_owner,
     build_browser_launch_options,
+    login_runtime_paths,
     navigate_gemini_with_retry,
+    release_login_helper_owner,
     resolve_browser_executable,
     resolve_user_data_dir,
     retry_policy_from_config,
@@ -948,6 +953,40 @@ def _run_browser_flow(
     prompt_settings=None,
     config_path: str | Path = Path("config.yaml"),
 ):
+    paths = login_runtime_paths(config_path)
+    owner = acquire_login_helper_owner(paths)
+    if owner is None:
+        logger.warning("Gemini 浏览器账户目录正在使用中，未启动正式任务。")
+        raise GeminiPageNotReadyError(
+            "Gemini 浏览器账户目录正在使用中，请等待当前浏览器任务结束后再试。"
+        )
+    try:
+        return _run_owned_browser_flow(
+            config,
+            products,
+            lovart,
+            logger,
+            run_dir,
+            resume=resume,
+            wait_for_ready=wait_for_ready,
+            prompt_settings=prompt_settings,
+            config_path=config_path,
+        )
+    finally:
+        release_login_helper_owner(paths, owner)
+
+
+def _run_owned_browser_flow(
+    config,
+    products,
+    lovart,
+    logger,
+    run_dir,
+    resume=True,
+    wait_for_ready=True,
+    prompt_settings=None,
+    config_path: str | Path = Path("config.yaml"),
+):
     browser_cfg = config["browser"]
     interactive_console = wait_for_ready and not _is_ui_mode()
     chrome_exe = _resolve_browser_executable_for_run(
@@ -975,13 +1014,18 @@ def _run_browser_flow(
                 logger.warning("Gemini TLS 证书验证失败，未开始处理商品。")
                 raise GeminiPermanentTlsError() from None
             except Exception as exc:
-                if classify_network_error(exc) is RetryKind.PERMANENT_TLS:
+                kind = classify_network_error(exc)
+                if kind is RetryKind.PERMANENT_TLS:
                     logger.warning("Gemini TLS 证书验证失败，未开始处理商品。")
                     raise GeminiPermanentTlsError() from None
-                if isinstance(exc, TimeoutError):
-                    logger.warning("Gemini 页面未准备完成，未开始处理商品。")
-                    raise GeminiPageNotReadyError() from None
-                raise
+                if kind is RetryKind.AUTH:
+                    logger.warning("Gemini 身份验证或权限不足，未开始处理商品。")
+                    raise GeminiAuthenticationError() from None
+                if kind is RetryKind.NOT_FOUND:
+                    logger.warning("Gemini 页面或资源不存在，未开始处理商品。")
+                    raise GeminiResourceNotFoundError() from None
+                logger.warning("Gemini 页面未准备完成，未开始处理商品。")
+                raise GeminiPageNotReadyError() from None
 
             if status.state is GeminiPageState.WAITING_LOGIN:
                 logger.warning("Gemini 未登录，未开始处理商品。")

@@ -216,6 +216,7 @@ def inspect_gemini_page(page: Any) -> LoginStatus:
     payload = raw_payload if isinstance(raw_payload, Mapping) else {}
     url_parts = urlsplit(_sanitized_url(str(getattr(page, "url", ""))))
     hostname = (url_parts.hostname or "").lower()
+    is_gemini_host = hostname == "gemini.google.com" or hostname.endswith(".gemini.google.com")
     path_segments = {segment.lower() for segment in url_parts.path.split("/") if segment}
     is_account_or_login_url = (
         hostname in {"accounts.google.com", "myaccount.google.com", "account.google.com"}
@@ -230,7 +231,7 @@ def inspect_gemini_page(page: Any) -> LoginStatus:
             payload,
             "Sign in to Gemini in the browser window.",
         )
-    if bool(payload.get("has_editor")):
+    if is_gemini_host and bool(payload.get("has_editor")):
         return _status_for_page(
             GeminiPageState.READY,
             True,
@@ -267,7 +268,9 @@ def wait_for_gemini_ready(
     while True:
         status = inspect_gemini_page(page)
         _log_status(logger, status)
-        if status.state in (GeminiPageState.READY, GeminiPageState.WAITING_LOGIN, GeminiPageState.ERROR):
+        if status.state is GeminiPageState.ERROR:
+            raise TimeoutError("Gemini page inspection temporarily unavailable.") from None
+        if status.state in (GeminiPageState.READY, GeminiPageState.WAITING_LOGIN):
             return status
         if time.monotonic() >= deadline:
             raise TimeoutError("Gemini did not become ready before the configured timeout.")

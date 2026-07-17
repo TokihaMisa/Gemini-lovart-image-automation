@@ -393,7 +393,14 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
     def test_temporary_chat_failure_stops_each_attempt_before_preamble(self):
         class Bot(GeminiBot):
             def __init__(self):
-                page = type("Page", (), {"goto": lambda _self, *_args, **_kwargs: None, "wait_for_timeout": lambda _self, _ms: None})()
+                page = type("Page", (), {
+                    "url": "https://gemini.google.com/app",
+                    "goto": lambda _self, *_args, **_kwargs: None,
+                    "evaluate": lambda _self, _script: {
+                        "language": "en", "has_editor": True, "has_login_prompt": False,
+                        "has_loading": False, "controls": [],
+                    },
+                })()
                 super().__init__(page, {"gemini": {}, "browser": {"product_attempts": 2}}, FakeFormalLogger())
                 self.chats = 0
 
@@ -424,7 +431,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 return 0
 
             def is_visible(self, timeout=None):
-                return any(term in self.selector for term in ("Chat temporal", "Rápido", "Pensamiento ampliado", "Adjuntar"))
+                return any(term in self.selector for term in ("Chat temporal", "Rápido", "Pensamiento extendido", "Subir"))
 
             def click(self, **_kwargs):
                 self.page.clicked.append(self.selector)
@@ -457,8 +464,8 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         self.assertTrue(page.uploaded)
         self.assertTrue(any("Chat temporal" in item for item in page.clicked))
         self.assertTrue(any("Rápido" in item for item in page.clicked))
-        self.assertTrue(any("Pensamiento ampliado" in item for item in page.clicked))
-        self.assertTrue(any("Adjuntar" in item for item in page.clicked))
+        self.assertTrue(any("Pensamiento extendido" in item for item in page.clicked))
+        self.assertTrue(any("Subir" in item for item in page.clicked))
 
     def test_thinking_ready_retries_once_and_error_is_not_page_structure(self):
         class Bot(GeminiBot):
@@ -560,16 +567,23 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
     def test_spanish_mode_and_upload_terms_are_recognized(self):
         self.assertTrue(matches_ui_term("Rápido", MODE_TERMS))
         self.assertTrue(matches_ui_term("Pensamiento ampliado", EXTENDED_THINKING_TERMS))
+        self.assertTrue(matches_ui_term("Pensamiento extendido", EXTENDED_THINKING_TERMS))
         self.assertTrue(matches_ui_term("Adjuntar archivos", UPLOAD_TERMS))
+        self.assertTrue(matches_ui_term("Subir", UPLOAD_TERMS))
         self.assertTrue(matches_ui_term("Chat temporal", TEMPORARY_CHAT_TERMS))
 
     def test_product_prompt_is_not_sent_when_upload_never_completes(self):
         class NullPage:
+            url = "https://gemini.google.com/app"
+
             def goto(self, _url, **_kwargs):
                 pass
 
-            def wait_for_timeout(self, _milliseconds):
-                pass
+            def evaluate(self, _script):
+                return {
+                    "language": "en", "has_editor": True, "has_login_prompt": False,
+                    "has_loading": False, "controls": [],
+                }
 
         class Logger:
             def info(self, _message):
@@ -653,6 +667,59 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         with self.assertRaises(GeminiPageStructureError), patch("network_retry.time.sleep"):
             bot.generate_prompt("产品", "Spanish", "卖点", [])
         self.assertEqual(bot.attempts, 2)
+
+    def test_product_navigation_uses_shared_five_attempt_recovery_before_one_chat(self):
+        class Page:
+            url = "https://gemini.google.com/app"
+
+            def __init__(self):
+                self.goto_calls = 0
+
+            def goto(self, _url, **_kwargs):
+                self.goto_calls += 1
+                if self.goto_calls < 5:
+                    raise RuntimeError("net::ERR_CONNECTION_RESET private@example.com")
+
+            def evaluate(self, _script):
+                return {
+                    "language": "es", "has_editor": True, "has_login_prompt": False,
+                    "has_loading": False, "controls": [],
+                }
+
+        class Bot(GeminiBot):
+            def __init__(self, page):
+                super().__init__(page, {
+                    "gemini": {"thinking_mode": False},
+                    "browser": {"network_attempts": 5, "retry_delays": [0, 0, 0, 0]},
+                }, FakeFormalLogger())
+                self.temporary_chats = 0
+
+            def _start_temporary_chat(self):
+                self.temporary_chats += 1
+                return True
+
+            def _response_count(self):
+                return 0
+
+            def _send_message(self, _text):
+                pass
+
+            def _wait_for_reply(self, **_kwargs):
+                pass
+
+            def _get_last_response(self):
+                return "x" * 300
+
+        page = Page()
+        bot = Bot(page)
+        with patch("network_retry.time.sleep"):
+            result = bot._generate_prompt_once(
+                "产品", "Spanish", "卖点", [], "SKU-1", ""
+            )
+
+        self.assertEqual(result, "x" * 300)
+        self.assertEqual(page.goto_calls, 5)
+        self.assertEqual(bot.temporary_chats, 1)
 
     def test_login_tls_auth_and_verified_upload_errors_are_not_retried(self):
         for error, expected_type in (
@@ -812,6 +879,92 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             "private certificate detail", "".join(traceback.format_exception(raised.exception))
         )
         process.assert_not_called()
+
+    def test_formal_browser_flow_maps_all_raw_browser_failures_without_leakage(self):
+        cases = (
+            (RuntimeError("net::ERR_CONNECTION_RESET secret@example.com"), GeminiPageNotReadyError),
+            (RuntimeError("net::ERR_BLOCKED_BY_RESPONSE secret@example.com"), GeminiPageNotReadyError),
+            (RuntimeError("net::ERR_ACCESS_DENIED secret@example.com"), GeminiAuthenticationError),
+            (RuntimeError("net::ERR_FILE_NOT_FOUND C:\\Users\\private"), GeminiResourceNotFoundError),
+            (RuntimeError("net::ERR_CERT_REVOKED secret@example.com"), GeminiPermanentTlsError),
+        )
+
+        class Logger(FakeFormalLogger):
+            def __init__(self):
+                self.messages = []
+
+            def warning(self, message):
+                self.messages.append(message)
+
+        for error, expected_type in cases:
+            with self.subTest(marker=str(error).split()[0]), tempfile.TemporaryDirectory() as tmp:
+                config_path = Path(tmp) / "config.yaml"
+                profile = Path(tmp) / "profile"
+                config_path.write_text(
+                    f"browser:\n  user_data_dir: {profile}\n", encoding="utf-8"
+                )
+                config = {
+                    "browser": {"user_data_dir": str(profile)},
+                    "gemini": {"base_url": "https://gemini.google.com"},
+                }
+                logger = Logger()
+                context = FakeFormalContext()
+                with patch("main.sync_playwright", return_value=FakeFormalPlaywrightManager(context)), patch(
+                    "main.build_browser_launch_options", return_value={}
+                ), patch("main._resolve_browser_executable_for_run", return_value=None), patch(
+                    "main.navigate_gemini_with_retry", side_effect=error
+                ), patch("main._process_products") as process:
+                    with self.assertRaises(expected_type) as raised:
+                        main._run_browser_flow(
+                            config, [object()], object(), logger, Path(tmp) / "runs",
+                            wait_for_ready=False, config_path=config_path,
+                        )
+
+                trace = "".join(traceback.format_exception(raised.exception))
+                self.assertNotIn("secret@example.com", str(raised.exception))
+                self.assertNotIn("secret@example.com", trace)
+                self.assertNotIn("C:\\Users\\private", trace)
+                self.assertNotIn("secret@example.com", " ".join(logger.messages))
+                process.assert_not_called()
+
+    def test_terminal_product_error_surfaces_only_sanitized_diagnostic_location(self):
+        sentinel = "net::ERR_CONNECTION_RESET secret@example.com C:\\Users\\private\\upload.png"
+
+        class Logger(FakeFormalLogger):
+            def __init__(self):
+                self.messages = []
+
+            def info(self, message):
+                self.messages.append(message)
+
+            def warning(self, message):
+                self.messages.append(message)
+
+        class Bot(GeminiBot):
+            def _generate_prompt_once(self, *_args, **_kwargs):
+                raise RuntimeError(sentinel)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = Logger()
+            bot = Bot(
+                object(),
+                {"gemini": {}, "browser": {"product_attempts": 1}},
+                logger,
+                run_dir=Path(tmp) / "runs" / "run-private",
+            )
+            with self.assertRaises(GeminiPageNotReadyError) as raised:
+                bot.generate_prompt("产品", "Spanish", "卖点", [], product_id="SKU/1")
+
+            message = str(raised.exception)
+            logs = " ".join(logger.messages)
+            self.assertIn("browser-debug/SKU_1/", message)
+            self.assertIn(".json", message)
+            self.assertIn("browser-debug/SKU_1/", logs)
+            self.assertNotIn(str(Path(tmp)), message)
+            self.assertNotIn(str(Path(tmp)), logs)
+            self.assertNotIn(sentinel, message)
+            self.assertNotIn(sentinel, logs)
+            self.assertNotIn(sentinel, "".join(traceback.format_exception(raised.exception)))
 
     @patch("main._process_products", return_value=(1, 0, 0, 0))
     @patch("main.navigate_gemini_with_retry")
@@ -1018,11 +1171,16 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
 
     def test_gemini_browser_flow_uses_temporary_chat_and_waits_in_order(self):
         class FakePage:
-            def goto(self, url, wait_until):
+            url = "https://gemini.google.com/app"
+
+            def goto(self, url, **_kwargs):
                 events.append("goto")
 
-            def wait_for_timeout(self, ms):
-                events.append(f"page_wait:{ms}")
+            def evaluate(self, _script):
+                return {
+                    "language": "en", "has_editor": True, "has_login_prompt": False,
+                    "has_loading": False, "controls": [],
+                }
 
         class FakeLogger:
             def info(self, message):
@@ -1070,10 +1228,9 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 os.chdir(cwd)
 
         self.assertEqual(
-            events[:9],
+            events[:8],
             [
                 "goto",
-                "page_wait:4000",
                 "temporary_chat",
                 "thinking_mode",
                 "response_count",
@@ -1083,8 +1240,8 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 "response_count",
             ],
         )
-        self.assertEqual(events[9], "send:product_prompt")
-        self.assertEqual(events[10], "wait_reply:True:1")
+        self.assertEqual(events[8], "send:product_prompt")
+        self.assertEqual(events[9], "wait_reply:True:1")
 
     def test_gemini_upload_waits_for_completion_after_setting_files(self):
         class FakeLocator:
