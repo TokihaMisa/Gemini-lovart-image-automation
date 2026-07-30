@@ -1,7 +1,7 @@
 {
   "version": "1.3.1",
   "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.1/update.zip",
-  "changelog": "强化 OTA 更新校验、弱网重试与失败回滚。v1.2/v1.3.0 首次自动更新前，请确保软件目录完整路径不含空格；如有空格，请先移动到 C:\\Lovart_Auto。",
+  "changelog": "强化 OTA 更新校验、弱网重试与失败回滚。v1.2/v1.3.0 首次自动更新前，如软件目录完整路径包含 &、%、^ 等命令行特殊字符，请先移动到 C:\\Lovart_Auto 后再更新。",
   "sha256": "31438a007463e763dab9820e492a6c2b20a8542977393092e597d17d1f211045",
   "size": 129464657
 }
