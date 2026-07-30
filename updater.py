@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -32,10 +33,12 @@ _WINDOWS_RESERVED_NAMES = frozenset(
     + tuple(f"lpt{number}" for number in range(1, 10))
 )
 _MAX_MANIFEST_BYTES = 64 * 1024
-_MAX_ZIP_ENTRIES = 20_000
-_MAX_ZIP_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
-_MAX_SINGLE_ENTRY_BYTES = 2 * 1024 * 1024 * 1024
-_MAX_COMPRESSION_RATIO = 1_000
+_MAX_ZIP_ENTRIES = 8_192
+_MAX_ZIP_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_SINGLE_ENTRY_BYTES = 1024 * 1024 * 1024
+_MAX_ENTRY_COMPRESSION_RATIO = 500
+_MAX_OVERALL_COMPRESSION_RATIO = 100
+_OVERALL_RATIO_MIN_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
 _ALLOWED_ROOT_FILES = frozenset(("Lovart_Auto.exe", "config.example.yaml", ".env.example"))
 _REQUIRED_ARCHIVE_FILES = frozenset(
     (
@@ -122,6 +125,17 @@ def _safe_network_guidance(exc: BaseException, action: str) -> str:
     return f"{action}失败，请稍后重试。"
 
 
+def _require_https_response(response, action: str) -> None:
+    geturl = getattr(response, "geturl", None)
+    final_url = geturl() if callable(geturl) else None
+    if (
+        not isinstance(final_url, str)
+        or urlsplit(final_url).scheme.lower() != "https"
+        or not urlsplit(final_url).netloc
+    ):
+        raise UpdateError(f"{action}发生不安全的 HTTPS 降级，已停止操作。")
+
+
 def check_update_details(
     *,
     opener=None,
@@ -144,6 +158,7 @@ def check_update_details(
 
     def fetch_manifest():
         with opener(request, 10) as response:
+            _require_https_response(response, "更新信息请求")
             raw = response.read(_MAX_MANIFEST_BYTES + 1)
         if len(raw) > _MAX_MANIFEST_BYTES:
             raise UpdateError("更新信息过大，已停止检查。")
@@ -238,6 +253,7 @@ def _download_verified_archive(
         digest = hashlib.sha256()
         downloaded = 0
         with opener(request, 30) as response, archive_part.open("xb") as output:
+            _require_https_response(response, "更新包下载")
             while True:
                 block = response.read(1024 * 1024)
                 if not block:
@@ -251,7 +267,7 @@ def _download_verified_archive(
                     percent = min(100, int(downloaded * 100 / expected_size))
                     log(f"正在下载更新包… {percent}%")
         if downloaded != expected_size:
-            raise UpdateError("更新包大小与发布信息不一致，已停止安装。")
+            raise http.client.IncompleteRead(b"", expected_size - downloaded)
         if digest.hexdigest().lower() != expected_sha256:
             raise UpdateError("更新包完整性校验失败，已停止安装。")
         archive_part.replace(archive_path)
@@ -285,9 +301,10 @@ def _is_link_or_reparse(info: zipfile.ZipInfo) -> bool:
 
 def _validate_zip_members(archive: zipfile.ZipFile) -> list[tuple[zipfile.ZipInfo, str]]:
     infos = archive.infolist()
-    if not infos or len(infos) > _MAX_ZIP_ENTRIES:
+    if not infos or len(infos) >= _MAX_ZIP_ENTRIES:
         raise UpdateError("更新包文件数量异常，已停止安装。")
     total_size = 0
+    total_compressed_size = 0
     seen: set[str] = set()
     present: set[str] = set()
     validated: list[tuple[zipfile.ZipInfo, str]] = []
@@ -306,17 +323,29 @@ def _validate_zip_members(archive: zipfile.ZipFile) -> list[tuple[zipfile.ZipInf
             pass
         elif normalized.rstrip("/") not in _ALLOWED_ROOT_FILES:
             raise UpdateError("更新包包含未批准的顶层内容，已停止安装。")
-        if info.file_size < 0 or info.file_size > _MAX_SINGLE_ENTRY_BYTES:
+        if info.file_size < 0 or info.file_size >= _MAX_SINGLE_ENTRY_BYTES:
             raise UpdateError("更新包中的文件大小异常，已停止安装。")
         total_size += info.file_size
-        if total_size > _MAX_ZIP_UNCOMPRESSED_BYTES:
+        total_compressed_size += max(0, info.compress_size)
+        if total_size >= _MAX_ZIP_UNCOMPRESSED_BYTES:
             raise UpdateError("更新包解压后体积异常，已停止安装。")
         if (
             info.file_size > 1024 * 1024
-            and info.compress_size > 0
-            and info.file_size / info.compress_size > _MAX_COMPRESSION_RATIO
+            and (
+                info.compress_size <= 0
+                or info.file_size / info.compress_size > _MAX_ENTRY_COMPRESSION_RATIO
+            )
         ):
             raise UpdateError("更新包压缩比例异常，已停止安装。")
+        if (
+            total_size >= _OVERALL_RATIO_MIN_UNCOMPRESSED_BYTES
+            and (
+                total_compressed_size <= 0
+                or total_size / total_compressed_size
+                > _MAX_OVERALL_COMPRESSION_RATIO
+            )
+        ):
+            raise UpdateError("更新包总体压缩比例异常，已停止安装。")
         if not info.is_dir():
             present.add(normalized)
         validated.append((info, normalized))
@@ -413,9 +442,25 @@ def prepare_update(
 
 def _batch_path(path: Path) -> str:
     value = str(path.resolve())
-    if any(character in value for character in ('"', "\r", "\n")):
+    if any(character in value for character in ('"', "%", "!", "^", "\r", "\n")):
         raise UpdateError("更新安装路径无效，已停止安装。")
     return value
+
+
+_INSTALLER_FAILURE_STEPS = frozenset(
+    (
+        "backup_exe",
+        "backup_internal",
+        "backup_config",
+        "backup_env",
+        "install_exe",
+        "install_internal",
+        "copy_config",
+        "copy_env",
+        "smoke",
+        "commit",
+    )
+)
 
 
 def build_windows_installer_script(
@@ -425,119 +470,463 @@ def build_windows_installer_script(
     staging_dir: Path,
     current_pid: int,
     owner_token: str,
+    failure_step: str | None = None,
 ) -> str:
     """Build a transactional installer bound to this staging area's owner token."""
 
-    if current_pid <= 0 or not _OWNER_TOKEN_RE.fullmatch(owner_token):
+    if (
+        current_pid <= 0
+        or not _OWNER_TOKEN_RE.fullmatch(owner_token)
+        or (failure_step is not None and failure_step not in _INSTALLER_FAILURE_STEPS)
+    ):
         raise UpdateError("更新安装参数无效，已停止安装。")
     target = _batch_path(app_dir)
     payload = _batch_path(payload_dir)
     staging = _batch_path(staging_dir)
+    update_root = _batch_path(app_dir / ".lovart-update")
+    injected_failure = failure_step or ""
     return f"""@echo off
-setlocal EnableExtensions DisableDelayedExpansion
+chcp 65001 >nul
+setlocal EnableExtensions EnableDelayedExpansion
 set "TARGET={target}"
 set "PAYLOAD={payload}"
 set "STAGING={staging}"
-set "BACKUP_EXE=%TARGET%\\Lovart_Auto.exe.bak-{owner_token}"
-set "BACKUP_INTERNAL=%TARGET%\\_internal.bak-{owner_token}"
-set "EXE_BACKED_UP=0"
-set "INTERNAL_BACKED_UP=0"
-set "NEW_EXE_INSTALLED=0"
-set "NEW_INTERNAL_INSTALLED=0"
+set "UPDATE_ROOT={update_root}"
+set "TOKEN={owner_token}"
+set "FAILURE_STEP={injected_failure}"
+set "OWNER_MARKER=!UPDATE_ROOT!\\install-{owner_token}.owner"
+set "STARTED_MARKER=!UPDATE_ROOT!\\install-{owner_token}.started"
+set "PENDING_MARKER=!UPDATE_ROOT!\\transaction-{owner_token}.pending"
+set "COMMIT_MARKER=!UPDATE_ROOT!\\transaction-{owner_token}.commit"
+set "LOG_FILE=!UPDATE_ROOT!\\last-install.log"
+set "SCRIPT_PATH=%~f0"
+
+if not exist "!OWNER_MARKER!" exit /b 10
+set "OWNER_VALUE="
+set /p OWNER_VALUE=<"!OWNER_MARKER!"
+if /I not "!OWNER_VALUE!"=="!TOKEN!" exit /b 11
+>"!STARTED_MARKER!" echo(!TOKEN!
 
 powershell.exe -NoProfile -NonInteractive -Command "while (Get-Process -Id {current_pid} -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 500 }}"
-if errorlevel 1 goto rollback
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto abort
 
-if exist "%BACKUP_EXE%" goto rollback
-if exist "%BACKUP_INTERNAL%" goto rollback
-if not exist "%PAYLOAD%\\Lovart_Auto.exe" goto rollback
-if not exist "%PAYLOAD%\\_internal\\python314.dll" goto rollback
-if not exist "%PAYLOAD%\\_internal\\VCRUNTIME140.dll" goto rollback
-if not exist "%PAYLOAD%\\_internal\\VCRUNTIME140_1.dll" goto rollback
-if not exist "%TARGET%\\Lovart_Auto.exe" goto rollback
-if not exist "%TARGET%\\_internal" goto rollback
+call :recover_stale
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto recovery_failed
 
-ren "%TARGET%\\Lovart_Auto.exe" "Lovart_Auto.exe.bak-{owner_token}"
-if errorlevel 1 goto rollback
-set "EXE_BACKED_UP=1"
-ren "%TARGET%\\_internal" "_internal.bak-{owner_token}"
-if errorlevel 1 goto rollback
-set "INTERNAL_BACKED_UP=1"
+if not exist "!PAYLOAD!\\Lovart_Auto.exe" goto abort
+if not exist "!PAYLOAD!\\_internal\\python314.dll" goto abort
+if not exist "!PAYLOAD!\\_internal\\VCRUNTIME140.dll" goto abort
+if not exist "!PAYLOAD!\\_internal\\VCRUNTIME140_1.dll" goto abort
+if not exist "!TARGET!\\Lovart_Auto.exe" goto abort
+if not exist "!TARGET!\\_internal" goto abort
 
-move /Y "%PAYLOAD%\\Lovart_Auto.exe" "%TARGET%\\Lovart_Auto.exe" >nul
-if errorlevel 1 goto rollback
-set "NEW_EXE_INSTALLED=1"
-move /Y "%PAYLOAD%\\_internal" "%TARGET%\\_internal" >nul
-if errorlevel 1 goto rollback
-set "NEW_INTERNAL_INSTALLED=1"
+>"!PENDING_MARKER!" echo(!TOKEN!
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto abort
 
-if not exist "%TARGET%\\config.example.yaml" if exist "%PAYLOAD%\\config.example.yaml" (
-  copy /Y "%PAYLOAD%\\config.example.yaml" "%TARGET%\\config.example.yaml" >nul
-  if errorlevel 1 goto rollback
+call :inject backup_exe
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto rollback
+ren "!TARGET!\\Lovart_Auto.exe" "Lovart_Auto.exe.bak-{owner_token}"
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto rollback
+
+call :inject backup_internal
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto rollback
+ren "!TARGET!\\_internal" "_internal.bak-{owner_token}"
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto rollback
+
+if exist "!PAYLOAD!\\config.example.yaml" (
+  call :inject backup_config
+  set "STEP_RC=!ERRORLEVEL!"
+  if not "!STEP_RC!"=="0" goto rollback
+  if exist "!TARGET!\\config.example.yaml" (
+    ren "!TARGET!\\config.example.yaml" "config.example.yaml.bak-{owner_token}"
+    set "STEP_RC=!ERRORLEVEL!"
+    if not "!STEP_RC!"=="0" goto rollback
+  ) else (
+    >"!UPDATE_ROOT!\\config.example.yaml.absent-{owner_token}" echo absent
+    set "STEP_RC=!ERRORLEVEL!"
+    if not "!STEP_RC!"=="0" goto rollback
+  )
 )
-if not exist "%TARGET%\\.env.example" if exist "%PAYLOAD%\\.env.example" (
-  copy /Y "%PAYLOAD%\\.env.example" "%TARGET%\\.env.example" >nul
-  if errorlevel 1 goto rollback
+if exist "!PAYLOAD!\\.env.example" (
+  call :inject backup_env
+  set "STEP_RC=!ERRORLEVEL!"
+  if not "!STEP_RC!"=="0" goto rollback
+  if exist "!TARGET!\\.env.example" (
+    ren "!TARGET!\\.env.example" ".env.example.bak-{owner_token}"
+    set "STEP_RC=!ERRORLEVEL!"
+    if not "!STEP_RC!"=="0" goto rollback
+  ) else (
+    >"!UPDATE_ROOT!\\.env.example.absent-{owner_token}" echo absent
+    set "STEP_RC=!ERRORLEVEL!"
+    if not "!STEP_RC!"=="0" goto rollback
+  )
 )
 
-"%TARGET%\\Lovart_Auto.exe" --run-main --help >nul 2>&1
-if errorlevel 1 goto rollback
+call :inject install_exe
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto rollback
+move /Y "!PAYLOAD!\\Lovart_Auto.exe" "!TARGET!\\Lovart_Auto.exe" >nul
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto rollback
 
-rmdir /s /q "%BACKUP_INTERNAL%"
-if errorlevel 1 goto commit_failed
-del /f /q "%BACKUP_EXE%"
-if errorlevel 1 goto commit_failed
-start "" "%TARGET%\\Lovart_Auto.exe"
-if errorlevel 1 goto commit_failed
-exit /b 0
+call :inject install_internal
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto rollback
+move /Y "!PAYLOAD!\\_internal" "!TARGET!\\_internal" >nul
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto rollback
+
+if exist "!PAYLOAD!\\config.example.yaml" (
+  call :inject copy_config
+  set "STEP_RC=!ERRORLEVEL!"
+  if not "!STEP_RC!"=="0" goto rollback
+  copy /Y "!PAYLOAD!\\config.example.yaml" "!TARGET!\\config.example.yaml" >nul
+  set "STEP_RC=!ERRORLEVEL!"
+  if not "!STEP_RC!"=="0" goto rollback
+)
+if exist "!PAYLOAD!\\.env.example" (
+  call :inject copy_env
+  set "STEP_RC=!ERRORLEVEL!"
+  if not "!STEP_RC!"=="0" goto rollback
+  copy /Y "!PAYLOAD!\\.env.example" "!TARGET!\\.env.example" >nul
+  set "STEP_RC=!ERRORLEVEL!"
+  if not "!STEP_RC!"=="0" goto rollback
+)
+
+call :inject smoke
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto rollback
+"!TARGET!\\Lovart_Auto.exe" --run-main --help >nul 2>&1
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto rollback
+
+call :inject commit
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto rollback
+move /Y "!PENDING_MARKER!" "!COMMIT_MARKER!" >nul
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto rollback
+
+call :cleanup_committed "!TOKEN!"
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto committed_failure
+
+start "" /b "!TARGET!\\Lovart_Auto.exe"
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto launch_failed
+
+>"!LOG_FILE!" echo success
+call :cleanup_current
+set "CLEANUP_RC=!ERRORLEVEL!"
+if not "!CLEANUP_RC!"=="0" goto cleanup_failed
+goto finish_success
 
 :rollback
-if "%NEW_INTERNAL_INSTALLED%"=="1" (
-  rmdir /s /q "%TARGET%\\_internal"
-  if errorlevel 1 goto rollback_failed
+call :rollback_token "!TOKEN!"
+set "ROLLBACK_RC=!ERRORLEVEL!"
+if not "!ROLLBACK_RC!"=="0" goto rollback_failed
+call :cleanup_current
+set "CLEANUP_RC=!ERRORLEVEL!"
+if not "!CLEANUP_RC!"=="0" goto rollback_cleanup_failed
+if exist "!PENDING_MARKER!" (
+  del /f /q "!PENDING_MARKER!" >nul 2>&1
+  if exist "!PENDING_MARKER!" goto rollback_cleanup_failed
 )
-if "%NEW_EXE_INSTALLED%"=="1" (
-  del /f /q "%TARGET%\\Lovart_Auto.exe"
-  if errorlevel 1 goto rollback_failed
-)
-if "%INTERNAL_BACKED_UP%"=="1" (
-  ren "%BACKUP_INTERNAL%" "_internal"
-  if errorlevel 1 goto rollback_failed
-)
-if "%EXE_BACKED_UP%"=="1" (
-  ren "%BACKUP_EXE%" "Lovart_Auto.exe"
-  if errorlevel 1 goto rollback_failed
-)
-exit /b 1
+>"!LOG_FILE!" echo rolled_back
+goto finish_failure
+
+:abort
+>"!LOG_FILE!" echo rejected
+call :cleanup_current
+goto finish_failure
+
+:recovery_failed
+>"!LOG_FILE!" echo recovery_failed
+call :cleanup_current
+goto finish_failure
 
 :rollback_failed
-exit /b 2
+>"!LOG_FILE!" echo rollback_failed
+call :cleanup_current
+goto finish_rollback_failed
 
-:commit_failed
-exit /b 3
+:rollback_cleanup_failed
+>"!LOG_FILE!" echo rollback_cleanup_failed
+goto finish_rollback_failed
+
+:committed_failure
+>"!LOG_FILE!" echo commit_cleanup_pending
+call :cleanup_current
+goto finish_rollback_failed
+
+:launch_failed
+>"!LOG_FILE!" echo launch_failed
+call :cleanup_current
+goto finish_rollback_failed
+
+:cleanup_failed
+>"!LOG_FILE!" echo cleanup_failed
+goto finish_rollback_failed
+
+:recover_stale
+set "STALE_TOKEN="
+set "STALE_MODE="
+for %%F in ("!UPDATE_ROOT!\\transaction-*.pending") do if exist "%%~fF" (
+  set "CANDIDATE=%%~nF"
+  set "CANDIDATE=!CANDIDATE:transaction-=!"
+  if defined STALE_TOKEN exit /b 21
+  set "STALE_TOKEN=!CANDIDATE!"
+  set "STALE_MODE=pending"
+)
+for %%F in ("!UPDATE_ROOT!\\transaction-*.commit") do if exist "%%~fF" (
+  set "CANDIDATE=%%~nF"
+  set "CANDIDATE=!CANDIDATE:transaction-=!"
+  if defined STALE_TOKEN exit /b 21
+  set "STALE_TOKEN=!CANDIDATE!"
+  set "STALE_MODE=commit"
+)
+if defined STALE_TOKEN goto recover_found
+set "LEGACY_EXE_TOKEN="
+set "LEGACY_INTERNAL_TOKEN="
+set /a LEGACY_EXE_COUNT=0
+set /a LEGACY_INTERNAL_COUNT=0
+for %%F in ("!TARGET!\\Lovart_Auto.exe.bak-*") do if exist "%%~fF" (
+  set /a LEGACY_EXE_COUNT+=1
+  set "CANDIDATE=%%~nxF"
+  set "CANDIDATE=!CANDIDATE:Lovart_Auto.exe.bak-=!"
+  set "LEGACY_EXE_TOKEN=!CANDIDATE!"
+)
+for /d %%F in ("!TARGET!\\_internal.bak-*") do if exist "%%~fF" (
+  set /a LEGACY_INTERNAL_COUNT+=1
+  set "CANDIDATE=%%~nxF"
+  set "CANDIDATE=!CANDIDATE:_internal.bak-=!"
+  set "LEGACY_INTERNAL_TOKEN=!CANDIDATE!"
+)
+if !LEGACY_EXE_COUNT! GTR 1 exit /b 22
+if !LEGACY_INTERNAL_COUNT! GTR 1 exit /b 22
+if defined LEGACY_EXE_TOKEN if not defined LEGACY_INTERNAL_TOKEN exit /b 23
+if defined LEGACY_INTERNAL_TOKEN if not defined LEGACY_EXE_TOKEN exit /b 23
+if defined LEGACY_EXE_TOKEN if /I not "!LEGACY_EXE_TOKEN!"=="!LEGACY_INTERNAL_TOKEN!" exit /b 23
+if not defined LEGACY_EXE_TOKEN exit /b 0
+set "STALE_TOKEN=!LEGACY_EXE_TOKEN!"
+set "STALE_MODE=legacy"
+>"!UPDATE_ROOT!\\transaction-!STALE_TOKEN!.pending" echo(!STALE_TOKEN!
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" exit /b !STEP_RC!
+
+:recover_found
+if /I "!STALE_MODE!"=="commit" (
+  call :cleanup_committed "!STALE_TOKEN!"
+) else (
+  call :rollback_token "!STALE_TOKEN!"
+)
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" exit /b !STEP_RC!
+call :cleanup_stale "!STALE_TOKEN!"
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" exit /b !STEP_RC!
+if /I not "!STALE_MODE!"=="commit" (
+  set "STALE_PENDING=!UPDATE_ROOT!\\transaction-!STALE_TOKEN!.pending"
+  if exist "!STALE_PENDING!" (
+    del /f /q "!STALE_PENDING!" >nul 2>&1
+    if exist "!STALE_PENDING!" exit /b 24
+  )
+)
+>"!LOG_FILE!" echo recovered
+exit /b 0
+
+:rollback_token
+set "R_TOKEN=%~1"
+set "R_BACKUP_EXE=!TARGET!\\Lovart_Auto.exe.bak-!R_TOKEN!"
+set "R_BACKUP_INTERNAL=!TARGET!\\_internal.bak-!R_TOKEN!"
+set "R_BACKUP_CONFIG=!TARGET!\\config.example.yaml.bak-!R_TOKEN!"
+set "R_BACKUP_ENV=!TARGET!\\.env.example.bak-!R_TOKEN!"
+set "R_ABSENT_CONFIG=!UPDATE_ROOT!\\config.example.yaml.absent-!R_TOKEN!"
+set "R_ABSENT_ENV=!UPDATE_ROOT!\\.env.example.absent-!R_TOKEN!"
+if exist "!R_BACKUP_INTERNAL!\\" if not exist "!R_BACKUP_EXE!" exit /b 41
+if exist "!R_BACKUP_INTERNAL!\\" (
+  if exist "!TARGET!\\_internal" (
+    rmdir /s /q "!TARGET!\\_internal"
+    if exist "!TARGET!\\_internal" exit /b 42
+  )
+  ren "!R_BACKUP_INTERNAL!" "_internal"
+  if exist "!R_BACKUP_INTERNAL!\\" exit /b 43
+  if not exist "!TARGET!\\_internal\\" exit /b 43
+)
+if exist "!R_BACKUP_EXE!" (
+  if exist "!TARGET!\\Lovart_Auto.exe" (
+    del /f /q "!TARGET!\\Lovart_Auto.exe" >nul 2>&1
+    if exist "!TARGET!\\Lovart_Auto.exe" exit /b 44
+  )
+  ren "!R_BACKUP_EXE!" "Lovart_Auto.exe"
+  if exist "!R_BACKUP_EXE!" exit /b 45
+  if not exist "!TARGET!\\Lovart_Auto.exe" exit /b 45
+)
+call :restore_asset "!R_BACKUP_CONFIG!" "config.example.yaml" "!R_ABSENT_CONFIG!"
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" exit /b !STEP_RC!
+call :restore_asset "!R_BACKUP_ENV!" ".env.example" "!R_ABSENT_ENV!"
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" exit /b !STEP_RC!
+exit /b 0
+
+:restore_asset
+set "A_BACKUP=%~1"
+set "A_NAME=%~2"
+set "A_ABSENT=%~3"
+if exist "!A_BACKUP!" (
+  if exist "!TARGET!\\!A_NAME!" (
+    del /f /q "!TARGET!\\!A_NAME!" >nul 2>&1
+    if exist "!TARGET!\\!A_NAME!" exit /b 46
+  )
+  ren "!A_BACKUP!" "!A_NAME!"
+  if exist "!A_BACKUP!" exit /b 47
+  if not exist "!TARGET!\\!A_NAME!" exit /b 47
+) else if exist "!A_ABSENT!" (
+  if exist "!TARGET!\\!A_NAME!" (
+    del /f /q "!TARGET!\\!A_NAME!" >nul 2>&1
+    if exist "!TARGET!\\!A_NAME!" exit /b 48
+  )
+  del /f /q "!A_ABSENT!" >nul 2>&1
+  if exist "!A_ABSENT!" exit /b 49
+)
+exit /b 0
+
+:cleanup_committed
+set "C_TOKEN=%~1"
+if not exist "!TARGET!\\Lovart_Auto.exe" exit /b 51
+if not exist "!TARGET!\\_internal\\python314.dll" exit /b 51
+if not exist "!TARGET!\\_internal\\VCRUNTIME140.dll" exit /b 51
+if not exist "!TARGET!\\_internal\\VCRUNTIME140_1.dll" exit /b 51
+set "C_BACKUP_INTERNAL=!TARGET!\\_internal.bak-!C_TOKEN!"
+set "C_BACKUP_EXE=!TARGET!\\Lovart_Auto.exe.bak-!C_TOKEN!"
+set "C_BACKUP_CONFIG=!TARGET!\\config.example.yaml.bak-!C_TOKEN!"
+set "C_BACKUP_ENV=!TARGET!\\.env.example.bak-!C_TOKEN!"
+set "C_ABSENT_CONFIG=!UPDATE_ROOT!\\config.example.yaml.absent-!C_TOKEN!"
+set "C_ABSENT_ENV=!UPDATE_ROOT!\\.env.example.absent-!C_TOKEN!"
+set "C_COMMIT=!UPDATE_ROOT!\\transaction-!C_TOKEN!.commit"
+if exist "!C_BACKUP_INTERNAL!\\" (
+  rmdir /s /q "!C_BACKUP_INTERNAL!"
+  if exist "!C_BACKUP_INTERNAL!\\" exit /b 52
+)
+for %%F in ("!C_BACKUP_EXE!" "!C_BACKUP_CONFIG!" "!C_BACKUP_ENV!" "!C_ABSENT_CONFIG!" "!C_ABSENT_ENV!") do if exist "%%~fF" (
+  del /f /q "%%~fF" >nul 2>&1
+  if exist "%%~fF" exit /b 53
+)
+if exist "!C_COMMIT!" (
+  del /f /q "!C_COMMIT!" >nul 2>&1
+  if exist "!C_COMMIT!" exit /b 54
+)
+exit /b 0
+
+:cleanup_stale
+set "S_TOKEN=%~1"
+set "S_STAGING=!UPDATE_ROOT!\\!S_TOKEN!"
+if exist "!S_STAGING!\\" (
+  rmdir /s /q "!S_STAGING!"
+  if exist "!S_STAGING!\\" exit /b 61
+)
+for %%F in ("!UPDATE_ROOT!\\install-!S_TOKEN!.bat" "!UPDATE_ROOT!\\install-!S_TOKEN!.owner" "!UPDATE_ROOT!\\install-!S_TOKEN!.started") do if exist "%%~fF" (
+  del /f /q "%%~fF" >nul 2>&1
+  if exist "%%~fF" exit /b 62
+)
+exit /b 0
+
+:cleanup_current
+if exist "!STAGING!\\" (
+  rmdir /s /q "!STAGING!"
+  if exist "!STAGING!\\" exit /b 63
+)
+for %%F in ("!OWNER_MARKER!" "!STARTED_MARKER!") do if exist "%%~fF" (
+  del /f /q "%%~fF" >nul 2>&1
+  if exist "%%~fF" exit /b 64
+)
+exit /b 0
+
+:inject
+if /I "%~1"=="!FAILURE_STEP!" exit /b 97
+exit /b 0
+
+:finish_success
+exit /b 0
+
+:finish_failure
+exit /b 1
+
+:finish_rollback_failed
+exit /b 2
 """
 
 
-def _write_and_start_installer(prepared: PreparedUpdate, app_dir: Path) -> None:
+def _windows_installer_command(script_path: Path) -> str:
+    script = _batch_path(script_path)
+    command_processor = os.environ.get("COMSPEC", "cmd.exe")
+    if any(character in command_processor for character in ('"', "\r", "\n")):
+        raise UpdateError("系统命令解释器路径无效，已停止安装。")
+    return (
+        f'"{command_processor}" /v:on /d /s /c '
+        f'""{script}" & set "ota_rc=!errorlevel!" '
+        f'& del /f /q "{script}" & exit /b !ota_rc!"'
+    )
+
+
+def _write_and_start_installer(
+    prepared: PreparedUpdate,
+    app_dir: Path,
+    *,
+    current_pid: int | None = None,
+    start_timeout: float = 5.0,
+):
     owner_token = prepared.staging_dir.name
+    update_root = app_dir / ".lovart-update"
+    update_root.mkdir(parents=True, exist_ok=True)
+    script_path = update_root / f"install-{owner_token}.bat"
+    owner_marker = update_root / f"install-{owner_token}.owner"
+    started_marker = update_root / f"install-{owner_token}.started"
     content = build_windows_installer_script(
         app_dir=app_dir,
         payload_dir=prepared.payload_dir,
         staging_dir=prepared.staging_dir,
-        current_pid=os.getpid(),
+        current_pid=current_pid or os.getpid(),
         owner_token=owner_token,
     )
-    script_path = prepared.staging_dir / "install_update.bat"
+    owner_marker.write_text(owner_token, encoding="ascii")
     script_path.write_text(content, encoding="utf-8", newline="\r\n")
     creation_flags = 0
     if os.name == "nt":
-        creation_flags = 0x00000008 | 0x00000200
-    subprocess.Popen(
-        ["cmd.exe", "/d", "/s", "/c", str(script_path)],
+        creation_flags = 0x08000000 | 0x00000200
+    process = subprocess.Popen(
+        _windows_installer_command(script_path),
         cwd=str(app_dir),
         close_fds=True,
         creationflags=creation_flags,
     )
+    deadline = time.monotonic() + max(0.1, start_timeout)
+    while time.monotonic() < deadline:
+        if started_marker.exists():
+            try:
+                if started_marker.read_text(encoding="utf-8").strip() == owner_token:
+                    return process
+            except OSError:
+                pass
+        if process.poll() is not None:
+            break
+        time.sleep(0.02)
+    if process.poll() is None:
+        process.terminate()
+    for path in (started_marker, owner_marker, script_path):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    raise UpdateError("安全安装程序未确认接管更新，当前应用将继续运行。")
 
 
 def download_and_install_update(
@@ -558,6 +947,8 @@ def download_and_install_update(
         else:
             print(message)
 
+    prepared: PreparedUpdate | None = None
+    handoff_started = False
     try:
         emit("开始下载更新包，请保持网络连接…")
         prepared = prepare_update(
@@ -574,6 +965,7 @@ def download_and_install_update(
         if os.name != "nt":
             raise UpdateError("当前平台不支持自动安装，更新包已安全校验但未应用。")
         _write_and_start_installer(prepared, application_directory())
+        handoff_started = True
         emit("安全安装程序已启动；应用即将退出，校验成功后才会切换版本。")
         os._exit(0)
     except UpdateError as exc:
@@ -583,5 +975,14 @@ def download_and_install_update(
         emit("启动安全安装程序失败，当前版本未被修改，请稍后重试。")
         return False
     finally:
+        if prepared is not None and not handoff_started:
+            shutil.rmtree(prepared.staging_dir, ignore_errors=True)
+            update_root = application_directory() / ".lovart-update"
+            token = prepared.staging_dir.name
+            for suffix in ("bat", "owner", "started"):
+                try:
+                    (update_root / f"install-{token}.{suffix}").unlink(missing_ok=True)
+                except OSError:
+                    pass
         if output_queue is not None:
             output_queue.put(None)

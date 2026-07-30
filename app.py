@@ -37,6 +37,7 @@ if __name__ == "__main__":
                 print(f"报错详情: {err_msg}")
             print("="*50)
             traceback.print_exc()
+            sys.exit(1)
         sys.exit(0)
 
     if "--run-tkinter-dir" in sys.argv:

@@ -26,6 +26,10 @@ REQUIRED_FILES = {
 
 
 class FakeResponse(io.BytesIO):
+    def __init__(self, payload, final_url="https://downloads.example.test/resource"):
+        super().__init__(payload)
+        self.final_url = final_url
+
     def __enter__(self):
         return self
 
@@ -34,6 +38,9 @@ class FakeResponse(io.BytesIO):
 
     def info(self):
         return {"Content-Length": str(len(self.getvalue()))}
+
+    def geturl(self):
+        return self.final_url
 
 
 def make_zip(entries=None, *, corrupt_crc=False):
@@ -116,6 +123,17 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertEqual(result.status, updater.UpdateStatus.UP_TO_DATE)
         self.assertEqual(len(calls), 5)
         self.assertEqual(delays, [3, 6, 12, 20])
+
+    def test_manifest_rejects_https_to_http_redirect(self):
+        result = updater.check_update_details(
+            opener=lambda _request, _timeout: FakeResponse(
+                self.manifest(), final_url="http://mirror.example.test/version.json"
+            ),
+            sleep=lambda _delay: None,
+        )
+        self.assertEqual(result.status, updater.UpdateStatus.ERROR)
+        self.assertIn("HTTPS", result.message)
+        self.assertNotIn("mirror.example.test", result.message)
 
     def test_semantic_numeric_order_never_offers_downgrade(self):
         for latest in ("1.3.0", "1.2.99", "1.3.1"):
@@ -342,6 +360,70 @@ class DownloadAndInstallTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertEqual(delays, [0, 0])
 
+    def test_clean_short_read_retries_from_empty_part(self):
+        calls, delays = [], []
+
+        def opener(_request, _timeout):
+            calls.append(1)
+            payload = self.archive[:-7] if len(calls) == 1 else self.archive
+            return FakeResponse(payload)
+
+        prepared = updater.prepare_update(
+            "https://downloads.example.test/update.zip",
+            hashlib.sha256(self.archive).hexdigest(),
+            len(self.archive),
+            app_dir=self.app_dir,
+            opener=opener,
+            policy=RetryPolicy(network_attempts=2, retry_delays=(0,)),
+            sleep=delays.append,
+        )
+
+        self.assertTrue(prepared.archive_path.exists())
+        self.assertEqual(calls, [1, 1])
+        self.assertEqual(delays, [0])
+
+    def test_explicit_oversize_and_hash_mismatch_do_not_retry(self):
+        cases = (
+            (self.archive + b"x", hashlib.sha256(self.archive).hexdigest(), len(self.archive)),
+            (self.archive, "0" * 64, len(self.archive)),
+        )
+        for index, (payload, digest, size) in enumerate(cases):
+            calls = []
+            app_dir = self.app_dir / f"permanent-{index}"
+            app_dir.mkdir()
+
+            def opener(_request, _timeout, payload=payload):
+                calls.append(1)
+                return FakeResponse(payload)
+
+            with self.subTest(index=index), self.assertRaises(updater.UpdateError):
+                updater.prepare_update(
+                    "https://downloads.example.test/update.zip",
+                    digest,
+                    size,
+                    app_dir=app_dir,
+                    opener=opener,
+                    policy=RetryPolicy(network_attempts=5, retry_delays=(0, 0, 0, 0)),
+                    sleep=lambda _delay: None,
+                )
+            self.assertEqual(calls, [1])
+
+    def test_payload_rejects_https_to_http_redirect(self):
+        with self.assertRaises(updater.UpdateError) as raised:
+            updater.prepare_update(
+                "https://downloads.example.test/update.zip",
+                hashlib.sha256(self.archive).hexdigest(),
+                len(self.archive),
+                app_dir=self.app_dir,
+                opener=lambda _request, _timeout: FakeResponse(
+                    self.archive,
+                    final_url="http://mirror.example.test/update.zip?token=private",
+                ),
+                sleep=lambda _delay: None,
+            )
+        self.assertIn("HTTPS", str(raised.exception))
+        self.assertNotIn("mirror.example.test", str(raised.exception))
+
     def test_exhausted_download_does_not_leak_query_or_local_path(self):
         private_url = "https://downloads.example.test/update.zip?token=private"
 
@@ -412,12 +494,20 @@ class DownloadAndInstallTests(unittest.TestCase):
         for protected in ("config.yaml", "browser_profile", "runs", "user data"):
             self.assertNotIn(protected, script)
         smoke = script.index("--run-main --help")
-        cleanup = script.index('rmdir /s /q "%BACKUP_INTERNAL%"')
-        launch = script.index('start "" "%TARGET%\\Lovart_Auto.exe"')
-        self.assertLess(smoke, cleanup)
+        commit = script.index('move /Y "!PENDING_MARKER!" "!COMMIT_MARKER!"')
+        cleanup = script.index('call :cleanup_committed "!TOKEN!"', commit)
+        launch = script.index('start "" /b "!TARGET!\\Lovart_Auto.exe"')
+        self.assertLess(smoke, commit)
+        self.assertLess(commit, cleanup)
         self.assertLess(cleanup, launch)
-        self.assertIn('copy /Y "%PAYLOAD%\\config.example.yaml"', script)
-        self.assertIn('copy /Y "%PAYLOAD%\\.env.example"', script)
+        self.assertIn(
+            'copy /Y "!PAYLOAD!\\config.example.yaml" "!TARGET!\\config.example.yaml"',
+            script,
+        )
+        self.assertIn(
+            'copy /Y "!PAYLOAD!\\.env.example" "!TARGET!\\.env.example"',
+            script,
+        )
 
 
 if __name__ == "__main__":
