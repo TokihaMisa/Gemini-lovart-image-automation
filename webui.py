@@ -992,20 +992,39 @@ def run_process(
 
 
 def ui_check_update():
-    from updater import check_for_updates, download_and_install_update
+    from updater import (
+        UpdateStatus,
+        check_update_details,
+        download_and_install_update,
+    )
     import queue
     import threading
     
-    yield "正在检查更新，请稍候..."
-    has_update, new_version, url, changelog = check_for_updates()
-    if not has_update:
+    yield "正在检查更新，请稍候…"
+    result = check_update_details()
+    if result.status is UpdateStatus.ERROR:
+        yield f"检查更新失败：{result.message or '暂时无法连接更新服务，请稍后重试。'}"
+        return
+    if result.status is UpdateStatus.UP_TO_DATE:
         yield "当前已是最新版本，无需更新。"
         return
         
-    yield f"发现新版本: v{new_version}\n更新内容: {changelog}\n\n准备下载..."
+    yield (
+        f"发现新版本：v{result.version}\n"
+        f"更新内容：{result.changelog}\n\n"
+        "发布信息校验成功，准备下载并验证完整性…"
+    )
     
     q = queue.Queue()
-    threading.Thread(target=download_and_install_update, args=(url, q), daemon=True).start()
+    threading.Thread(
+        target=download_and_install_update,
+        args=(result.url, q),
+        kwargs={
+            "expected_sha256": result.sha256,
+            "expected_size": result.size,
+        },
+        daemon=True,
+    ).start()
     
     output = []
     while True:
