@@ -514,6 +514,26 @@ class DownloadAndInstallTests(unittest.TestCase):
         finally:
             updater._release_installer_lock(update_root, "active-owner")
 
+    def test_missing_prepare_claim_is_rejected_before_installer_process_starts(self):
+        update_root = self.app_dir / ".lovart-update"
+        staging = update_root / "abcdef0123456789"
+        payload = staging / "payload"
+        payload.mkdir(parents=True)
+        prepared = updater.PreparedUpdate(
+            staging,
+            staging / "update.zip",
+            payload,
+        )
+        with mock.patch("updater.subprocess.Popen") as popen:
+            with self.assertRaises(updater.UpdateError):
+                updater._write_and_start_installer(
+                    prepared,
+                    self.app_dir,
+                    current_pid=1234,
+                )
+        popen.assert_not_called()
+        self.assertFalse((update_root / "install.lock").exists())
+
     def test_installer_script_is_transactional_owner_safe_and_preserves_user_files(self):
         payload = self.app_dir / ".lovart-update" / "owner-123" / "payload"
         payload.mkdir(parents=True)

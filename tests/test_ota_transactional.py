@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -22,6 +26,17 @@ REQUIRED_RUNTIME = (
     "_internal/VCRUNTIME140_1.dll",
 )
 APPROVED_ASSETS = ("config.example.yaml", ".env.example")
+
+
+class BytesResponse(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.close()
+
+    def geturl(self):
+        return "https://downloads.example.test/update.zip"
 
 
 class SyntheticArchive:
@@ -252,7 +267,10 @@ class Program {
         return target
 
     def _create_prepared(self, target, token, version="NEW"):
-        staging = target / ".lovart-update" / token
+        update_root = target / ".lovart-update"
+        update_root.mkdir(parents=True, exist_ok=True)
+        updater._create_prepare_claim(update_root, token)
+        staging = update_root / token
         payload = staging / "payload"
         payload.mkdir(parents=True)
         self._write_exe(payload / "Lovart_Auto.exe", version)
@@ -264,6 +282,54 @@ class Program {
             (payload / name).write_bytes(version.encode("ascii"))
         (staging / "update.zip").write_bytes(b"verified archive")
         return updater.PreparedUpdate(staging, staging / "update.zip", payload)
+
+    def _archive_bytes(self, version):
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(
+            archive_buffer, "w", compression=zipfile.ZIP_DEFLATED
+        ) as archive:
+            archive.writestr(
+                "Lovart_Auto.exe",
+                self.stub_exe.read_bytes() + version.encode("ascii"),
+            )
+            for name in REQUIRED_RUNTIME:
+                archive.writestr(name, version.encode("ascii"))
+            for name in APPROVED_ASSETS:
+                archive.writestr(name, version.encode("ascii"))
+        return archive_buffer.getvalue()
+
+    def _prepare_real(self, target, version):
+        archive = self._archive_bytes(version)
+        return updater.prepare_update(
+            "https://downloads.example.test/update.zip",
+            hashlib.sha256(archive).hexdigest(),
+            len(archive),
+            app_dir=target,
+            opener=lambda _request, _timeout: BytesResponse(archive),
+            sleep=lambda _delay: None,
+        )
+
+    def _write_prepare_claim(
+        self,
+        update_root,
+        token,
+        *,
+        created,
+        pid=None,
+        identity=None,
+    ):
+        claim = update_root / f"prepare-{token}.claim"
+        claim.mkdir()
+        (claim / "token").write_text(token, encoding="ascii")
+        (claim / "created").write_text(str(created), encoding="ascii")
+        if pid is not None:
+            (claim / "pid").write_text(str(pid), encoding="ascii")
+        if identity is not None:
+            (claim / "identity").write_text(identity, encoding="ascii")
+        staging = update_root / token
+        staging.mkdir()
+        (staging / "partial.zip").write_bytes(b"active preparation")
+        return claim, staging
 
     def _exclusive_file_handle(self, path):
         kernel32 = __import__("ctypes").windll.kernel32
@@ -297,6 +363,8 @@ class Program {
         (lock_dir / "installer.identity").write_text(
             updater._process_identity(os.getpid()), encoding="ascii"
         )
+        self.assertTrue(updater._release_prepare_claim(update_root, token))
+        updater._mark_installer_handoff_ready(lock_dir, token)
         (update_root / f"install-{token}.owner").write_text(token, encoding="ascii")
         arguments = dict(
             app_dir=target,
@@ -510,6 +578,9 @@ class Program {
                 self._assert_version(target, first_version.encode("ascii"))
 
                 shutil.rmtree(second.staging_dir, ignore_errors=True)
+                updater._release_prepare_claim(
+                    target / ".lovart-update", second.staging_dir.name
+                )
                 third = self._create_prepared(target, "owner-C", "C")
                 third_process = updater._write_and_start_installer(
                     third,
@@ -565,6 +636,209 @@ class Program {
         self.assertFalse(first.staging_dir.exists())
         self.assertFalse(raw_orphan.exists())
         self._assert_bounded_cleanup(target)
+
+    def test_live_prepare_during_validation_survives_real_installer_cleanup(self):
+        target = self._create_target()
+        validation_entered = threading.Event()
+        validation_release = threading.Event()
+        worker_result = {}
+        real_validate = updater.validate_and_extract_update
+
+        def paused_validate(archive_path, destination):
+            validation_entered.set()
+            if not validation_release.wait(timeout=20):
+                raise AssertionError("validation barrier timed out")
+            return real_validate(archive_path, destination)
+
+        def prepare_worker():
+            try:
+                worker_result["prepared"] = self._prepare_real(target, "B")
+            except BaseException as exc:
+                worker_result["error"] = exc
+
+        with mock.patch(
+            "updater.validate_and_extract_update", side_effect=paused_validate
+        ):
+            worker = threading.Thread(target=prepare_worker)
+            worker.start()
+            self.assertTrue(validation_entered.wait(timeout=10))
+            update_root = target / ".lovart-update"
+            live_staging = next(
+                path
+                for path in update_root.iterdir()
+                if path.is_dir()
+                and re.fullmatch(r"[0-9a-f]{16}", path.name)
+                and (path / "update.zip").exists()
+            )
+            installer = self._create_prepared(target, "owner-A", "A")
+            try:
+                install_result = self._run_script(
+                    self._write_script(target, installer, "owner-A")
+                )
+                survived = live_staging.exists() and (
+                    live_staging / "update.zip"
+                ).exists()
+            finally:
+                validation_release.set()
+                worker.join(timeout=20)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(
+            install_result.returncode,
+            0,
+            install_result.stdout + install_result.stderr,
+        )
+        self.assertTrue(survived, "installer deleted active validation staging")
+        self.assertNotIn("error", worker_result)
+        prepared = worker_result["prepared"]
+        self.assertTrue((prepared.payload_dir / "Lovart_Auto.exe").exists())
+        shutil.rmtree(prepared.staging_dir, ignore_errors=True)
+
+    def test_prepared_claim_survives_install_then_converts_to_next_install_owner(self):
+        target = self._create_target()
+        prepared_b = self._prepare_real(target, "B")
+        update_root = target / ".lovart-update"
+        claim_b = update_root / f"prepare-{prepared_b.staging_dir.name}.claim"
+
+        prepared_a = self._create_prepared(target, "owner-A", "A")
+        result_a = self._run_script(
+            self._write_script(target, prepared_a, "owner-A")
+        )
+        self.assertEqual(result_a.returncode, 0, result_a.stdout + result_a.stderr)
+        self.assertTrue(prepared_b.staging_dir.exists())
+        self.assertTrue(claim_b.exists())
+
+        process_b = updater._write_and_start_installer(
+            prepared_b,
+            target,
+            current_pid=999999,
+            start_timeout=5,
+        )
+        self.assertFalse(claim_b.exists())
+        self.assertEqual(process_b.wait(timeout=20), 0)
+        self._assert_version(target, b"B")
+        self._assert_bounded_cleanup(target)
+
+    def test_prepare_claim_liveness_controls_bounded_orphan_reclamation(self):
+        target = self._create_target()
+        update_root = target / ".lovart-update"
+        update_root.mkdir()
+        now = int(time.time())
+        identity = updater._process_identity(os.getpid())
+        self.assertIsNotNone(identity)
+        recent_claim, recent_staging = self._write_prepare_claim(
+            update_root,
+            "1111111111111111",
+            created=now,
+        )
+        live_claim, live_staging = self._write_prepare_claim(
+            update_root,
+            "2222222222222222",
+            created=now - 60,
+            pid=os.getpid(),
+            identity=identity,
+        )
+        dead_claim, dead_staging = self._write_prepare_claim(
+            update_root,
+            "3333333333333333",
+            created=now,
+            pid=999999,
+            identity="1",
+        )
+        reused_claim, reused_staging = self._write_prepare_claim(
+            update_root,
+            "4444444444444444",
+            created=now,
+            pid=os.getpid(),
+            identity="1",
+        )
+        expired_claim, expired_staging = self._write_prepare_claim(
+            update_root,
+            "5555555555555555",
+            created=now - 60,
+        )
+
+        installer = self._create_prepared(target, "claim-cleaner", "A")
+        result = self._run_script(
+            self._write_script(target, installer, "claim-cleaner")
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for claim, staging in (
+            (recent_claim, recent_staging),
+            (live_claim, live_staging),
+        ):
+            self.assertTrue(claim.exists())
+            self.assertTrue(staging.exists())
+        for claim, staging in (
+            (dead_claim, dead_staging),
+            (reused_claim, reused_staging),
+            (expired_claim, expired_staging),
+        ):
+            self.assertFalse(claim.exists())
+            self.assertFalse(staging.exists())
+
+    def test_prepare_failure_removes_its_claim_and_staging(self):
+        target = self._create_target()
+        archive = self._archive_bytes("B")
+        claims_seen = []
+
+        def fail_validation(_archive_path, _destination):
+            claims_seen.extend(
+                (target / ".lovart-update").glob("prepare-*.claim")
+            )
+            raise updater.UpdateError("injected validation failure")
+
+        with mock.patch(
+            "updater.validate_and_extract_update", side_effect=fail_validation
+        ), self.assertRaises(updater.UpdateError):
+            updater.prepare_update(
+                "https://downloads.example.test/update.zip",
+                hashlib.sha256(archive).hexdigest(),
+                len(archive),
+                app_dir=target,
+                opener=lambda _request, _timeout: BytesResponse(archive),
+                sleep=lambda _delay: None,
+            )
+        update_root = target / ".lovart-update"
+        self.assertTrue(claims_seen)
+        self.assertFalse(list(update_root.glob("prepare-*.claim")))
+        self.assertFalse(
+            [
+                path
+                for path in update_root.iterdir()
+                if path.is_dir() and re.fullmatch(r"[0-9a-f]{16}", path.name)
+            ]
+        )
+
+    def test_download_failure_removes_its_live_claim_and_staging(self):
+        target = self._create_target()
+        claims_seen = []
+
+        def failing_opener(_request, _timeout):
+            claims_seen.extend(
+                (target / ".lovart-update").glob("prepare-*.claim")
+            )
+            raise ConnectionResetError("injected download failure")
+
+        with self.assertRaises(updater.UpdateError):
+            updater.prepare_update(
+                "https://downloads.example.test/update.zip",
+                "a" * 64,
+                123,
+                app_dir=target,
+                opener=failing_opener,
+                policy=updater.RetryPolicy(network_attempts=1),
+                sleep=lambda _delay: None,
+            )
+        update_root = target / ".lovart-update"
+        self.assertTrue(claims_seen)
+        self.assertFalse(list(update_root.glob("prepare-*.claim")))
+        self.assertFalse(
+            [
+                path
+                for path in update_root.iterdir()
+                if path.is_dir() and re.fullmatch(r"[0-9a-f]{16}", path.name)
+            ]
+        )
 
     def test_batch_path_rejects_unsafe_expansion_characters_before_handoff(self):
         for name in ('percent%name', 'bang!name', 'caret^name', 'quote"name', "line\nname"):

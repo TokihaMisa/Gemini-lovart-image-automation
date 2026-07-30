@@ -40,6 +40,7 @@ _MAX_ENTRY_COMPRESSION_RATIO = 500
 _MAX_OVERALL_COMPRESSION_RATIO = 100
 _OVERALL_RATIO_MIN_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
 _INSTALL_LOCK_GRACE_SECONDS = 15.0
+_PREPARE_CLAIM_GRACE_SECONDS = 15.0
 _INSTALL_LOCK_NAME = "install.lock"
 _ALLOWED_ROOT_FILES = frozenset(("Lovart_Auto.exe", "config.example.yaml", ".env.example"))
 _REQUIRED_ARCHIVE_FILES = frozenset(
@@ -412,11 +413,15 @@ def prepare_update(
     staging_parent.mkdir(parents=True, exist_ok=True)
     owner_token = secrets.token_hex(8)
     staging_dir = staging_parent / owner_token
-    staging_dir.mkdir()
     archive_part = staging_dir / "update.zip.part"
     archive_path = staging_dir / "update.zip"
     payload_dir = staging_dir / "payload"
+    claim_dir: Path | None = None
+    staging_created = False
     try:
+        claim_dir = _create_prepare_claim(staging_parent, owner_token)
+        staging_dir.mkdir()
+        staging_created = True
         _download_verified_archive(
             url,
             archive_part,
@@ -435,10 +440,16 @@ def prepare_update(
             log("更新包结构与运行文件校验成功，准备安全安装。")
         return PreparedUpdate(staging_dir, archive_path, payload_dir)
     except UpdateError:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        if staging_created:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        if claim_dir is not None:
+            _release_prepare_claim(staging_parent, owner_token)
         raise
     except Exception as exc:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        if staging_created:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        if claim_dir is not None:
+            _release_prepare_claim(staging_parent, owner_token)
         raise UpdateError(_safe_network_guidance(exc, "下载更新")) from None
 
 
@@ -447,6 +458,85 @@ def _batch_path(path: Path) -> str:
     if any(character in value for character in ('"', "%", "!", "^", "\r", "\n")):
         raise UpdateError("更新安装路径无效，已停止安装。")
     return value
+
+
+def _prepare_claim_path(update_root: Path, owner_token: str) -> Path:
+    return update_root / f"prepare-{owner_token}.claim"
+
+
+def _prepare_claim_token(claim_dir: Path) -> str | None:
+    try:
+        token = (claim_dir / "token").read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        return None
+    return token if _OWNER_TOKEN_RE.fullmatch(token) else None
+
+
+def _create_prepare_claim(update_root: Path, owner_token: str) -> Path:
+    """Publish preparation ownership without taking the global install lock."""
+
+    if not _OWNER_TOKEN_RE.fullmatch(owner_token):
+        raise UpdateError("更新准备参数无效，已停止操作。")
+    identity = _process_identity(os.getpid())
+    if identity is None:
+        raise UpdateError("无法确认更新准备进程，已停止操作。")
+    claim_dir = _prepare_claim_path(update_root, owner_token)
+    claim_dir.mkdir()
+    try:
+        (claim_dir / "created").write_text(
+            str(int(time.time())), encoding="ascii"
+        )
+        (claim_dir / "token").write_text(owner_token, encoding="ascii")
+        (claim_dir / "pid").write_text(str(os.getpid()), encoding="ascii")
+        (claim_dir / "identity").write_text(identity, encoding="ascii")
+        return claim_dir
+    except Exception:
+        shutil.rmtree(claim_dir, ignore_errors=True)
+        raise
+
+
+def _prepare_claim_owned_by_current_process(
+    update_root: Path, owner_token: str
+) -> bool:
+    claim_dir = _prepare_claim_path(update_root, owner_token)
+    if _prepare_claim_token(claim_dir) != owner_token:
+        return False
+    try:
+        pid = int((claim_dir / "pid").read_text(encoding="ascii").strip())
+        identity = (claim_dir / "identity").read_text(
+            encoding="ascii"
+        ).strip()
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return pid == os.getpid() and _process_identity(pid) == identity
+
+
+def _release_prepare_claim(update_root: Path, owner_token: str) -> bool:
+    """Remove only the prepare claim that still belongs to this token."""
+
+    claim_dir = _prepare_claim_path(update_root, owner_token)
+    if not claim_dir.exists():
+        return True
+    if _prepare_claim_token(claim_dir) != owner_token:
+        return False
+    released = update_root / (
+        f"prepare-{owner_token}.claim.release-{secrets.token_hex(8)}"
+    )
+    try:
+        claim_dir.replace(released)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if _prepare_claim_token(released) != owner_token:
+        try:
+            if not claim_dir.exists():
+                released.replace(claim_dir)
+        except OSError:
+            pass
+        return False
+    shutil.rmtree(released, ignore_errors=True)
+    return not released.exists()
 
 
 def _process_identity(pid: int) -> str | None:
@@ -631,6 +721,14 @@ def _record_installer_process(
         temporary.replace(lock_dir / name)
 
 
+def _mark_installer_handoff_ready(lock_dir: Path, owner_token: str) -> None:
+    if _installer_lock_token(lock_dir) != owner_token:
+        raise UpdateError("更新安装锁所有者不匹配，已停止安装。")
+    temporary = lock_dir / f"handoff.ready.tmp-{owner_token}"
+    temporary.write_text(owner_token, encoding="ascii")
+    temporary.replace(lock_dir / "handoff.ready")
+
+
 _INSTALLER_FAILURE_STEPS = frozenset(
     (
         "backup_exe",
@@ -689,6 +787,7 @@ set "LOCK_DIR=!UPDATE_ROOT!\\install.lock"
 set "LOCK_TOKEN_FILE=!LOCK_DIR!\\token"
 set "LOCK_PID_FILE=!LOCK_DIR!\\installer.pid"
 set "LOCK_IDENTITY_FILE=!LOCK_DIR!\\installer.identity"
+set "LOCK_READY_FILE=!LOCK_DIR!\\handoff.ready"
 set "RUN_NOTE="
 
 call :validate_lock
@@ -879,7 +978,7 @@ set /p LOCK_TOKEN_VALUE=<"!LOCK_TOKEN_FILE!"
 if /I not "!LOCK_TOKEN_VALUE!"=="!TOKEN!" exit /b 71
 set /a LOCK_WAIT_COUNT=0
 :wait_lock_metadata
-if exist "!LOCK_PID_FILE!" if exist "!LOCK_IDENTITY_FILE!" goto verify_lock_metadata
+if exist "!LOCK_PID_FILE!" if exist "!LOCK_IDENTITY_FILE!" if exist "!LOCK_READY_FILE!" goto verify_lock_metadata
 set /a LOCK_WAIT_COUNT+=1
 if !LOCK_WAIT_COUNT! GEQ 250 exit /b 72
 powershell.exe -NoProfile -NonInteractive -Command "Start-Sleep -Milliseconds 20"
@@ -887,8 +986,11 @@ goto wait_lock_metadata
 :verify_lock_metadata
 set "LOCK_PID="
 set "LOCK_IDENTITY="
+set "LOCK_READY="
 set /p LOCK_PID=<"!LOCK_PID_FILE!"
 set /p LOCK_IDENTITY=<"!LOCK_IDENTITY_FILE!"
+set /p LOCK_READY=<"!LOCK_READY_FILE!"
+if /I not "!LOCK_READY!"=="!TOKEN!" exit /b 73
 echo(!LOCK_PID!| findstr.exe /r /x "[1-9][0-9]*" >nul
 if errorlevel 1 exit /b 73
 echo(!LOCK_IDENTITY!| findstr.exe /r /x "[1-9][0-9]*" >nul
@@ -974,6 +1076,10 @@ for %%F in ("!UPDATE_ROOT!\\install-*.owner") do if exist "%%~fF" (
   set /a ORPHAN_COUNT+=1
   if !ORPHAN_COUNT! LEQ 16 call :cleanup_orphan_owner "%%~fF"
 )
+for /d %%C in ("!UPDATE_ROOT!\\prepare-*.claim") do if exist "%%~fC\\" (
+  set /a ORPHAN_COUNT+=1
+  if !ORPHAN_COUNT! LEQ 16 call :cleanup_orphan_claim "%%~fC"
+)
 for /d %%D in ("!UPDATE_ROOT!\\*") do if exist "%%~fD\\" (
   set /a ORPHAN_COUNT+=1
   if !ORPHAN_COUNT! LEQ 16 call :cleanup_orphan_staging "%%~fD"
@@ -1018,18 +1124,43 @@ if errorlevel 1 exit /b 0
 set "RUN_NOTE=orphan_cleaned=!O_TOKEN!"
 exit /b 0
 
+:cleanup_orphan_claim
+set "O_NAME=%~nx1"
+set "O_TOKEN=!O_NAME:prepare-=!"
+set "O_TOKEN=!O_TOKEN:.claim=!"
+call :cleanup_prepare_orphan "!O_TOKEN!"
+exit /b 0
+
 :cleanup_orphan_staging
 set "O_PATH=%~1"
 set "O_TOKEN=%~nx1"
+call :cleanup_prepare_orphan "!O_TOKEN!"
+exit /b 0
+
+:cleanup_prepare_orphan
+set "O_TOKEN=%~1"
 if /I "!O_TOKEN!"=="!TOKEN!" exit /b 0
 if not "!O_TOKEN:~64,1!"=="" exit /b 0
 echo(!O_TOKEN!| findstr.exe /r /x "[A-Za-z0-9-][A-Za-z0-9-]*" >nul
 if errorlevel 1 exit /b 0
+set "CLAIM_DIR=!UPDATE_ROOT!\\prepare-!O_TOKEN!.claim"
+set "CLAIM_EXPECTED=!O_TOKEN!"
+call :prepare_claim_active
+if not errorlevel 1 exit /b 0
 if exist "!UPDATE_ROOT!\\transaction-!O_TOKEN!.pending" exit /b 0
 if exist "!UPDATE_ROOT!\\transaction-!O_TOKEN!.commit" exit /b 0
 call :cleanup_stale "!O_TOKEN!"
 if errorlevel 1 exit /b 0
+if exist "!CLAIM_DIR!\\" (
+  rmdir /s /q "!CLAIM_DIR!"
+  if exist "!CLAIM_DIR!\\" exit /b 0
+)
 set "RUN_NOTE=orphan_cleaned=!O_TOKEN!"
+exit /b 0
+
+:prepare_claim_active
+powershell.exe -NoProfile -NonInteractive -Command "$d = $env:CLAIM_DIR; $expected = $env:CLAIM_EXPECTED; $grace = {_PREPARE_CLAIM_GRACE_SECONDS}; if (-not (Test-Path -LiteralPath $d -PathType Container)) {{ exit 91 }}; $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); try {{ $created = [long](Get-Content -LiteralPath (Join-Path $d 'created') -Raw -ErrorAction Stop).Trim() }} catch {{ $created = [DateTimeOffset](Get-Item -LiteralPath $d).LastWriteTimeUtc; $created = $created.ToUnixTimeSeconds() }}; $age = $now - $created; $recent = ($age -ge 0) -and ($age -lt $grace); try {{ $claimToken = (Get-Content -LiteralPath (Join-Path $d 'token') -Raw -ErrorAction Stop).Trim(); $pidValue = [int](Get-Content -LiteralPath (Join-Path $d 'pid') -Raw -ErrorAction Stop).Trim(); $identity = (Get-Content -LiteralPath (Join-Path $d 'identity') -Raw -ErrorAction Stop).Trim() }} catch {{ if ($recent) {{ exit 0 }} else {{ exit 91 }} }}; if ($claimToken -cne $expected) {{ if ($recent) {{ exit 0 }} else {{ exit 91 }} }}; try {{ $p = Get-Process -Id $pidValue -ErrorAction Stop }} catch {{ exit 91 }}; if (([string]$p.StartTime.ToFileTimeUtc()) -eq $identity) {{ exit 0 }}; exit 91"
+if "!ERRORLEVEL!"=="91" exit /b 1
 exit /b 0
 
 :rollback_token
@@ -1205,7 +1336,10 @@ def _write_and_start_installer(
     )
     lock_dir = _reserve_installer_lock(update_root, owner_token)
     process: subprocess.Popen | None = None
+    claim_converted = False
     try:
+        if not _prepare_claim_owned_by_current_process(update_root, owner_token):
+            raise UpdateError("更新准备所有者不匹配或已失效，已停止安装。")
         started_marker.unlink(missing_ok=True)
         owner_marker.write_text(owner_token, encoding="ascii")
         script_path.write_text(content, encoding="utf-8", newline="\r\n")
@@ -1219,6 +1353,10 @@ def _write_and_start_installer(
             creationflags=creation_flags,
         )
         _record_installer_process(lock_dir, owner_token, process)
+        if not _release_prepare_claim(update_root, owner_token):
+            raise UpdateError("无法安全转换更新准备所有权，当前应用将继续运行。")
+        claim_converted = True
+        _mark_installer_handoff_ready(lock_dir, owner_token)
         deadline = time.monotonic() + max(0.1, start_timeout)
         while time.monotonic() < deadline:
             if started_marker.exists():
@@ -1240,12 +1378,14 @@ def _write_and_start_installer(
                 process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 pass
-        _release_installer_lock(update_root, owner_token)
         for path in (started_marker, owner_marker, script_path):
             try:
                 path.unlink(missing_ok=True)
             except OSError:
                 pass
+        if claim_converted:
+            shutil.rmtree(prepared.staging_dir, ignore_errors=True)
+        _release_installer_lock(update_root, owner_token)
         raise
     if process is not None and process.poll() is None:
         process.terminate()
@@ -1253,12 +1393,14 @@ def _write_and_start_installer(
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             pass
-    _release_installer_lock(update_root, owner_token)
     for path in (started_marker, owner_marker, script_path):
         try:
             path.unlink(missing_ok=True)
         except OSError:
             pass
+    if claim_converted:
+        shutil.rmtree(prepared.staging_dir, ignore_errors=True)
+    _release_installer_lock(update_root, owner_token)
     raise UpdateError("安全安装程序未确认接管更新，当前应用将继续运行。")
 
 
@@ -1312,6 +1454,7 @@ def download_and_install_update(
             shutil.rmtree(prepared.staging_dir, ignore_errors=True)
             update_root = application_directory() / ".lovart-update"
             token = prepared.staging_dir.name
+            _release_prepare_claim(update_root, token)
             for suffix in ("bat", "owner", "started"):
                 try:
                     (update_root / f"install-{token}.{suffix}").unlink(missing_ok=True)
