@@ -472,6 +472,48 @@ class DownloadAndInstallTests(unittest.TestCase):
         ), mock.patch("updater.Path.cwd", return_value=self.app_dir / "wrong"):
             self.assertEqual(updater.application_directory(), self.app_dir.resolve())
 
+    def test_busy_installer_returns_without_exiting_or_releasing_active_owner(self):
+        update_root = self.app_dir / ".lovart-update"
+        active_lock = updater._reserve_installer_lock(update_root, "active-owner")
+        contender = update_root / "contender"
+        (contender / "payload").mkdir(parents=True)
+        prepared = updater.PreparedUpdate(
+            contender,
+            contender / "update.zip",
+            contender / "payload",
+        )
+        messages = []
+        try:
+            with mock.patch.object(
+                updater.sys, "frozen", True, create=True
+            ), mock.patch.object(updater.os, "name", "nt"), mock.patch.object(
+                updater, "application_directory", return_value=self.app_dir
+            ), mock.patch.object(
+                updater, "prepare_update", return_value=prepared
+            ), mock.patch.object(
+                updater,
+                "_write_and_start_installer",
+                side_effect=updater.UpdateError("另一个更新安装正在进行，请稍后重试。"),
+            ), mock.patch.object(
+                updater.os, "_exit"
+            ) as exit_process:
+                result = updater.download_and_install_update(
+                    "https://downloads.example.test/update.zip",
+                    expected_sha256=VALID_SHA,
+                    expected_size=1,
+                    log=messages.append,
+                )
+            self.assertFalse(result)
+            exit_process.assert_not_called()
+            self.assertTrue(active_lock.exists())
+            self.assertEqual(
+                (active_lock / "token").read_text(encoding="ascii"),
+                "active-owner",
+            )
+            self.assertTrue(any("进行" in message for message in messages))
+        finally:
+            updater._release_installer_lock(update_root, "active-owner")
+
     def test_installer_script_is_transactional_owner_safe_and_preserves_user_files(self):
         payload = self.app_dir / ".lovart-update" / "owner-123" / "payload"
         payload.mkdir(parents=True)
@@ -497,9 +539,14 @@ class DownloadAndInstallTests(unittest.TestCase):
         commit = script.index('move /Y "!PENDING_MARKER!" "!COMMIT_MARKER!"')
         cleanup = script.index('call :cleanup_committed "!TOKEN!"', commit)
         launch = script.index('start "" /b "!TARGET!\\Lovart_Auto.exe"')
+        lock_validation = script.index("call :validate_lock")
+        recovery = script.index("call :recover_stale")
         self.assertLess(smoke, commit)
-        self.assertLess(commit, cleanup)
-        self.assertLess(cleanup, launch)
+        self.assertLess(commit, launch)
+        self.assertLess(launch, cleanup)
+        self.assertLess(lock_validation, recovery)
+        self.assertIn("installer.identity", script)
+        self.assertIn(":release_lock", script)
         self.assertIn(
             'copy /Y "!PAYLOAD!\\config.example.yaml" "!TARGET!\\config.example.yaml"',
             script,

@@ -8,7 +8,9 @@ import tempfile
 import time
 import unittest
 import zipfile
+from ctypes import wintypes
 from pathlib import Path
+from unittest import mock
 
 import updater
 
@@ -117,6 +119,56 @@ class AppSmokeExitTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+class InstallerLockBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir=Path.cwd(), prefix="ota-lock-")
+        self.update_root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_recent_lock_without_pid_is_busy_then_explicitly_stale_lock_is_replaced(self):
+        first = updater._reserve_installer_lock(self.update_root, "first-owner")
+        with self.assertRaises(updater.UpdateError):
+            updater._reserve_installer_lock(self.update_root, "second-owner")
+        with mock.patch(
+            "updater.time.time",
+            return_value=time.time() + updater._INSTALL_LOCK_GRACE_SECONDS + 1,
+        ):
+            second = updater._reserve_installer_lock(
+                self.update_root, "second-owner"
+            )
+        self.assertEqual(first, second)
+        self.assertFalse(list(self.update_root.glob("install.lock.stale-*")))
+        self.assertEqual(
+            (second / "token").read_text(encoding="ascii"), "second-owner"
+        )
+        self.assertTrue(
+            updater._release_installer_lock(self.update_root, "second-owner")
+        )
+
+    def test_live_pid_identity_is_busy_and_mismatch_is_treated_as_reuse(self):
+        first = updater._reserve_installer_lock(self.update_root, "first-owner")
+        (first / "installer.pid").write_text(str(os.getpid()), encoding="ascii")
+        identity = updater._process_identity(os.getpid())
+        self.assertIsNotNone(identity)
+        (first / "installer.identity").write_text(identity, encoding="ascii")
+        with self.assertRaises(updater.UpdateError):
+            updater._reserve_installer_lock(self.update_root, "second-owner")
+        (first / "installer.identity").write_text("1", encoding="ascii")
+        second = updater._reserve_installer_lock(self.update_root, "second-owner")
+        self.assertEqual(
+            (second / "token").read_text(encoding="ascii"), "second-owner"
+        )
+        self.assertFalse(
+            updater._release_installer_lock(self.update_root, "first-owner")
+        )
+        self.assertTrue(second.exists())
+        self.assertTrue(
+            updater._release_installer_lock(self.update_root, "second-owner")
+        )
+
+
 @unittest.skipUnless(WINDOWS, "real cmd.exe OTA transaction tests require Windows")
 class WindowsInstallerTransactionTests(unittest.TestCase):
     @classmethod
@@ -199,23 +251,52 @@ class Program {
             (target / name).write_bytes(b"OLD")
         return target
 
-    def _create_prepared(self, target, token):
+    def _create_prepared(self, target, token, version="NEW"):
         staging = target / ".lovart-update" / token
         payload = staging / "payload"
         payload.mkdir(parents=True)
-        self._write_exe(payload / "Lovart_Auto.exe", "NEW")
+        self._write_exe(payload / "Lovart_Auto.exe", version)
         for name in REQUIRED_RUNTIME:
             path = payload / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"NEW")
+            path.write_bytes(version.encode("ascii"))
         for name in APPROVED_ASSETS:
-            (payload / name).write_bytes(b"NEW")
+            (payload / name).write_bytes(version.encode("ascii"))
         (staging / "update.zip").write_bytes(b"verified archive")
         return updater.PreparedUpdate(staging, staging / "update.zip", payload)
+
+    def _exclusive_file_handle(self, path):
+        kernel32 = __import__("ctypes").windll.kernel32
+        kernel32.CreateFileW.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        handle = kernel32.CreateFileW(
+            str(path),
+            0x80000000,
+            0,
+            None,
+            3,
+            0x80,
+            None,
+        )
+        self.assertNotEqual(handle, wintypes.HANDLE(-1).value)
+        return handle
 
     def _write_script(self, target, prepared, token, failure_step=None):
         update_root = target / ".lovart-update"
         update_root.mkdir(exist_ok=True)
+        lock_dir = updater._reserve_installer_lock(update_root, token)
+        (lock_dir / "installer.pid").write_text(str(os.getpid()), encoding="ascii")
+        (lock_dir / "installer.identity").write_text(
+            updater._process_identity(os.getpid()), encoding="ascii"
+        )
         (update_root / f"install-{token}.owner").write_text(token, encoding="ascii")
         arguments = dict(
             app_dir=target,
@@ -378,6 +459,111 @@ class Program {
         self.assertTrue(marker.exists())
         time.sleep(0.1)
         self._assert_version(target, b"NEW")
+        self._assert_bounded_cleanup(target)
+
+    def test_real_dual_installer_barrier_allows_only_one_complete_owner(self):
+        for first_version, second_version in (("A", "B"), ("B", "A")):
+            with self.subTest(first=first_version):
+                case_root = self.root / f"{first_version}-first"
+                target = self._create_target(case_root)
+                first = self._create_prepared(
+                    target, f"owner-{first_version}", first_version
+                )
+                second = self._create_prepared(
+                    target, f"owner-{second_version}", second_version
+                )
+                sleeper = subprocess.Popen(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-Command",
+                        "Start-Sleep -Seconds 30",
+                    ]
+                )
+                first_process = None
+                second_process = None
+                busy = False
+                try:
+                    first_process = updater._write_and_start_installer(
+                        first,
+                        target,
+                        current_pid=sleeper.pid,
+                        start_timeout=5,
+                    )
+                    try:
+                        second_process = updater._write_and_start_installer(
+                            second,
+                            target,
+                            current_pid=sleeper.pid,
+                            start_timeout=2,
+                        )
+                    except updater.UpdateError as exc:
+                        busy = "进行" in str(exc) or "busy" in str(exc).lower()
+                finally:
+                    sleeper.terminate()
+                    sleeper.wait(timeout=5)
+                    if first_process is not None:
+                        first_process.wait(timeout=20)
+                    if second_process is not None:
+                        second_process.wait(timeout=20)
+                self.assertTrue(busy, "the second live installer was not rejected")
+                self._assert_version(target, first_version.encode("ascii"))
+
+                shutil.rmtree(second.staging_dir, ignore_errors=True)
+                third = self._create_prepared(target, "owner-C", "C")
+                third_process = updater._write_and_start_installer(
+                    third,
+                    target,
+                    current_pid=999999,
+                    start_timeout=5,
+                )
+                self.assertEqual(third_process.wait(timeout=20), 0)
+                self._assert_version(target, b"C")
+                self._assert_bounded_cleanup(target)
+
+    def test_committed_install_survives_locked_staging_and_next_run_cleans_orphan(self):
+        target = self._create_target()
+        first = self._create_prepared(target, "locked-owner", "A")
+        marker = self.root / "locked-launch.txt"
+        handle = self._exclusive_file_handle(first.archive_path)
+        try:
+            first_result = self._run_script(
+                self._write_script(target, first, "locked-owner"),
+                marker=marker,
+            )
+            self.assertEqual(
+                first_result.returncode,
+                0,
+                first_result.stdout + first_result.stderr,
+            )
+            self._assert_version(target, b"A")
+            self.assertTrue(marker.exists())
+            update_root = target / ".lovart-update"
+            pending = update_root / "cleanup-pending-locked-owner"
+            self.assertTrue(pending.exists())
+            self.assertFalse((update_root / "install.lock").exists())
+            self.assertIn(
+                "cleanup_pending",
+                (update_root / "last-install.log").read_text(encoding="utf-8"),
+            )
+        finally:
+            __import__("ctypes").windll.kernel32.CloseHandle(handle)
+
+        raw_orphan = target / ".lovart-update" / "crashed-owner"
+        raw_orphan.mkdir()
+        (raw_orphan / "partial.zip").write_bytes(b"partial")
+        second = self._create_prepared(target, "cleanup-owner", "B")
+        second_result = self._run_script(
+            self._write_script(target, second, "cleanup-owner")
+        )
+        self.assertEqual(
+            second_result.returncode,
+            0,
+            second_result.stdout + second_result.stderr,
+        )
+        self._assert_version(target, b"B")
+        self.assertFalse(first.staging_dir.exists())
+        self.assertFalse(raw_orphan.exists())
         self._assert_bounded_cleanup(target)
 
     def test_batch_path_rejects_unsafe_expansion_characters_before_handoff(self):

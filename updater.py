@@ -26,7 +26,7 @@ _USER_AGENT = f"Lovart-Auto/{VERSION}"
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 _DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:")
-_OWNER_TOKEN_RE = re.compile(r"^[A-Za-z0-9-]+$")
+_OWNER_TOKEN_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 _WINDOWS_RESERVED_NAMES = frozenset(
     ("con", "prn", "aux", "nul", "clock$")
     + tuple(f"com{number}" for number in range(1, 10))
@@ -39,6 +39,8 @@ _MAX_SINGLE_ENTRY_BYTES = 1024 * 1024 * 1024
 _MAX_ENTRY_COMPRESSION_RATIO = 500
 _MAX_OVERALL_COMPRESSION_RATIO = 100
 _OVERALL_RATIO_MIN_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
+_INSTALL_LOCK_GRACE_SECONDS = 15.0
+_INSTALL_LOCK_NAME = "install.lock"
 _ALLOWED_ROOT_FILES = frozenset(("Lovart_Auto.exe", "config.example.yaml", ".env.example"))
 _REQUIRED_ARCHIVE_FILES = frozenset(
     (
@@ -447,6 +449,188 @@ def _batch_path(path: Path) -> str:
     return value
 
 
+def _process_identity(pid: int) -> str | None:
+    """Return a live process creation identity, not just its reusable PID."""
+
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        class FILETIME(ctypes.Structure):
+            _fields_ = (
+                ("low", wintypes.DWORD),
+                ("high", wintypes.DWORD),
+            )
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        )
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = (
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.GetProcessTimes.argtypes = (
+            wintypes.HANDLE,
+            ctypes.POINTER(FILETIME),
+            ctypes.POINTER(FILETIME),
+            ctypes.POINTER(FILETIME),
+            ctypes.POINTER(FILETIME),
+        )
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            exit_code = wintypes.DWORD()
+            if (
+                not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+                or exit_code.value != 259
+            ):
+                return None
+            created = FILETIME()
+            exited = FILETIME()
+            kernel = FILETIME()
+            user = FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(created),
+                ctypes.byref(exited),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            ):
+                return None
+            return str((created.high << 32) | created.low)
+        finally:
+            kernel32.CloseHandle(handle)
+
+    try:
+        os.kill(pid, 0)
+    except (OSError, ValueError):
+        return None
+    try:
+        return str((Path("/proc") / str(pid)).stat().st_ctime_ns)
+    except OSError:
+        return f"pid-{pid}"
+
+
+def _installer_lock_token(lock_dir: Path) -> str | None:
+    try:
+        token = (lock_dir / "token").read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        return None
+    return token if _OWNER_TOKEN_RE.fullmatch(token) else None
+
+
+def _installer_lock_is_busy(lock_dir: Path) -> bool:
+    try:
+        pid_text = (lock_dir / "installer.pid").read_text(encoding="ascii").strip()
+        pid = int(pid_text)
+    except (OSError, ValueError):
+        pid = 0
+    if pid > 0:
+        live_identity = _process_identity(pid)
+        if live_identity is None:
+            return False
+        try:
+            recorded_identity = (
+                lock_dir / "installer.identity"
+            ).read_text(encoding="ascii").strip()
+        except (OSError, UnicodeError):
+            return True
+        return live_identity == recorded_identity
+    try:
+        age = max(0.0, time.time() - lock_dir.stat().st_mtime)
+    except OSError:
+        return True
+    return age < _INSTALL_LOCK_GRACE_SECONDS
+
+
+def _release_installer_lock(update_root: Path, owner_token: str) -> bool:
+    """Release only a lock whose token still belongs to this owner."""
+
+    lock_dir = update_root / _INSTALL_LOCK_NAME
+    if not lock_dir.exists():
+        return True
+    if _installer_lock_token(lock_dir) != owner_token:
+        return False
+    released = update_root / f"{_INSTALL_LOCK_NAME}.release-{secrets.token_hex(8)}"
+    try:
+        lock_dir.replace(released)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if _installer_lock_token(released) != owner_token:
+        try:
+            if not lock_dir.exists():
+                released.replace(lock_dir)
+        except OSError:
+            pass
+        return False
+    shutil.rmtree(released, ignore_errors=True)
+    return not released.exists()
+
+
+def _reserve_installer_lock(update_root: Path, owner_token: str) -> Path:
+    """Atomically reserve the application-wide installer lock."""
+
+    if not _OWNER_TOKEN_RE.fullmatch(owner_token):
+        raise UpdateError("更新安装参数无效，已停止安装。")
+    update_root.mkdir(parents=True, exist_ok=True)
+    lock_dir = update_root / _INSTALL_LOCK_NAME
+    for _attempt in range(3):
+        try:
+            lock_dir.mkdir()
+        except FileExistsError:
+            if _installer_lock_is_busy(lock_dir):
+                raise UpdateError("另一个更新安装正在进行，请稍后重试。")
+            stale = update_root / f"{_INSTALL_LOCK_NAME}.stale-{secrets.token_hex(8)}"
+            try:
+                lock_dir.replace(stale)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise UpdateError("另一个更新安装正在进行，请稍后重试。") from None
+            shutil.rmtree(stale, ignore_errors=True)
+            continue
+        try:
+            (lock_dir / "token").write_text(owner_token, encoding="ascii")
+            (lock_dir / "created").write_text(
+                str(time.time_ns()), encoding="ascii"
+            )
+            return lock_dir
+        except Exception:
+            _release_installer_lock(update_root, owner_token)
+            raise
+    raise UpdateError("另一个更新安装正在进行，请稍后重试。")
+
+
+def _record_installer_process(
+    lock_dir: Path, owner_token: str, process: subprocess.Popen
+) -> None:
+    if _installer_lock_token(lock_dir) != owner_token:
+        raise UpdateError("更新安装锁所有者不匹配，已停止安装。")
+    identity = _process_identity(process.pid)
+    if identity is None:
+        raise UpdateError("无法确认安全安装进程，当前应用将继续运行。")
+    for name, value in (
+        ("installer.pid", str(process.pid)),
+        ("installer.identity", identity),
+    ):
+        temporary = lock_dir / f"{name}.tmp-{owner_token}"
+        temporary.write_text(value, encoding="ascii")
+        temporary.replace(lock_dir / name)
+
+
 _INSTALLER_FAILURE_STEPS = frozenset(
     (
         "backup_exe",
@@ -498,13 +682,22 @@ set "OWNER_MARKER=!UPDATE_ROOT!\\install-{owner_token}.owner"
 set "STARTED_MARKER=!UPDATE_ROOT!\\install-{owner_token}.started"
 set "PENDING_MARKER=!UPDATE_ROOT!\\transaction-{owner_token}.pending"
 set "COMMIT_MARKER=!UPDATE_ROOT!\\transaction-{owner_token}.commit"
+set "CLEANUP_MARKER=!UPDATE_ROOT!\\cleanup-pending-{owner_token}"
 set "LOG_FILE=!UPDATE_ROOT!\\last-install.log"
 set "SCRIPT_PATH=%~f0"
+set "LOCK_DIR=!UPDATE_ROOT!\\install.lock"
+set "LOCK_TOKEN_FILE=!LOCK_DIR!\\token"
+set "LOCK_PID_FILE=!LOCK_DIR!\\installer.pid"
+set "LOCK_IDENTITY_FILE=!LOCK_DIR!\\installer.identity"
+set "RUN_NOTE="
 
-if not exist "!OWNER_MARKER!" exit /b 10
+call :validate_lock
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto lock_rejected
+if not exist "!OWNER_MARKER!" goto lock_rejected
 set "OWNER_VALUE="
 set /p OWNER_VALUE=<"!OWNER_MARKER!"
-if /I not "!OWNER_VALUE!"=="!TOKEN!" exit /b 11
+if /I not "!OWNER_VALUE!"=="!TOKEN!" goto lock_rejected
 >"!STARTED_MARKER!" echo(!TOKEN!
 
 powershell.exe -NoProfile -NonInteractive -Command "while (Get-Process -Id {current_pid} -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 500 }}"
@@ -512,6 +705,9 @@ set "STEP_RC=!ERRORLEVEL!"
 if not "!STEP_RC!"=="0" goto abort
 
 call :recover_stale
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" goto recovery_failed
+call :cleanup_orphans
 set "STEP_RC=!ERRORLEVEL!"
 if not "!STEP_RC!"=="0" goto recovery_failed
 
@@ -614,18 +810,24 @@ move /Y "!PENDING_MARKER!" "!COMMIT_MARKER!" >nul
 set "STEP_RC=!ERRORLEVEL!"
 if not "!STEP_RC!"=="0" goto rollback
 
-call :cleanup_committed "!TOKEN!"
-set "STEP_RC=!ERRORLEVEL!"
-if not "!STEP_RC!"=="0" goto committed_failure
-
 start "" /b "!TARGET!\\Lovart_Auto.exe"
 set "STEP_RC=!ERRORLEVEL!"
 if not "!STEP_RC!"=="0" goto launch_failed
 
->"!LOG_FILE!" echo success
+set "CLEANUP_PENDING=0"
+call :cleanup_committed "!TOKEN!"
+set "STEP_RC=!ERRORLEVEL!"
+if not "!STEP_RC!"=="0" set "CLEANUP_PENDING=1"
 call :cleanup_current
 set "CLEANUP_RC=!ERRORLEVEL!"
-if not "!CLEANUP_RC!"=="0" goto cleanup_failed
+if not "!CLEANUP_RC!"=="0" set "CLEANUP_PENDING=1"
+if "!CLEANUP_PENDING!"=="1" (
+  >"!CLEANUP_MARKER!" echo(!TOKEN!
+  >"!LOG_FILE!" echo success cleanup_pending=!TOKEN! !RUN_NOTE!
+  goto finish_success
+)
+if exist "!CLEANUP_MARKER!" del /f /q "!CLEANUP_MARKER!" >nul 2>&1
+>"!LOG_FILE!" echo success !RUN_NOTE!
 goto finish_success
 
 :rollback
@@ -661,19 +863,39 @@ goto finish_rollback_failed
 >"!LOG_FILE!" echo rollback_cleanup_failed
 goto finish_rollback_failed
 
-:committed_failure
->"!LOG_FILE!" echo commit_cleanup_pending
-call :cleanup_current
-goto finish_rollback_failed
-
 :launch_failed
 >"!LOG_FILE!" echo launch_failed
 call :cleanup_current
 goto finish_rollback_failed
 
-:cleanup_failed
->"!LOG_FILE!" echo cleanup_failed
-goto finish_rollback_failed
+:lock_rejected
+call :release_lock
+exit /b 1
+
+:validate_lock
+if not exist "!LOCK_TOKEN_FILE!" exit /b 70
+set "LOCK_TOKEN_VALUE="
+set /p LOCK_TOKEN_VALUE=<"!LOCK_TOKEN_FILE!"
+if /I not "!LOCK_TOKEN_VALUE!"=="!TOKEN!" exit /b 71
+set /a LOCK_WAIT_COUNT=0
+:wait_lock_metadata
+if exist "!LOCK_PID_FILE!" if exist "!LOCK_IDENTITY_FILE!" goto verify_lock_metadata
+set /a LOCK_WAIT_COUNT+=1
+if !LOCK_WAIT_COUNT! GEQ 250 exit /b 72
+powershell.exe -NoProfile -NonInteractive -Command "Start-Sleep -Milliseconds 20"
+goto wait_lock_metadata
+:verify_lock_metadata
+set "LOCK_PID="
+set "LOCK_IDENTITY="
+set /p LOCK_PID=<"!LOCK_PID_FILE!"
+set /p LOCK_IDENTITY=<"!LOCK_IDENTITY_FILE!"
+echo(!LOCK_PID!| findstr.exe /r /x "[1-9][0-9]*" >nul
+if errorlevel 1 exit /b 73
+echo(!LOCK_IDENTITY!| findstr.exe /r /x "[1-9][0-9]*" >nul
+if errorlevel 1 exit /b 73
+powershell.exe -NoProfile -NonInteractive -Command "$p = Get-Process -Id !LOCK_PID! -ErrorAction Stop; if (([string]$p.StartTime.ToFileTimeUtc()) -ne '!LOCK_IDENTITY!') {{ exit 1 }}"
+if errorlevel 1 exit /b 74
+exit /b 0
 
 :recover_stale
 set "STALE_TOKEN="
@@ -739,7 +961,75 @@ if /I not "!STALE_MODE!"=="commit" (
     if exist "!STALE_PENDING!" exit /b 24
   )
 )
->"!LOG_FILE!" echo recovered
+set "RUN_NOTE=recovered=!STALE_TOKEN!"
+exit /b 0
+
+:cleanup_orphans
+set /a ORPHAN_COUNT=0
+for %%F in ("!UPDATE_ROOT!\\cleanup-pending-*") do if exist "%%~fF" (
+  set /a ORPHAN_COUNT+=1
+  if !ORPHAN_COUNT! LEQ 16 call :cleanup_orphan_marker "%%~fF"
+)
+for %%F in ("!UPDATE_ROOT!\\install-*.owner") do if exist "%%~fF" (
+  set /a ORPHAN_COUNT+=1
+  if !ORPHAN_COUNT! LEQ 16 call :cleanup_orphan_owner "%%~fF"
+)
+for /d %%D in ("!UPDATE_ROOT!\\*") do if exist "%%~fD\\" (
+  set /a ORPHAN_COUNT+=1
+  if !ORPHAN_COUNT! LEQ 16 call :cleanup_orphan_staging "%%~fD"
+)
+exit /b 0
+
+:cleanup_orphan_marker
+set "O_PATH=%~1"
+set "O_NAME=%~n1"
+set "O_TOKEN=!O_NAME:cleanup-pending-=!"
+if /I "!O_TOKEN!"=="!TOKEN!" exit /b 0
+if not "!O_TOKEN:~64,1!"=="" exit /b 0
+set "O_VALUE="
+set /p O_VALUE=<"!O_PATH!"
+if /I not "!O_VALUE!"=="!O_TOKEN!" exit /b 0
+echo(!O_TOKEN!| findstr.exe /r /x "[A-Za-z0-9-][A-Za-z0-9-]*" >nul
+if errorlevel 1 exit /b 0
+if exist "!UPDATE_ROOT!\\transaction-!O_TOKEN!.pending" exit /b 0
+if exist "!UPDATE_ROOT!\\transaction-!O_TOKEN!.commit" exit /b 0
+call :cleanup_stale "!O_TOKEN!"
+if errorlevel 1 exit /b 0
+del /f /q "!O_PATH!" >nul 2>&1
+if exist "!O_PATH!" exit /b 0
+set "RUN_NOTE=orphan_cleaned=!O_TOKEN!"
+exit /b 0
+
+:cleanup_orphan_owner
+set "O_PATH=%~1"
+set "O_NAME=%~n1"
+set "O_TOKEN=!O_NAME:install-=!"
+if /I "!O_TOKEN!"=="!TOKEN!" exit /b 0
+if not "!O_TOKEN:~64,1!"=="" exit /b 0
+set "O_VALUE="
+set /p O_VALUE=<"!O_PATH!"
+if /I not "!O_VALUE!"=="!O_TOKEN!" exit /b 0
+echo(!O_TOKEN!| findstr.exe /r /x "[A-Za-z0-9-][A-Za-z0-9-]*" >nul
+if errorlevel 1 exit /b 0
+if exist "!UPDATE_ROOT!\\transaction-!O_TOKEN!.pending" exit /b 0
+if exist "!UPDATE_ROOT!\\transaction-!O_TOKEN!.commit" exit /b 0
+call :cleanup_stale "!O_TOKEN!"
+if errorlevel 1 exit /b 0
+set "RUN_NOTE=orphan_cleaned=!O_TOKEN!"
+exit /b 0
+
+:cleanup_orphan_staging
+set "O_PATH=%~1"
+set "O_TOKEN=%~nx1"
+if /I "!O_TOKEN!"=="!TOKEN!" exit /b 0
+if not "!O_TOKEN:~64,1!"=="" exit /b 0
+echo(!O_TOKEN!| findstr.exe /r /x "[A-Za-z0-9-][A-Za-z0-9-]*" >nul
+if errorlevel 1 exit /b 0
+if exist "!UPDATE_ROOT!\\transaction-!O_TOKEN!.pending" exit /b 0
+if exist "!UPDATE_ROOT!\\transaction-!O_TOKEN!.commit" exit /b 0
+call :cleanup_stale "!O_TOKEN!"
+if errorlevel 1 exit /b 0
+set "RUN_NOTE=orphan_cleaned=!O_TOKEN!"
 exit /b 0
 
 :rollback_token
@@ -854,13 +1144,29 @@ exit /b 0
 if /I "%~1"=="!FAILURE_STEP!" exit /b 97
 exit /b 0
 
+:release_lock
+if not exist "!LOCK_DIR!\\" exit /b 0
+if not exist "!LOCK_TOKEN_FILE!" exit /b 81
+set "RELEASE_TOKEN="
+set /p RELEASE_TOKEN=<"!LOCK_TOKEN_FILE!"
+if /I not "!RELEASE_TOKEN!"=="!TOKEN!" exit /b 82
+rmdir /s /q "!LOCK_DIR!"
+if exist "!LOCK_DIR!\\" exit /b 83
+exit /b 0
+
 :finish_success
+call :release_lock
+if errorlevel 1 >>"!LOG_FILE!" echo lock_release_pending=!TOKEN!
 exit /b 0
 
 :finish_failure
+call :release_lock
+if errorlevel 1 >>"!LOG_FILE!" echo lock_release_pending=!TOKEN!
 exit /b 1
 
 :finish_rollback_failed
+call :release_lock
+if errorlevel 1 >>"!LOG_FILE!" echo lock_release_pending=!TOKEN!
 exit /b 2
 """
 
@@ -897,30 +1203,57 @@ def _write_and_start_installer(
         current_pid=current_pid or os.getpid(),
         owner_token=owner_token,
     )
-    owner_marker.write_text(owner_token, encoding="ascii")
-    script_path.write_text(content, encoding="utf-8", newline="\r\n")
-    creation_flags = 0
-    if os.name == "nt":
-        creation_flags = 0x08000000 | 0x00000200
-    process = subprocess.Popen(
-        _windows_installer_command(script_path),
-        cwd=str(app_dir),
-        close_fds=True,
-        creationflags=creation_flags,
-    )
-    deadline = time.monotonic() + max(0.1, start_timeout)
-    while time.monotonic() < deadline:
-        if started_marker.exists():
+    lock_dir = _reserve_installer_lock(update_root, owner_token)
+    process: subprocess.Popen | None = None
+    try:
+        started_marker.unlink(missing_ok=True)
+        owner_marker.write_text(owner_token, encoding="ascii")
+        script_path.write_text(content, encoding="utf-8", newline="\r\n")
+        creation_flags = 0
+        if os.name == "nt":
+            creation_flags = 0x08000000 | 0x00000200
+        process = subprocess.Popen(
+            _windows_installer_command(script_path),
+            cwd=str(app_dir),
+            close_fds=True,
+            creationflags=creation_flags,
+        )
+        _record_installer_process(lock_dir, owner_token, process)
+        deadline = time.monotonic() + max(0.1, start_timeout)
+        while time.monotonic() < deadline:
+            if started_marker.exists():
+                try:
+                    if (
+                        started_marker.read_text(encoding="utf-8").strip()
+                        == owner_token
+                    ):
+                        return process
+                except OSError:
+                    pass
+            if process.poll() is not None:
+                break
+            time.sleep(0.02)
+    except Exception:
+        if process is not None and process.poll() is None:
+            process.terminate()
             try:
-                if started_marker.read_text(encoding="utf-8").strip() == owner_token:
-                    return process
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        _release_installer_lock(update_root, owner_token)
+        for path in (started_marker, owner_marker, script_path):
+            try:
+                path.unlink(missing_ok=True)
             except OSError:
                 pass
-        if process.poll() is not None:
-            break
-        time.sleep(0.02)
-    if process.poll() is None:
+        raise
+    if process is not None and process.poll() is None:
         process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+    _release_installer_lock(update_root, owner_token)
     for path in (started_marker, owner_marker, script_path):
         try:
             path.unlink(missing_ok=True)
