@@ -160,7 +160,7 @@ def check_update_details(
     )
 
     def fetch_manifest():
-        with opener(request, 10) as response:
+        with opener(request, timeout=10) as response:
             _require_https_response(response, "更新信息请求")
             raw = response.read(_MAX_MANIFEST_BYTES + 1)
         if len(raw) > _MAX_MANIFEST_BYTES:
@@ -255,7 +255,7 @@ def _download_verified_archive(
             archive_part.unlink()
         digest = hashlib.sha256()
         downloaded = 0
-        with opener(request, 30) as response, archive_part.open("xb") as output:
+        with opener(request, timeout=30) as response, archive_part.open("xb") as output:
             _require_https_response(response, "更新包下载")
             while True:
                 block = response.read(1024 * 1024)

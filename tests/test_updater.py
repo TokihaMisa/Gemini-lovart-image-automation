@@ -76,7 +76,7 @@ class UpdateCheckTests(unittest.TestCase):
     def test_uses_master_manifest_with_cache_busting_headers(self):
         requests = []
 
-        def opener(request, timeout):
+        def opener(request, data=None, timeout=None):
             requests.append((request, timeout))
             return FakeResponse(self.manifest(version=updater.VERSION))
 
@@ -87,13 +87,27 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertEqual(requests[0][0].get_header("Cache-control"), "no-cache")
         self.assertEqual(requests[0][0].get_header("Pragma"), "no-cache")
 
+    def test_stdlib_signature_receives_manifest_timeout_as_keyword(self):
+        calls = []
+
+        def opener(url, data=None, timeout=None):
+            self.assertIsNone(data)
+            self.assertEqual(timeout, 10)
+            calls.append(url)
+            return FakeResponse(self.manifest(version=updater.VERSION))
+
+        result = updater.check_update_details(opener=opener, sleep=lambda _delay: None)
+
+        self.assertEqual(result.status, updater.UpdateStatus.UP_TO_DATE)
+        self.assertEqual(len(calls), 1)
+
     def test_404_is_error_not_latest_and_is_not_retried(self):
         calls = []
         error = HTTPError(
             "https://example.test/private", 404, "private response", {}, None
         )
 
-        def opener(request, timeout):
+        def opener(request, data=None, timeout=None):
             calls.append(request.full_url)
             raise error
 
@@ -112,7 +126,7 @@ class UpdateCheckTests(unittest.TestCase):
     def test_transient_check_retries_with_balanced_policy(self):
         calls, delays = [], []
 
-        def opener(_request, _timeout):
+        def opener(_request, data=None, timeout=None):
             calls.append(1)
             if len(calls) < 5:
                 raise ConnectionResetError("api-key=private")
@@ -126,7 +140,7 @@ class UpdateCheckTests(unittest.TestCase):
 
     def test_manifest_rejects_https_to_http_redirect(self):
         result = updater.check_update_details(
-            opener=lambda _request, _timeout: FakeResponse(
+            opener=lambda _request, data=None, timeout=None: FakeResponse(
                 self.manifest(), final_url="http://mirror.example.test/version.json"
             ),
             sleep=lambda _delay: None,
@@ -139,7 +153,7 @@ class UpdateCheckTests(unittest.TestCase):
         for latest in ("1.3.0", "1.2.99", "1.3.1"):
             with self.subTest(latest=latest):
                 result = updater.check_update_details(
-                    opener=lambda _request, _timeout, latest=latest: FakeResponse(
+                    opener=lambda _request, data=None, timeout=None, latest=latest: FakeResponse(
                         self.manifest(version=latest)
                     ),
                     current_version="1.3.1",
@@ -148,7 +162,7 @@ class UpdateCheckTests(unittest.TestCase):
                 self.assertEqual(result.status, updater.UpdateStatus.UP_TO_DATE)
 
         result = updater.check_update_details(
-            opener=lambda _request, _timeout: FakeResponse(
+            opener=lambda _request, data=None, timeout=None: FakeResponse(
                 self.manifest(version="1.10.0")
             ),
             current_version="1.9.9",
@@ -169,7 +183,7 @@ class UpdateCheckTests(unittest.TestCase):
         for overrides in invalid:
             with self.subTest(overrides=overrides):
                 result = updater.check_update_details(
-                    opener=lambda _request, _timeout, overrides=overrides: FakeResponse(
+                    opener=lambda _request, data=None, timeout=None, overrides=overrides: FakeResponse(
                         self.manifest(**overrides)
                     ),
                     sleep=lambda _delay: None,
@@ -295,7 +309,7 @@ class DownloadAndInstallTests(unittest.TestCase):
     def test_download_uses_fresh_app_local_part_and_verifies_before_rename(self):
         seen = []
 
-        def opener(request, timeout):
+        def opener(request, data=None, timeout=None):
             seen.append((request.full_url, timeout))
             return FakeResponse(self.archive)
 
@@ -313,6 +327,27 @@ class DownloadAndInstallTests(unittest.TestCase):
         self.assertFalse(any(prepared.staging_dir.glob("*.part")))
         self.assertTrue((prepared.payload_dir / "Lovart_Auto.exe").is_file())
 
+    def test_stdlib_signature_receives_download_timeout_as_keyword(self):
+        calls = []
+
+        def opener(url, data=None, timeout=None):
+            self.assertIsNone(data)
+            self.assertEqual(timeout, 30)
+            calls.append(url)
+            return FakeResponse(self.archive)
+
+        prepared = updater.prepare_update(
+            "https://downloads.example.test/update.zip",
+            hashlib.sha256(self.archive).hexdigest(),
+            len(self.archive),
+            app_dir=self.app_dir,
+            opener=opener,
+            sleep=lambda _delay: None,
+        )
+
+        self.assertTrue(prepared.archive_path.exists())
+        self.assertEqual(len(calls), 1)
+
     def test_size_and_hash_mismatch_leave_no_verified_archive(self):
         cases = (
             (len(self.archive) + 1, hashlib.sha256(self.archive).hexdigest()),
@@ -327,7 +362,7 @@ class DownloadAndInstallTests(unittest.TestCase):
                     digest,
                     size,
                     app_dir=app_dir,
-                    opener=lambda _request, _timeout: FakeResponse(self.archive),
+                    opener=lambda _request, data=None, timeout=None: FakeResponse(self.archive),
                     sleep=lambda _delay: None,
                 )
             self.assertFalse(list((app_dir / ".lovart-update").rglob("*.zip")))
@@ -341,7 +376,7 @@ class DownloadAndInstallTests(unittest.TestCase):
                     raise ConnectionResetError("C:\\Users\\Private\\secret")
                 return super().read(min(size, 8))
 
-        def opener(_request, _timeout):
+        def opener(_request, data=None, timeout=None):
             calls.append(1)
             if len(calls) < 3:
                 return PartialResponse(self.archive)
@@ -363,7 +398,7 @@ class DownloadAndInstallTests(unittest.TestCase):
     def test_clean_short_read_retries_from_empty_part(self):
         calls, delays = [], []
 
-        def opener(_request, _timeout):
+        def opener(_request, data=None, timeout=None):
             calls.append(1)
             payload = self.archive[:-7] if len(calls) == 1 else self.archive
             return FakeResponse(payload)
@@ -392,7 +427,7 @@ class DownloadAndInstallTests(unittest.TestCase):
             app_dir = self.app_dir / f"permanent-{index}"
             app_dir.mkdir()
 
-            def opener(_request, _timeout, payload=payload):
+            def opener(_request, data=None, timeout=None, payload=payload):
                 calls.append(1)
                 return FakeResponse(payload)
 
@@ -415,7 +450,7 @@ class DownloadAndInstallTests(unittest.TestCase):
                 hashlib.sha256(self.archive).hexdigest(),
                 len(self.archive),
                 app_dir=self.app_dir,
-                opener=lambda _request, _timeout: FakeResponse(
+                opener=lambda _request, data=None, timeout=None: FakeResponse(
                     self.archive,
                     final_url="http://mirror.example.test/update.zip?token=private",
                 ),
@@ -433,7 +468,7 @@ class DownloadAndInstallTests(unittest.TestCase):
                 hashlib.sha256(self.archive).hexdigest(),
                 len(self.archive),
                 app_dir=self.app_dir,
-                opener=lambda _request, _timeout: (_ for _ in ()).throw(
+                opener=lambda _request, data=None, timeout=None: (_ for _ in ()).throw(
                     ConnectionResetError(str(self.app_dir / "secret"))
                 ),
                 policy=RetryPolicy(network_attempts=1),

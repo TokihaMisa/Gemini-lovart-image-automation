@@ -305,7 +305,7 @@ class Program {
             hashlib.sha256(archive).hexdigest(),
             len(archive),
             app_dir=target,
-            opener=lambda _request, _timeout: BytesResponse(archive),
+            opener=lambda _request, data=None, timeout=None: BytesResponse(archive),
             sleep=lambda _delay: None,
         )
 
@@ -795,7 +795,7 @@ class Program {
                 hashlib.sha256(archive).hexdigest(),
                 len(archive),
                 app_dir=target,
-                opener=lambda _request, _timeout: BytesResponse(archive),
+                opener=lambda _request, data=None, timeout=None: BytesResponse(archive),
                 sleep=lambda _delay: None,
             )
         update_root = target / ".lovart-update"
@@ -813,7 +813,7 @@ class Program {
         target = self._create_target()
         claims_seen = []
 
-        def failing_opener(_request, _timeout):
+        def failing_opener(_request, data=None, timeout=None):
             claims_seen.extend(
                 (target / ".lovart-update").glob("prepare-*.claim")
             )
