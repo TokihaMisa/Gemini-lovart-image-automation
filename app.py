@@ -2,6 +2,9 @@ import os
 import sys
 import multiprocessing
 
+os.environ["NO_PROXY"] = "localhost,127.0.0.1"
+os.environ["no_proxy"] = "localhost,127.0.0.1"
+
 # 修复 PyInstaller --windowed 无控制台模式下 sys.stdout 为 None 导致 Uvicorn 崩溃的 BUG
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w", encoding="utf-8")
