@@ -200,6 +200,58 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             with patch("gemini_bot.time.time", side_effect=[0] * 10 + [2]):
                 self.assertEqual(bot._wait_for_uploads_complete(2), expected)
 
+    def test_upload_fallback_pastes_images_into_new_gemini_editor(self):
+        class Page:
+            def __init__(self):
+                self.payload = None
+
+            def evaluate(self, script, payload):
+                self.payload = payload
+                return "ClipboardEvent" in script
+
+        class Bot(GeminiBot):
+            def _wait_for_uploads_complete(self, expected_count):
+                return expected_count == 1
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "blank.png"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            page = Page()
+            bot = Bot(page, {"gemini": {}}, FakeFormalLogger())
+
+            self.assertTrue(bot._paste_images_into_editor([str(image_path)]))
+            self.assertEqual(page.payload[0]["name"], "blank.png")
+            self.assertEqual(page.payload[0]["type"], "image/png")
+            self.assertTrue(page.payload[0]["data"])
+
+    def test_real_playwright_upload_wait_accepts_stable_blob_preview_near_editor(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            try:
+                page.set_content("""
+                    <main>
+                      <section id="composer">
+                        <div contenteditable="true" role="textbox"></div>
+                        <img
+                          src="blob:https://gemini.google.com/test-preview"
+                          style="width: 112px; height: 112px"
+                        >
+                      </section>
+                    </main>
+                """)
+                bot = GeminiBot(
+                    page,
+                    {"gemini": {"upload_timeout": 3}},
+                    FakeFormalLogger(),
+                )
+
+                self.assertTrue(bot._wait_for_uploads_complete(1))
+            finally:
+                browser.close()
+
     def test_normalized_dom_fallbacks_match_real_spanish_text_and_attributes(self):
         class EmptyLocator:
             first = None

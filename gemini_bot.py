@@ -1,4 +1,6 @@
+import base64
 import json
+import mimetypes
 import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -1096,6 +1098,84 @@ class GeminiBot:
         self.logger.warning("Gemini: all upload attempts failed")
         return False
 
+    def _paste_images_into_editor(self, image_paths: list[str]) -> bool:
+        """Upload through Gemini's editor when its native picker is not observable."""
+        payload = []
+        try:
+            for value in image_paths:
+                path = Path(value)
+                mime_type = mimetypes.guess_type(path.name)[0] or ""
+                if not path.is_file() or not mime_type.startswith("image/"):
+                    return False
+                payload.append(
+                    {
+                        "name": path.name,
+                        "type": mime_type,
+                        "data": base64.b64encode(path.read_bytes()).decode("ascii"),
+                    }
+                )
+        except OSError:
+            return False
+
+        try:
+            pasted = self.page.evaluate(
+                """
+                files => {
+                    const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                            && style.visibility !== 'hidden' && style.display !== 'none';
+                    };
+                    const editor = [
+                        ...document.querySelectorAll(
+                            '[contenteditable="true"][role="textbox"], '
+                            + 'rich-textarea [contenteditable="true"], '
+                            + '[contenteditable="true"], textarea, [role="textbox"]'
+                        )
+                    ].find(visible);
+                    if (!editor || typeof DataTransfer === 'undefined' || typeof File === 'undefined') {
+                        return false;
+                    }
+
+                    const transfer = new DataTransfer();
+                    for (const item of files) {
+                        const binary = atob(item.data);
+                        const bytes = new Uint8Array(binary.length);
+                        for (let index = 0; index < binary.length; index += 1) {
+                            bytes[index] = binary.charCodeAt(index);
+                        }
+                        transfer.items.add(
+                            new File([bytes], item.name, { type: item.type })
+                        );
+                    }
+
+                    editor.focus();
+                    editor.dispatchEvent(
+                        new ClipboardEvent('paste', {
+                            bubbles: true,
+                            cancelable: true,
+                            clipboardData: transfer,
+                        })
+                    );
+                    return true;
+                }
+                """,
+                payload,
+            )
+        except Exception:
+            self.logger.warning("Gemini: editor paste upload was unavailable")
+            return False
+
+        if not pasted:
+            return False
+        if self._wait_for_uploads_complete(len(image_paths)):
+            self.logger.info(
+                f"Gemini: uploaded {len(image_paths)} image(s) via editor paste"
+            )
+            return True
+        return False
+
     def _upload_images_once(self, image_paths: list[str]) -> bool:
         # Strategy 1: Direct set_input_files on any file input on the page.
         # Playwright can interact with hidden file inputs directly, avoiding UI clicks entirely.
@@ -1109,6 +1189,12 @@ class GeminiBot:
                     return True
         except Exception:
             self.logger.warning("Gemini: direct file input upload was unavailable")
+
+        # New Gemini builds can use a native picker that does not emit Playwright's
+        # filechooser event. Pasting File objects into the editor uses the same
+        # attachment pipeline without interacting with the operating-system dialog.
+        if self._paste_images_into_editor(image_paths):
+            return True
 
         # Strategy 2: Click the add/upload button robustly, then expect a file chooser
         clicked = False
@@ -1259,6 +1345,29 @@ class GeminiBot:
                                 ].filter(Boolean).join(' ');
                                 return /(image|photo|picture|uploaded|attachment|图片|照片|附件|已上传|adjunto|archivo)/i.test(label);
                             });
+                        const editor = document.querySelector(
+                            '[contenteditable="true"][role="textbox"], '
+                            + 'rich-textarea [contenteditable="true"], '
+                            + '[contenteditable="true"], textarea, [role="textbox"]'
+                        );
+                        const blobPreviews = editor
+                            ? [...document.querySelectorAll('img[src^="blob:"], img[src^="data:image/"]')]
+                                .filter((image) => {
+                                    const rect = image.getBoundingClientRect();
+                                    const style = getComputedStyle(image);
+                                    if (rect.width < 32 || rect.height < 32
+                                        || style.visibility === 'hidden' || style.display === 'none') {
+                                        return false;
+                                    }
+                                    let ancestor = editor.parentElement;
+                                    for (let depth = 0; ancestor && depth < 8; depth += 1) {
+                                        if (ancestor.contains(image)) return true;
+                                        ancestor = ancestor.parentElement;
+                                    }
+                                    return false;
+                                })
+                            : [];
+                        attachmentNodes.push(...blobPreviews);
                         const unique = [];
                         for (const node of attachmentNodes) {
                             const parent = node.closest('[data-attachment-id], attachment-preview, .attachment-preview, mat-chip.attachment, .attachment-chip') || node;

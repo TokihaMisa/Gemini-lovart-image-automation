@@ -1,7 +1,7 @@
 {
-  "version": "1.3.3",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.3/update.zip",
-  "changelog": "兼容新版 Gemini 全屏及紧凑窗口中的临时聊天图标；修复慢网速下页面未加载完成时反复刷新的问题；新增默认关闭的普通聊天降级开关。",
-  "sha256": "cc6b9a6a951b3b83d9dc2d0e8ff046fe7802a077732711870298159d7d39ea24",
-  "size": 129469131
+  "version": "1.3.4",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.4/update.zip",
+  "changelog": "兼容新版 Gemini 图片上传流程：文件选择器不可捕获时改用编辑器粘贴上传，并正确识别 blob 图片预览，避免图片已上传却被误判失败。",
+  "sha256": "e2606e2f9ec3c9fa223b0d32a7393114e627f8a27970633e7b9df137005f4b46",
+  "size": 129475649
 }
