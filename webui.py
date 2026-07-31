@@ -1,4 +1,5 @@
 import os
+import json
 import subprocess
 import threading
 import time
@@ -109,6 +110,219 @@ def guard_gemini_browser_task(
     if prompt_source == "gemini_browser" and login_helper_is_active(login_runtime_paths(config_path)):
         return _GEMINI_PROFILE_BUSY_MESSAGE
     return None
+
+
+def build_gemini_health_check_command(
+    config_path: str | Path,
+    status_file: str | Path,
+    *,
+    executable: str | None = None,
+    frozen: bool | None = None,
+) -> list[str]:
+    import sys
+
+    program = executable or sys.executable
+    args = [
+        "--gemini-health-check",
+        "--config",
+        str(Path(config_path).resolve()),
+        "--status-file",
+        str(Path(status_file).resolve()),
+    ]
+    is_frozen = getattr(sys, "frozen", False) if frozen is None else frozen
+    if is_frozen:
+        return [program, *args]
+    return [program, str(Path(__file__).with_name("app.py").resolve()), *args]
+
+
+def _health_check_runs_root() -> Path:
+    return Path("runs/gemini_health_check").resolve()
+
+
+def _start_gemini_health_check_process(
+    config_path: str | Path, status_file: Path
+) -> subprocess.Popen:
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    kwargs: dict[str, object] = {
+        "env": env,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    process = subprocess.Popen(
+        build_gemini_health_check_command(config_path, status_file),
+        **kwargs,
+    )
+    active_processes.append(process)
+    return process
+
+
+def _read_health_check_records(
+    status_file: Path, offset: int
+) -> tuple[list[dict], int]:
+    if not status_file.exists():
+        return [], offset
+    with status_file.open("rb") as handle:
+        handle.seek(offset)
+        data = handle.read()
+    complete_end = data.rfind(b"\n")
+    if complete_end < 0:
+        return [], offset
+    consumed = data[: complete_end + 1]
+    records = []
+    for raw_line in consumed.splitlines():
+        try:
+            value = json.loads(raw_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            records.append(value)
+    return records, offset + len(consumed)
+
+
+def _render_health_check_results(
+    results: list[dict], *, final_message: str | None = None
+) -> str:
+    icons = {"pass": "✅", "fail": "❌", "skip": "⚠️"}
+    counts = {"pass": 0, "fail": 0, "skip": 0}
+    lines = ["### Gemini 完整体检", ""]
+    for result in results:
+        state = str(result.get("state", "fail"))
+        if state not in counts:
+            state = "fail"
+        counts[state] += 1
+        name = str(result.get("name", "未命名检查项"))
+        message = str(result.get("message", "")).strip()
+        detail = f"：{message}" if message else ""
+        lines.append(f"{icons[state]} **{name}**{detail}")
+    if not results:
+        lines.append("正在等待体检结果…")
+    if final_message:
+        lines.extend(["", final_message])
+    lines.extend(
+        [
+            "",
+            (
+                f"**汇总：正常 {counts['pass']} · "
+                f"异常 {counts['fail']} · 跳过 {counts['skip']}**"
+            ),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _stop_health_check_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "nt" and getattr(process, "pid", None):
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def ui_run_gemini_health_check(
+    config_path: str | Path = "config.yaml",
+):
+    run_dir = _health_check_runs_root() / str(time.time_ns())
+    status_file = run_dir / "status.jsonl"
+    process = None
+    results: list[dict] = []
+    yield "正在启动 Gemini 完整体检…"
+    try:
+        run_dir.mkdir(parents=True, exist_ok=False)
+        process = _start_gemini_health_check_process(config_path, status_file)
+        offset = 0
+        complete = False
+        complete_exit_code = None
+        deadline = time.monotonic() + 1800
+        while True:
+            records, offset = _read_health_check_records(status_file, offset)
+            for record in records:
+                event = record.get("event")
+                if event == "result" and isinstance(record.get("result"), dict):
+                    results.append(record["result"])
+                    yield _render_health_check_results(results)
+                elif event == "complete":
+                    complete = True
+                    complete_exit_code = int(record.get("exit_code", 1))
+            if complete:
+                final_message = None
+                if complete_exit_code:
+                    final_message = "❌ Gemini 完整体检未通过，请查看异常项目。"
+                yield _render_health_check_results(
+                    results,
+                    final_message=final_message,
+                )
+                break
+            returncode = process.poll()
+            if returncode is not None:
+                final_records, offset = _read_health_check_records(status_file, offset)
+                for record in final_records:
+                    if (
+                        record.get("event") == "result"
+                        and isinstance(record.get("result"), dict)
+                    ):
+                        results.append(record["result"])
+                    elif record.get("event") == "complete":
+                        complete = True
+                        complete_exit_code = int(record.get("exit_code", 1))
+                if complete:
+                    final_message = None
+                    if complete_exit_code:
+                        final_message = "❌ Gemini 完整体检未通过，请查看异常项目。"
+                    yield _render_health_check_results(
+                        results,
+                        final_message=final_message,
+                    )
+                    break
+                yield _render_health_check_results(
+                    results,
+                    final_message=f"❌ 体检进程提前退出（代码 {returncode}）。",
+                )
+                break
+            if time.monotonic() >= deadline:
+                _stop_health_check_process(process)
+                yield _render_health_check_results(
+                    results,
+                    final_message="❌ 体检超时，已停止本次独立体检进程。",
+                )
+                break
+            time.sleep(0.25)
+    except Exception:
+        if process is not None:
+            _stop_health_check_process(process)
+        yield _render_health_check_results(
+            results,
+            final_message="❌ 无法启动 Gemini 完整体检，请稍后重试。",
+        )
+    finally:
+        if process is not None and process.poll() is None:
+            _stop_health_check_process(process)
+        if process in active_processes:
+            active_processes.remove(process)
+        try:
+            status_file.unlink(missing_ok=True)
+            run_dir.rmdir()
+        except OSError:
+            pass
+
 
 def cleanup_processes():
     for p in active_processes:
@@ -1452,6 +1666,14 @@ def build_ui():
                     with gr.Row():
                         open_gemini_login_btn = gr.Button("打开 Gemini 登录浏览器")
                         check_gemini_login_btn = gr.Button("检查登录并关闭浏览器")
+                        gemini_health_check_btn = gr.Button(
+                            "Gemini 一键完整体检",
+                            variant="secondary",
+                        )
+                    gemini_health_check_result = gr.Markdown(
+                        "尚未运行 Gemini 完整体检。",
+                        elem_id="gemini-health-check-result",
+                    )
                     allow_regular_chat_fallback = gr.Checkbox(
                         label="临时聊天不可用时，允许使用普通聊天继续",
                         value=allow_regular_chat_fallback_value,
@@ -1517,6 +1739,29 @@ def build_ui():
                         fn=check_gemini_login_and_close,
                         outputs=gemini_login_status,
                         api_name="check_gemini_login_and_close",
+                    )
+                    health_check_start = gemini_health_check_btn.click(
+                        fn=lambda: gr.update(interactive=False),
+                        outputs=gemini_health_check_btn,
+                        queue=False,
+                        api_name=False,
+                    )
+                    health_check_run = health_check_start.then(
+                        fn=ui_run_gemini_health_check,
+                        outputs=gemini_health_check_result,
+                        api_name="run_gemini_health_check",
+                    )
+                    health_check_run.then(
+                        fn=lambda: gr.update(interactive=True),
+                        outputs=gemini_health_check_btn,
+                        queue=False,
+                        api_name=False,
+                    )
+                    health_check_run.failure(
+                        fn=lambda: gr.update(interactive=True),
+                        outputs=gemini_health_check_btn,
+                        queue=False,
+                        api_name=False,
                     )
 
                     gemini_refresh_btn.click(

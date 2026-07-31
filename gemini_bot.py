@@ -52,6 +52,33 @@ EXTENDED_THINKING_TERMS = frozenset((
 UPLOAD_TERMS = frozenset(("上传", "attach", "upload", "adjuntar archivos", "adjuntar", "subir"))
 TEMPORARY_CHAT_TERMS = frozenset(("临时", "temporary", "chat temporal"))
 
+GEMINI_EDITOR_SELECTOR = (
+    '[contenteditable="true"][role="textbox"], '
+    'rich-textarea [contenteditable="true"], '
+    '[contenteditable="true"], textarea, [role="textbox"]'
+)
+GEMINI_UPLOAD_CONTROL_SELECTORS = (
+    'button:has(img[alt="add_2"])',
+    'button[aria-label*="上传和工具"]',
+    'button[aria-label*="上传"]',
+    'button[aria-label*="添加"]',
+    'button[aria-label*="附件"]',
+    'button[aria-label*="Upload"]',
+    'button[aria-label*="attach"]',
+    'button[aria-label*="Attach"]',
+    'button[aria-label*="Adjuntar"]',
+    '[role="button"][aria-label*="Adjuntar"]',
+    'button[aria-label*="Subir"]',
+    '[role="button"][aria-label*="Subir"]',
+    '[role="button"][aria-label*="上传和工具"]',
+)
+GEMINI_SEND_BUTTON_SELECTORS = (
+    'button[aria-label*="Send"]',
+    'button[aria-label*="发送"]',
+    'button[aria-label*="提交"]',
+    'button[aria-label*="submit"]',
+)
+
 
 class GeminiPageStructureError(RuntimeError):
     """Gemini loaded but its expected controls were not present."""
@@ -162,6 +189,40 @@ class GeminiBot:
         self.logger = logger
         self.run_dir = Path(run_dir) if run_dir else None
         self.prompt_settings = get_prompt_settings(config)
+
+    def _health_check_any_visible(
+        self,
+        selectors: str | tuple[str, ...],
+        *,
+        require_enabled: bool = False,
+    ) -> bool:
+        """Inspect controls without mutating the Gemini page."""
+        candidates = (selectors,) if isinstance(selectors, str) else selectors
+        for selector in candidates:
+            try:
+                locator = self.page.locator(selector)
+                for index in range(min(locator.count(), 12)):
+                    candidate = locator.nth(index)
+                    if not candidate.is_visible(timeout=500):
+                        continue
+                    if require_enabled and not candidate.is_enabled():
+                        continue
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def health_check_editor(self) -> bool:
+        return self._health_check_any_visible(GEMINI_EDITOR_SELECTOR)
+
+    def health_check_upload_control(self) -> bool:
+        return self._health_check_any_visible(GEMINI_UPLOAD_CONTROL_SELECTORS)
+
+    def health_check_send_button(self) -> bool:
+        return self._health_check_any_visible(
+            GEMINI_SEND_BUTTON_SELECTORS,
+            require_enabled=True,
+        )
 
     @staticmethod
     def _error_kind(error: BaseException) -> str:
@@ -473,8 +534,54 @@ class GeminiBot:
         except Exception:
             return False
 
+    def health_check_temporary_chat_active(self) -> bool:
+        """Confirm the temporary-chat control switched into its active state."""
+        script = """
+        () => {
+            const visible = (node) => {
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return rect.width > 0 && rect.height > 0
+                    && style.visibility !== 'hidden' && style.display !== 'none';
+            };
+            return [...document.querySelectorAll('button, [role="button"]')]
+                .filter(visible)
+                .some((node) => {
+                    const icon = node.querySelector(
+                        'mat-icon[data-mat-icon-name="close"], '
+                        + 'mat-icon[fonticon="close"]'
+                    );
+                    if (!icon) return false;
+                    const text = [
+                        node.innerText,
+                        node.getAttribute('aria-label'),
+                        node.getAttribute('title'),
+                        node.getAttribute('data-tooltip'),
+                    ].filter(Boolean).join(' ');
+                    return /临时|臨時|temporary|chat temporal/i.test(text)
+                        || String(node.getAttribute('jslog') || '').startsWith('274589');
+                });
+        }
+        """
+        try:
+            return bool(self.page.evaluate(script))
+        except Exception:
+            return False
+
+    def _wait_for_temporary_chat_active(self, timeout_ms: int = 6000) -> bool:
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            if self.health_check_temporary_chat_active():
+                return True
+            self.page.wait_for_timeout(250)
+        return False
+
     def _start_temporary_chat(self) -> bool:
         """Open Gemini temporary chat/session when the UI exposes that control."""
+        if self.health_check_temporary_chat_active():
+            self.logger.info("Gemini: temporary chat is already active")
+            return True
+
         selectors = [
             'button[aria-label*="临时"]',
             '[role="button"][aria-label*="临时"]',
@@ -496,13 +603,13 @@ class GeminiBot:
                     control.click(timeout=3000)
                     self.page.wait_for_timeout(1500)
                     self.logger.info(f"Gemini: temporary chat clicked via {selector}")
-                    return True
+                    return self._wait_for_temporary_chat_active()
             except Exception:
                 continue
 
         if self._click_normalized_dom_term(TEMPORARY_CHAT_TERMS, "temporary chat"):
             self.page.wait_for_timeout(1500)
-            return True
+            return self._wait_for_temporary_chat_active()
 
         script = """
         () => {
@@ -537,12 +644,12 @@ class GeminiBot:
             if clicked:
                 self.page.wait_for_timeout(1500)
                 self.logger.info("Gemini: temporary chat clicked via DOM scan")
-                return True
+                return self._wait_for_temporary_chat_active()
         except Exception:
             self.logger.warning("Gemini: temporary chat DOM scan was unavailable")
 
         if self._click_temporary_chat_via_hover_tooltip():
-            return True
+            return self._wait_for_temporary_chat_active()
 
         self.logger.warning("Gemini: temporary chat control not found")
         return False
@@ -1198,21 +1305,7 @@ class GeminiBot:
 
         # Strategy 2: Click the add/upload button robustly, then expect a file chooser
         clicked = False
-        selectors = [
-            'button:has(img[alt="add_2"])',
-            'button[aria-label*="上传和工具"]',
-            'button[aria-label*="上传"]',
-            'button[aria-label*="添加"]',
-            'button[aria-label*="附件"]',
-            'button[aria-label*="Upload"]',
-            'button[aria-label*="attach"]',
-            'button[aria-label*="Attach"]',
-            'button[aria-label*="Adjuntar"]',
-            '[role="button"][aria-label*="Adjuntar"]',
-            'button[aria-label*="Subir"]',
-            '[role="button"][aria-label*="Subir"]',
-            '[role="button"][aria-label*="上传和工具"]',
-        ]
+        selectors = GEMINI_UPLOAD_CONTROL_SELECTORS
         
         for selector in selectors:
             try:
@@ -1413,12 +1506,7 @@ class GeminiBot:
         self.page.wait_for_timeout(800)
         self.logger.info(f"Gemini: text inserted ({len(text)} chars)")
 
-        for selector in [
-            'button[aria-label*="Send"]',
-            'button[aria-label*="发送"]',
-            'button[aria-label*="提交"]',
-            'button[aria-label*="submit"]',
-        ]:
+        for selector in GEMINI_SEND_BUTTON_SELECTORS:
             try:
                 self.page.locator(selector).first.click(timeout=3000)
                 self.logger.info("Gemini: clicked Send")

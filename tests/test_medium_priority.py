@@ -263,6 +263,9 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 return False
 
         class Page:
+            def __init__(self):
+                self.temporary_active = False
+
             def locator(self, _selector):
                 return EmptyLocator()
 
@@ -270,10 +273,13 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 pass
 
             def evaluate(self, script):
+                if 'data-mat-icon-name="close"' in script:
+                    return self.temporary_active
                 self.assert_normalized_script(script)
                 if "aria-checked" in script:
                     return True
                 if "chat temporal" in script.casefold():
+                    self.temporary_active = True
                     return "CHAT   TEMPORAL"
                 if "rapido" in script.casefold():
                     return "RÁPIDO"
@@ -304,10 +310,18 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             page = browser.new_page()
             try:
                 page.set_content("""
-                    <button data-tooltip='  CHAT   TEMPORAL  '>temporary</button>
+                    <button data-tooltip='  CHAT   TEMPORAL  ' jslog='274589'>
+                        <mat-icon data-mat-icon-name='gemini_chat_temp'></mat-icon>
+                    </button>
                     <button title='RÁPIDO'>mode</button>
                     <button aria-label='Pensamiento ampliado'>thinking</button>
                     <div role='menuitemcheckbox' title=' PENSAMIENTO   AMPLIADO ' aria-checked='true'>selected</div>
+                    <script>
+                        document.querySelector('[data-tooltip]').addEventListener('click', event => {
+                            event.currentTarget.querySelector('mat-icon')
+                                .setAttribute('data-mat-icon-name', 'close');
+                        });
+                    </script>
                 """)
                 bot = GeminiBot(page, {"gemini": {}}, FakeFormalLogger())
                 self.assertTrue(bot._start_temporary_chat())
@@ -340,7 +354,12 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                         );
                         button.addEventListener(
                             "click",
-                            () => document.body.dataset.temporaryChatClicked = "true"
+                            () => {
+                                document.body.dataset.temporaryChatClicked = "true";
+                                button.setAttribute("jslog", "274589");
+                                button.innerHTML =
+                                    '<mat-icon data-mat-icon-name="close"></mat-icon>';
+                            }
                         );
                     </script>
                 """)
@@ -667,6 +686,8 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
 
             def click(self, **_kwargs):
                 self.page.clicked.append(self.selector)
+                if "Chat temporal" in self.selector:
+                    self.page.temporary_active = True
 
             def set_input_files(self, _paths):
                 self.page.uploaded = True
@@ -676,12 +697,18 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 self.clicked = []
                 self.file_queries = 0
                 self.uploaded = False
+                self.temporary_active = False
 
             def locator(self, selector):
                 return Locator(self, selector)
 
             def wait_for_timeout(self, _milliseconds):
                 pass
+
+            def evaluate(self, script):
+                if 'data-mat-icon-name="close"' in script:
+                    return self.temporary_active
+                return False
 
         class Bot(GeminiBot):
             def _wait_for_uploads_complete(self, _expected_count):

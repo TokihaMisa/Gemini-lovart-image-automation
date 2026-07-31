@@ -13,6 +13,23 @@ if sys.stderr is None:
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    if "--gemini-health-check" in sys.argv:
+        from gemini_health_check import run_health_check_cli
+
+        config_index = sys.argv.index("--config") if "--config" in sys.argv else -1
+        status_index = (
+            sys.argv.index("--status-file") if "--status-file" in sys.argv else -1
+        )
+        config_path = (
+            sys.argv[config_index + 1]
+            if config_index >= 0 and config_index + 1 < len(sys.argv)
+            else "config.yaml"
+        )
+        if status_index < 0 or status_index + 1 >= len(sys.argv):
+            raise SystemExit(2)
+        raise SystemExit(
+            run_health_check_cli(config_path, sys.argv[status_index + 1])
+        )
     if "--gemini-login-helper" in sys.argv:
         from gemini_browser_session import run_login_helper
         config_index = sys.argv.index("--config") if "--config" in sys.argv else -1
