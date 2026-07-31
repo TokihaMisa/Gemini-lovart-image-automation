@@ -31,6 +31,8 @@ gemini:
   preamble_file: "preamble.txt"
   base_url: "https://gemini.google.com"
   thinking_mode: true
+  # When false, stop instead of creating persistent history if temporary chat cannot be found.
+  allow_regular_chat_fallback: false
   reply_timeout: 300
   upload_timeout: 120
   upload_attempts: 3

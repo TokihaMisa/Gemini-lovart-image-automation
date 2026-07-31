@@ -265,6 +265,43 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             finally:
                 browser.close()
 
+    def test_real_playwright_clicks_temporary_chat_from_hover_tooltip(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1200, "height": 800})
+            try:
+                page.set_content("""
+                    <style>
+                        #temporary-chat { position: fixed; top: 12px; right: 64px; }
+                        #temporary-tooltip { position: fixed; top: 52px; right: 64px; }
+                    </style>
+                    <button id="temporary-chat"><svg aria-hidden="true"></svg></button>
+                    <div id="temporary-tooltip" role="tooltip" hidden>临时聊天</div>
+                    <script>
+                        const button = document.querySelector("#temporary-chat");
+                        const tooltip = document.querySelector("#temporary-tooltip");
+                        button.addEventListener(
+                            "mouseenter",
+                            () => setTimeout(() => tooltip.hidden = false, 450)
+                        );
+                        button.addEventListener(
+                            "click",
+                            () => document.body.dataset.temporaryChatClicked = "true"
+                        );
+                    </script>
+                """)
+                bot = GeminiBot(page, {"gemini": {}}, FakeFormalLogger())
+
+                self.assertTrue(bot._start_temporary_chat())
+                self.assertEqual(
+                    page.locator("body").get_attribute("data-temporary-chat-clicked"),
+                    "true",
+                )
+            finally:
+                browser.close()
+
     def test_product_retry_uses_explicit_browser_allowlist(self):
         class Bot(GeminiBot):
             def __init__(self, error):
@@ -442,7 +479,17 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             self.assertIn(wording, str(raised.exception))
             self.assertNotIn("secret@example.com", "".join(traceback.format_exception(raised.exception)))
 
-    def test_temporary_chat_failure_stops_each_attempt_before_preamble(self):
+    def test_missing_temporary_chat_stops_when_regular_fallback_is_disabled_by_default(self):
+        class Logger:
+            def __init__(self):
+                self.warnings = []
+
+            def info(self, _message):
+                pass
+
+            def warning(self, message):
+                self.warnings.append(message)
+
         class Bot(GeminiBot):
             def __init__(self):
                 page = type("Page", (), {
@@ -453,20 +500,101 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                         "has_loading": False, "controls": [],
                     },
                 })()
-                super().__init__(page, {"gemini": {}, "browser": {"product_attempts": 2}}, FakeFormalLogger())
+                self.test_logger = Logger()
+                super().__init__(
+                    page,
+                    {
+                        "gemini": {"thinking_mode": False},
+                        "browser": {"product_attempts": 2},
+                    },
+                    self.test_logger,
+                )
                 self.chats = 0
+                self.messages = []
 
             def _start_temporary_chat(self):
                 self.chats += 1
                 return False
 
-            def _send_message(self, _text):
-                raise AssertionError("must not continue in the current chat")
+            def _response_count(self):
+                return 0
+
+            def _send_message(self, text):
+                self.messages.append(text)
+
+            def _wait_for_reply(self, **_kwargs):
+                pass
+
+            def _get_last_response(self):
+                return "generated response " * 20
 
         bot = Bot()
         with self.assertRaises(GeminiPageStructureError):
             bot.generate_prompt("产品", "Spanish", "卖点", [])
+
         self.assertEqual(bot.chats, 2)
+        self.assertEqual(bot.messages, [])
+        self.assertFalse(any("regular chat" in item for item in bot.test_logger.warnings))
+
+    def test_missing_temporary_chat_continues_when_regular_fallback_is_enabled(self):
+        class Logger:
+            def __init__(self):
+                self.warnings = []
+
+            def info(self, _message):
+                pass
+
+            def warning(self, message):
+                self.warnings.append(message)
+
+        class Bot(GeminiBot):
+            def __init__(self):
+                page = type("Page", (), {
+                    "url": "https://gemini.google.com/app",
+                    "goto": lambda _self, *_args, **_kwargs: None,
+                    "evaluate": lambda _self, _script: {
+                        "language": "en", "has_editor": True, "has_login_prompt": False,
+                        "has_loading": False, "controls": [],
+                    },
+                })()
+                self.test_logger = Logger()
+                super().__init__(
+                    page,
+                    {
+                        "gemini": {
+                            "thinking_mode": False,
+                            "allow_regular_chat_fallback": True,
+                        },
+                        "browser": {"product_attempts": 2},
+                    },
+                    self.test_logger,
+                )
+                self.chats = 0
+                self.messages = []
+
+            def _start_temporary_chat(self):
+                self.chats += 1
+                return False
+
+            def _response_count(self):
+                return 0
+
+            def _send_message(self, text):
+                self.messages.append(text)
+
+            def _wait_for_reply(self, **_kwargs):
+                pass
+
+            def _get_last_response(self):
+                return "generated response " * 20
+
+        bot = Bot()
+        result = bot.generate_prompt("产品", "Spanish", "卖点", [])
+
+        self.assertGreaterEqual(len(result), 200)
+        self.assertEqual(bot.chats, 1)
+        self.assertEqual(len(bot.messages), 2)
+        self.assertTrue(any("regular chat" in item for item in bot.test_logger.warnings))
 
     def test_spanish_structural_fallbacks_drive_temporary_mode_thinking_and_upload(self):
         class Locator:
@@ -726,16 +854,21 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
 
             def __init__(self):
                 self.goto_calls = 0
+                self.navigation_succeeded = False
 
             def goto(self, _url, **_kwargs):
                 self.goto_calls += 1
                 if self.goto_calls < 5:
                     raise RuntimeError("net::ERR_CONNECTION_RESET private@example.com")
+                self.navigation_succeeded = True
 
             def evaluate(self, _script):
                 return {
-                    "language": "es", "has_editor": True, "has_login_prompt": False,
-                    "has_loading": False, "controls": [],
+                    "language": "es",
+                    "has_editor": self.navigation_succeeded,
+                    "has_login_prompt": False,
+                    "has_loading": not self.navigation_succeeded,
+                    "controls": [],
                 }
 
         class Bot(GeminiBot):
@@ -772,6 +905,53 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         self.assertEqual(result, "x" * 300)
         self.assertEqual(page.goto_calls, 5)
         self.assertEqual(bot.temporary_chats, 1)
+
+    def test_product_prompt_reuses_an_already_ready_gemini_page(self):
+        class Page:
+            url = "https://gemini.google.com/app"
+
+            def __init__(self):
+                self.goto_calls = 0
+
+            def goto(self, _url, **_kwargs):
+                self.goto_calls += 1
+
+            def evaluate(self, _script):
+                return {
+                    "language": "en", "has_editor": True, "has_login_prompt": False,
+                    "has_loading": False, "controls": [],
+                }
+
+        class Bot(GeminiBot):
+            def __init__(self, page):
+                super().__init__(
+                    page,
+                    {"gemini": {"thinking_mode": False}},
+                    FakeFormalLogger(),
+                )
+
+            def _start_temporary_chat(self):
+                return True
+
+            def _response_count(self):
+                return 0
+
+            def _send_message(self, _text):
+                pass
+
+            def _wait_for_reply(self, **_kwargs):
+                pass
+
+            def _get_last_response(self):
+                return "x" * 300
+
+        page = Page()
+        result = Bot(page)._generate_prompt_once(
+            "产品", "Spanish", "卖点", [], "SKU-READY", ""
+        )
+
+        self.assertEqual(result, "x" * 300)
+        self.assertEqual(page.goto_calls, 0)
 
     def test_login_tls_auth_and_verified_upload_errors_are_not_retried(self):
         for error, expected_type in (
@@ -1280,9 +1460,8 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 os.chdir(cwd)
 
         self.assertEqual(
-            events[:8],
+            events,
             [
-                "goto",
                 "temporary_chat",
                 "thinking_mode",
                 "response_count",
@@ -1290,10 +1469,10 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 "wait_reply:False:0",
                 "upload_images",
                 "response_count",
+                "send:product_prompt",
+                "wait_reply:True:1",
             ],
         )
-        self.assertEqual(events[8], "send:product_prompt")
-        self.assertEqual(events[9], "wait_reply:True:1")
 
     def test_gemini_upload_waits_for_completion_after_setting_files(self):
         class FakeLocator:

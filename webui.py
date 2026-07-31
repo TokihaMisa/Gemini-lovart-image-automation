@@ -152,6 +152,7 @@ gemini:
   preamble_file: preamble.txt
   base_url: https://gemini.google.com
   thinking_mode: true
+  allow_regular_chat_fallback: false
   reply_timeout: 300
   upload_timeout: 120
   upload_attempts: 3
@@ -338,6 +339,25 @@ def save_prompt_settings_from_form(*values, config_path="config.yaml") -> tuple[
     except (OSError, ValueError, yaml.YAMLError) as exc:
         return f"❌ 配置保存失败，原文件已保留：{exc}", effective_rules_preview(get_prompt_settings(current))
     return "✅ 提示词设置已保存", effective_rules_preview(settings)
+
+
+def save_gemini_browser_settings(
+    allow_regular_chat_fallback,
+    config_path="config.yaml",
+) -> str:
+    target = Path(config_path)
+    try:
+        current = yaml.safe_load(target.read_text(encoding="utf-8")) or {} if target.exists() else {}
+        if not isinstance(current, dict):
+            raise ValueError("config.yaml 顶层必须是配置对象")
+        updated = deepcopy(current)
+        updated.setdefault("gemini", {})["allow_regular_chat_fallback"] = bool(
+            allow_regular_chat_fallback
+        )
+        save_config(updated, target)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        return f"❌ Gemini 浏览器设置保存失败，原配置已保留：{exc}"
+    return "✅ Gemini 浏览器设置已保存"
 
 
 def reset_prompt_settings_form() -> tuple:
@@ -1296,6 +1316,9 @@ def build_ui():
     nvidia_saved_model = _configured_provider_model(config, "nvidia")
     gemini_base_url_value = gemini_config.get("base_url", "https://generativelanguage.googleapis.com/v1beta")
     nvidia_base_url_value = nvidia_config.get("base_url", "https://integrate.api.nvidia.com/v1")
+    allow_regular_chat_fallback_value = (
+        config.get("gemini", {}).get("allow_regular_chat_fallback") is True
+    )
 
     def refresh_provider_controls(provider, api_key, base_url, current_model, prompt_source_value):
         status, choices, selected, catalog = refresh_provider_models(
@@ -1429,7 +1452,18 @@ def build_ui():
                     with gr.Row():
                         open_gemini_login_btn = gr.Button("打开 Gemini 登录浏览器")
                         check_gemini_login_btn = gr.Button("检查登录并关闭浏览器")
-                    
+                    allow_regular_chat_fallback = gr.Checkbox(
+                        label="临时聊天不可用时，允许使用普通聊天继续",
+                        value=allow_regular_chat_fallback_value,
+                    )
+                    save_gemini_browser_btn = gr.Button("保存 Gemini 浏览器设置")
+                    gemini_browser_save_status = gr.Markdown("")
+                    save_gemini_browser_btn.click(
+                        fn=save_gemini_browser_settings,
+                        inputs=[allow_regular_chat_fallback],
+                        outputs=gemini_browser_save_status,
+                    )
+
                     gemini_key = gr.Textbox(label="GEMINI_API_KEY", value=get_env("GEMINI_API_KEY"), type="password")
                     gemini_base_url = gr.Textbox(label="Gemini API 地址", value=gemini_base_url_value)
                     gemini_model = gr.Dropdown(

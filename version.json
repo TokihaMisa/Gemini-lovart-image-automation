@@ -1,7 +1,7 @@
 {
-  "version": "1.3.2",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.2/update.zip",
-  "changelog": "修复启用系统代理或 VPN 时，本地 Gradio 启动请求可能被代理拦截并返回 502 的问题。",
-  "sha256": "baabd5d99e1fb124f5e76c0700a0e4702b8bd2938b4952e303225f3a66922dd4",
-  "size": 129471808
+  "version": "1.3.3",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.3/update.zip",
+  "changelog": "兼容新版 Gemini 全屏及紧凑窗口中的临时聊天图标；修复慢网速下页面未加载完成时反复刷新的问题；新增默认关闭的普通聊天降级开关。",
+  "sha256": "cc6b9a6a951b3b83d9dc2d0e8ff046fe7802a077732711870298159d7d39ea24",
+  "size": 129469131
 }

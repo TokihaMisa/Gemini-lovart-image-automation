@@ -169,7 +169,7 @@ class GeminiBrowserSessionTests(unittest.TestCase):
         self.assertTrue(status.ready)
         self.assertEqual(len(attempts), 5)
 
-    def test_navigation_retries_when_page_readiness_times_out(self):
+    def test_page_readiness_timeout_retries_without_reloading(self):
         page = FakePage("https://gemini.google.com/app", {
             "language": "en", "has_editor": False, "has_login_prompt": False,
             "has_loading": True, "controls": [],
@@ -180,9 +180,9 @@ class GeminiBrowserSessionTests(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 navigate_gemini_with_retry(page, "https://gemini.google.com", policy)
 
-        self.assertEqual(page.goto_calls, 2)
+        self.assertEqual(page.goto_calls, 1)
 
-    def test_navigation_retries_temporary_page_inspection_for_all_five_attempts(self):
+    def test_page_inspection_retries_without_reloading_after_navigation_succeeds(self):
         sentinel = "inspect-private@example.com"
 
         class Page(FakePage):
@@ -209,7 +209,7 @@ class GeminiBrowserSessionTests(unittest.TestCase):
 
         self.assertTrue(status.ready)
         self.assertEqual(page.inspect_calls, 5)
-        self.assertEqual(page.goto_calls, 5)
+        self.assertEqual(page.goto_calls, 1)
 
     def test_exhausted_page_inspection_uses_five_attempts_without_raw_detail(self):
         sentinel = "inspect-private@example.com"
@@ -229,7 +229,7 @@ class GeminiBrowserSessionTests(unittest.TestCase):
             navigate_gemini_with_retry(page, "https://gemini.google.com/app", policy)
 
         self.assertEqual(page.inspect_calls, 5)
-        self.assertEqual(page.goto_calls, 5)
+        self.assertEqual(page.goto_calls, 1)
         self.assertNotIn(sentinel, "".join(traceback.format_exception(raised.exception)))
 
     def test_navigation_maps_permanent_tls_to_safe_error(self):

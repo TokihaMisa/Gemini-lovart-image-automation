@@ -284,12 +284,17 @@ def wait_for_gemini_ready(
 def navigate_gemini_with_retry(
     page: Any, url: str, policy: RetryPolicy, logger: Any = None
 ) -> LoginStatus:
+    navigation_completed = False
+
     def navigate() -> LoginStatus:
-        page.goto(
-            url,
-            wait_until="domcontentloaded",
-            timeout=int(policy.page_ready_timeout * 1000),
-        )
+        nonlocal navigation_completed
+        if not navigation_completed:
+            page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=int(policy.page_ready_timeout * 1000),
+            )
+            navigation_completed = True
         return wait_for_gemini_ready(page, policy, logger=logger)
 
     def on_retry(message: str) -> None:

@@ -82,6 +82,49 @@ class WebUIModelSettingsTests(unittest.TestCase):
             self.assertIn("detail_page_count: 12", text)
             self.assertIn("model: gemini-2.5-flash-lite", text)
             self.assertIn("model: moonshotai/kimi-k2.5", text)
+            self.assertIn("allow_regular_chat_fallback: false", text)
+
+    def test_save_gemini_browser_settings_persists_fallback_without_losing_other_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text(
+                "gemini:\n  thinking_mode: true\nother:\n  keep: true\n",
+                encoding="utf-8",
+            )
+            status = webui.save_gemini_browser_settings(True, config_path=path)
+            saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+        self.assertIn("已保存", status)
+        self.assertTrue(saved["gemini"]["allow_regular_chat_fallback"])
+        self.assertTrue(saved["gemini"]["thinking_mode"])
+        self.assertTrue(saved["other"]["keep"])
+
+    @patch("webui.load_config", return_value={})
+    def test_gemini_regular_chat_fallback_setting_defaults_off_in_ui(self, _load_config):
+        demo = build_ui()
+        components = demo.config["components"]
+        checkbox = next(
+            item
+            for item in components
+            if item.get("props", {}).get("label")
+            == "临时聊天不可用时，允许使用普通聊天继续"
+        )
+        self.assertEqual(checkbox["type"], "checkbox")
+        self.assertFalse(checkbox["props"]["value"])
+
+        component_labels = {
+            item["id"]: item.get("props", {}).get("label")
+            for item in components
+        }
+        save_event = next(
+            item
+            for item in demo.config["dependencies"]
+            if item["api_name"] == "save_gemini_browser_settings"
+        )
+        self.assertEqual(
+            [component_labels[item] for item in save_event["inputs"]],
+            ["临时聊天不可用时，允许使用普通聊天继续"],
+        )
 
     def _form_values(self, page_count=14):
         return (

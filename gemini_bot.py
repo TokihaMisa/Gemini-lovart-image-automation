@@ -317,15 +317,23 @@ class GeminiBot:
     ) -> str:
         try:
             policy = retry_policy_from_config({"browser": self._browser_config})
-            status = navigate_gemini_with_retry(
-                self.page, "https://gemini.google.com/app", policy, logger=self.logger
-            )
+            status = inspect_gemini_page(self.page)
+            if status.state not in (GeminiPageState.READY, GeminiPageState.WAITING_LOGIN):
+                status = navigate_gemini_with_retry(
+                    self.page, "https://gemini.google.com/app", policy, logger=self.logger
+                )
             if status.state is GeminiPageState.WAITING_LOGIN:
                 raise GeminiLoginRequiredError()
             if status.state is not GeminiPageState.READY or not status.ready:
                 raise GeminiPageNotReadyError()
             if not self._start_temporary_chat():
-                raise GeminiPageStructureError("Gemini temporary chat control is missing")
+                if self.cfg.get("allow_regular_chat_fallback") is not True:
+                    raise GeminiPageStructureError(
+                        "Gemini temporary chat control is missing on a ready page"
+                    )
+                self.logger.warning(
+                    "Gemini: temporary chat control unavailable; continuing in regular chat"
+                )
             if self.cfg.get("thinking_mode", True):
                 self._select_thinking_mode_with_recovery(product_id)
 
@@ -531,7 +539,56 @@ class GeminiBot:
         except Exception:
             self.logger.warning("Gemini: temporary chat DOM scan was unavailable")
 
-        self.logger.warning("Gemini: temporary chat control not found; stopping this attempt")
+        if self._click_temporary_chat_via_hover_tooltip():
+            return True
+
+        self.logger.warning("Gemini: temporary chat control not found")
+        return False
+
+    def _click_temporary_chat_via_hover_tooltip(self) -> bool:
+        """Identify icon-only compact-header controls through their rendered tooltip."""
+        try:
+            candidates = self.page.locator("button, [role='button'], a")
+            viewport = self.page.viewport_size or {}
+            viewport_width = float(viewport.get("width") or 0)
+            viewport_height = float(viewport.get("height") or 0)
+            candidate_count = min(candidates.count(), 60)
+        except Exception:
+            return False
+
+        for index in range(candidate_count):
+            candidate = candidates.nth(index)
+            try:
+                if not candidate.is_visible(timeout=300):
+                    continue
+                box = candidate.bounding_box()
+                if not box:
+                    continue
+                if viewport_width and box["x"] < viewport_width * 0.5:
+                    continue
+                if viewport_height and box["y"] > viewport_height * 0.3:
+                    continue
+
+                candidate.hover(timeout=1000)
+                self.page.wait_for_timeout(650)
+                tooltips = self.page.locator(
+                    "[role='tooltip']:visible, "
+                    ".mat-mdc-tooltip:visible, "
+                    ".mat-tooltip:visible"
+                )
+                for tooltip_index in range(tooltips.count()):
+                    tooltip = tooltips.nth(tooltip_index)
+                    text = tooltip.inner_text(timeout=500)
+                    if not matches_ui_term(text, TEMPORARY_CHAT_TERMS):
+                        continue
+                    candidate.click(timeout=3000)
+                    self.page.wait_for_timeout(1500)
+                    self.logger.info(
+                        "Gemini: temporary chat clicked via hover tooltip"
+                    )
+                    return True
+            except Exception:
+                continue
         return False
 
     def _select_thinking_mode(self) -> bool:
