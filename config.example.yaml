@@ -92,3 +92,14 @@ lovart:
   timeout: 600
   upload_attempts: 3
   upload_retry_delay: 2
+  # Failed products are retried only after the current full queue finishes.
+  # off = disabled, finite = retry failed_retry_rounds times, infinite = retry until success or exit.
+  failed_retry_mode: finite
+  failed_retry_rounds: 2
+  failed_retry_delay: 15
+  failed_retry_error_types:
+    - lovart_service
+    - network
+    - timeout
+    - gemini_page
+    - gemini_upload

@@ -1,6 +1,7 @@
 import argparse
 import csv
 import io
+import json
 import os
 import signal
 import sys
@@ -19,6 +20,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from excel_reader import read_products
+from failed_retry import FailedRetryPolicy, classify_retry_failure
 from gemini_api import GeminiAPI
 from gemini_bot import GeminiBot
 from gemini_browser_session import (
@@ -466,7 +468,7 @@ def _dry_run_products(products, logger, run_dir, output_dir=None):
     return 0, 0, len(products), 0
 
 
-def _process_products(products, gemini, lovart, logger, run_dir, resume=True, prompt_settings=None):
+def _process_products_once(products, gemini, lovart, logger, run_dir, resume=True, prompt_settings=None):
     prompt_settings = normalize_prompt_settings(prompt_settings)
     console = Console()
     success = fail = skipped = still_running = 0
@@ -875,6 +877,95 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True, pr
         organize_output_folders()
 
     write_run_summary(run_dir, summary_rows)
+    return success, fail, skipped, still_running
+
+
+def _read_run_summary(run_dir: str | Path) -> list[dict]:
+    try:
+        value = json.loads((Path(run_dir) / "summary.json").read_text(encoding="utf-8"))
+        return value if isinstance(value, list) else []
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def _wait_before_failed_retry(delay: float) -> bool:
+    deadline = time.monotonic() + delay
+    while not _shutdown_requested:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        time.sleep(min(remaining, 0.25))
+    return False
+
+
+def _process_products(products, gemini, lovart, logger, run_dir, resume=True, prompt_settings=None):
+    policy = getattr(lovart, "failed_retry_policy", FailedRetryPolicy(mode="off"))
+    if not isinstance(policy, FailedRetryPolicy) or not policy.enabled:
+        return _process_products_once(
+            products,
+            gemini,
+            lovart,
+            logger,
+            run_dir,
+            resume=resume,
+            prompt_settings=prompt_settings,
+        )
+
+    product_by_id = {product.id: product for product in products}
+    ordered_ids = list(product_by_id)
+    merged_rows: dict[str, dict] = {}
+    pending = list(products)
+
+    completed_retry_rounds = 0
+    while True:
+        _process_products_once(
+            pending,
+            gemini,
+            lovart,
+            logger,
+            run_dir,
+            resume=resume if completed_retry_rounds == 0 else True,
+            prompt_settings=prompt_settings,
+        )
+        round_rows = _read_run_summary(run_dir)
+        for row in round_rows:
+            product_id = str(row.get("product_id") or "")
+            if product_id:
+                merged_rows[product_id] = row
+
+        retry_ids = []
+        for row in round_rows:
+            category = classify_retry_failure(row)
+            product_id = str(row.get("product_id") or "")
+            if category in policy.error_types and product_id in product_by_id:
+                retry_ids.append(product_id)
+
+        finite_limit_reached = not policy.infinite and completed_retry_rounds >= policy.rounds
+        if not retry_ids or finite_limit_reached or _shutdown_requested:
+            break
+
+        pending = [product_by_id[product_id] for product_id in dict.fromkeys(retry_ids)]
+        completed_retry_rounds += 1
+        round_limit = "∞" if policy.infinite else str(policy.rounds)
+        logger.warning(
+            f"Retry queue: {len(pending)} product(s) will run again after all current tasks "
+            f"(round {completed_retry_rounds}/{round_limit})"
+        )
+        if _is_ui_mode():
+            print(
+                f"[UI_PROGRESS] retry round {completed_retry_rounds}/{round_limit} | "
+                f"{len(pending)} product(s)",
+                flush=True,
+            )
+        if policy.delay and not _wait_before_failed_retry(policy.delay):
+            break
+
+    final_rows = [merged_rows[product_id] for product_id in ordered_ids if product_id in merged_rows]
+    write_run_summary(run_dir, final_rows)
+    success = sum(row.get("status") == "success" for row in final_rows)
+    skipped = sum(row.get("status") == "skipped" for row in final_rows)
+    still_running = sum(row.get("status") == "lovart_still_running" for row in final_rows)
+    fail = len(final_rows) - success - skipped - still_running
     return success, fail, skipped, still_running
 
 

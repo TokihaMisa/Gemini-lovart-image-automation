@@ -127,7 +127,11 @@ class WebUIGeminiLoginTests(unittest.TestCase):
             demo.close()
 
         components = config["components"]
-        labels = {component.get("props", {}).get("value") for component in components}
+        labels = {
+            value
+            for component in components
+            if isinstance((value := component.get("props", {}).get("value")), str)
+        }
         self.assertIn("打开 Gemini 登录浏览器", labels)
         self.assertIn("检查登录并关闭浏览器", labels)
         status_components = [

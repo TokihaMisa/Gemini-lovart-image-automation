@@ -27,6 +27,7 @@ from webui import (
     save_api_settings,
     save_config,
     save_env,
+    save_failed_retry_settings,
     save_prompt_settings_from_form,
     test_provider_model,
     update_catalog_image_status,
@@ -83,6 +84,82 @@ class WebUIModelSettingsTests(unittest.TestCase):
             self.assertIn("model: gemini-2.5-flash-lite", text)
             self.assertIn("model: moonshotai/kimi-k2.5", text)
             self.assertIn("allow_regular_chat_fallback: false", text)
+            self.assertIn("failed_retry_mode: finite", text)
+            self.assertIn("failed_retry_error_types:", text)
+
+    def test_save_failed_retry_settings_preserves_other_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text(
+                "lovart:\n  image_model: auto\nother:\n  keep: true\n",
+                encoding="utf-8",
+            )
+            status = save_failed_retry_settings(
+                "infinite",
+                7,
+                4.5,
+                ["network", "lovart_no_artifacts", "other"],
+                config_path=path,
+            )
+            saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+        self.assertIn("已保存", status)
+        self.assertEqual(saved["lovart"]["failed_retry_mode"], "infinite")
+        self.assertEqual(saved["lovart"]["failed_retry_rounds"], 7)
+        self.assertEqual(saved["lovart"]["failed_retry_delay"], 4.5)
+        self.assertEqual(
+            saved["lovart"]["failed_retry_error_types"],
+            ["network", "lovart_no_artifacts", "other"],
+        )
+        self.assertEqual(saved["lovart"]["image_model"], "auto")
+        self.assertTrue(saved["other"]["keep"])
+
+    def test_invalid_failed_retry_settings_do_not_modify_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text("lovart:\n  image_model: auto\n", encoding="utf-8")
+            before = path.read_bytes()
+            status = save_failed_retry_settings(
+                "finite", 0, 15, ["network"], config_path=path
+            )
+            self.assertEqual(path.read_bytes(), before)
+        self.assertIn("❌", status)
+
+    @patch("webui.load_config", return_value={})
+    def test_failed_retry_controls_have_defaults_and_save_event(self, _load_config):
+        demo = build_ui()
+        components = demo.config["components"]
+        by_label = {
+            item.get("props", {}).get("label"): item
+            for item in components
+            if item.get("props", {}).get("label")
+        }
+        self.assertEqual(by_label["重试模式"]["props"]["value"], "finite")
+        self.assertEqual(by_label["最多补偿轮次（不含首次）"]["props"]["value"], 2)
+        self.assertEqual(by_label["每轮重试间隔（秒）"]["props"]["value"], 15.0)
+        self.assertEqual(
+            set(by_label["允许重试的错误类型"]["props"]["value"]),
+            {"lovart_service", "network", "timeout", "gemini_page", "gemini_upload"},
+        )
+
+        component_labels = {
+            item["id"]: item.get("props", {}).get("label")
+            for item in components
+        }
+        save_event = next(
+            item
+            for item in demo.config["dependencies"]
+            if item["api_name"] == "save_failed_retry_settings"
+        )
+        self.assertEqual(
+            [component_labels[item] for item in save_event["inputs"]],
+            [
+                "重试模式",
+                "最多补偿轮次（不含首次）",
+                "每轮重试间隔（秒）",
+                "允许重试的错误类型",
+            ],
+        )
 
     def test_save_gemini_browser_settings_persists_fallback_without_losing_other_config(self):
         with tempfile.TemporaryDirectory() as tmp:

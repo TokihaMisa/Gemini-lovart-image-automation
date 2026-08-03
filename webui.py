@@ -11,6 +11,17 @@ from pathlib import Path
 import gradio as gr
 import yaml
 
+from failed_retry import (
+    RETRY_ERROR_TYPE_CHOICES,
+    RETRY_MODE_FINITE,
+    RETRY_MODE_INFINITE,
+    RETRY_MODE_OFF,
+    FailedRetryPolicy,
+    normalize_retry_delay,
+    normalize_retry_error_types,
+    normalize_retry_mode,
+    normalize_retry_rounds,
+)
 from model_provider import (
     DiscoveredModel,
     ModelProviderError,
@@ -409,6 +420,15 @@ lovart:
   timeout: 600
   upload_attempts: 3
   upload_retry_delay: 2
+  failed_retry_mode: finite
+  failed_retry_rounds: 2
+  failed_retry_delay: 15
+  failed_retry_error_types:
+    - lovart_service
+    - network
+    - timeout
+    - gemini_page
+    - gemini_upload
 output_dir: output
 """
         save_config(yaml.safe_load(default_config) or {}, target)
@@ -779,6 +799,38 @@ def save_api_settings(
         message = exc.user_message if isinstance(exc, ModelProviderError) else str(exc)
         return f"❌ API 与模型设置保存失败，原配置未被部分覆盖：{message}"
     return "✅ 密钥、API 地址和模型已保存"
+
+
+def save_failed_retry_settings(
+    mode,
+    rounds,
+    delay,
+    error_types,
+    config_path="config.yaml",
+):
+    target = Path(config_path)
+    try:
+        current = yaml.safe_load(target.read_text(encoding="utf-8")) or {} if target.exists() else {}
+        if not isinstance(current, dict):
+            raise ValueError("config.yaml 顶层必须是配置对象")
+        normalized_mode = normalize_retry_mode(mode)
+        normalized_rounds = normalize_retry_rounds(rounds)
+        normalized_delay = normalize_retry_delay(delay)
+        normalized_types = normalize_retry_error_types(error_types)
+        current.setdefault("lovart", {}).update({
+            "failed_retry_mode": normalized_mode,
+            "failed_retry_rounds": normalized_rounds,
+            "failed_retry_delay": normalized_delay,
+            "failed_retry_error_types": list(normalized_types),
+        })
+        save_config(current, target)
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+        return f"❌ 失败任务重试设置保存失败：{exc}"
+    return "✅ 失败任务重试设置已保存，下次运行任务时生效"
+
+
+def failed_retry_rounds_update(mode):
+    return gr.update(interactive=mode == RETRY_MODE_FINITE)
 
 
 def save_env(
@@ -1533,6 +1585,7 @@ def build_ui():
     allow_regular_chat_fallback_value = (
         config.get("gemini", {}).get("allow_regular_chat_fallback") is True
     )
+    failed_retry_policy = FailedRetryPolicy.from_config(config.get("lovart", {}))
 
     def refresh_provider_controls(provider, api_key, base_url, current_model, prompt_source_value):
         status, choices, selected, catalog = refresh_provider_models(
@@ -1714,6 +1767,53 @@ def build_ui():
 
                     lovart_access = gr.Textbox(label="LOVART_ACCESS_KEY", value=get_env("LOVART_ACCESS_KEY"), type="password")
                     lovart_secret = gr.Textbox(label="LOVART_SECRET_KEY", value=get_env("LOVART_SECRET_KEY"), type="password")
+
+                    gr.Markdown("### 失败任务补偿重试")
+                    failed_retry_mode = gr.Radio(
+                        choices=[
+                            ("关闭", RETRY_MODE_OFF),
+                            ("有限次数", RETRY_MODE_FINITE),
+                            ("无限重试", RETRY_MODE_INFINITE),
+                        ],
+                        value=failed_retry_policy.mode,
+                        label="重试模式",
+                    )
+                    with gr.Row():
+                        failed_retry_rounds = gr.Number(
+                            value=failed_retry_policy.rounds,
+                            label="最多补偿轮次（不含首次）",
+                            minimum=1,
+                            precision=0,
+                            interactive=failed_retry_policy.mode == RETRY_MODE_FINITE,
+                        )
+                        failed_retry_delay = gr.Number(
+                            value=failed_retry_policy.delay,
+                            label="每轮重试间隔（秒）",
+                            minimum=0,
+                        )
+                    failed_retry_error_types = gr.CheckboxGroup(
+                        choices=list(RETRY_ERROR_TYPE_CHOICES),
+                        value=list(failed_retry_policy.error_types),
+                        label="允许重试的错误类型",
+                    )
+                    save_failed_retry_btn = gr.Button("保存失败任务重试设置")
+                    failed_retry_save_status = gr.Markdown("")
+                    failed_retry_mode.change(
+                        fn=failed_retry_rounds_update,
+                        inputs=failed_retry_mode,
+                        outputs=failed_retry_rounds,
+                        api_name=False,
+                    )
+                    save_failed_retry_btn.click(
+                        fn=save_failed_retry_settings,
+                        inputs=[
+                            failed_retry_mode,
+                            failed_retry_rounds,
+                            failed_retry_delay,
+                            failed_retry_error_types,
+                        ],
+                        outputs=failed_retry_save_status,
+                    )
                     
                     save_keys_btn = gr.Button("💾 保存密钥、API 地址和模型", variant="primary")
                     save_status = gr.Markdown("")

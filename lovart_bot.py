@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from failed_retry import FailedRetryPolicy
 from lovart_api import AgentSkill, AgentSkillError
 from utils import env_or_config, product_output_dir, update_status, read_status
 
@@ -104,6 +105,7 @@ class LovartBot:
         self.cfg = config.get("lovart", {})
         self.logger = logger
         self.tool_config = resolve_lovart_tool_config(self.cfg)
+        self.failed_retry_policy = FailedRetryPolicy.from_config(self.cfg)
 
         base_url = os.environ.get("LOVART_BASE_URL", self.cfg.get("base_url", "https://lgw.lovart.ai"))
         access_key = env_or_config(self.cfg, "access_key", "LOVART_ACCESS_KEY")

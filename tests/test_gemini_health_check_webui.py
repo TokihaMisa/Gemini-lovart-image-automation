@@ -207,8 +207,9 @@ class GeminiHealthCheckWebUITests(unittest.TestCase):
 
         components = config["components"]
         values = {
-            component.get("props", {}).get("value")
+            value
             for component in components
+            if isinstance((value := component.get("props", {}).get("value")), str)
         }
         self.assertIn("Gemini 一键完整体检", values)
         result_components = [
