@@ -1,7 +1,7 @@
 {
-  "version": "1.3.7",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.7/update.zip",
-  "changelog": "修复连续任务中 Gemini 正常编辑页被对话文字误判为未登录；Lovart 显示完成后增加成品结果同步等待，并支持重跑时复用原线程获取延迟返回的图片。",
-  "sha256": "7203ff122e60770af37820f785848c241c53b9edcba798f237d9c70c1894b6fa",
-  "size": 129498428
+  "version": "1.3.8",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.8/update.zip",
+  "changelog": "同步 Lovart Skill 1.0.12 的 POST 幂等与防重复提交策略；Lovart 完成但无图片时自动新建线程并切换候选模型；Gemini 临时聊天入口消失时自动刷新新对话页恢复。",
+  "sha256": "edc1c01b40c3906bac306bcfb1306db89800af9de7a8f69e5923686b0d5f1242",
+  "size": 129498893
 }

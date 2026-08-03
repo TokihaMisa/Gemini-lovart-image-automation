@@ -603,7 +603,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         with self.assertRaises(GeminiPageStructureError):
             bot.generate_prompt("产品", "Spanish", "卖点", [])
 
-        self.assertEqual(bot.chats, 2)
+        self.assertEqual(bot.chats, 4)
         self.assertEqual(bot.messages, [])
         self.assertFalse(any("regular chat" in item for item in bot.test_logger.warnings))
 
@@ -663,9 +663,69 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         result = bot.generate_prompt("产品", "Spanish", "卖点", [])
 
         self.assertGreaterEqual(len(result), 200)
-        self.assertEqual(bot.chats, 1)
+        self.assertEqual(bot.chats, 2)
         self.assertEqual(len(bot.messages), 2)
         self.assertTrue(any("regular chat" in item for item in bot.test_logger.warnings))
+
+    def test_missing_temporary_chat_recovers_after_reopening_new_chat_page(self):
+        class Page:
+            url = "https://gemini.google.com/app"
+
+            def __init__(self):
+                self.goto_calls = 0
+
+            def goto(self, _url, **_kwargs):
+                self.goto_calls += 1
+
+            @staticmethod
+            def evaluate(_script):
+                return {
+                    "language": "zh-CN",
+                    "has_editor": True,
+                    "has_login_prompt": False,
+                    "has_loading": False,
+                    "controls": ["upload", "mode"],
+                }
+
+        class Bot(GeminiBot):
+            def __init__(self):
+                self.test_page = Page()
+                super().__init__(
+                    self.test_page,
+                    {
+                        "gemini": {"thinking_mode": False},
+                        "browser": {"product_attempts": 1},
+                    },
+                    FakeFormalLogger(),
+                )
+                self.temporary_attempts = 0
+
+            def _start_temporary_chat(self):
+                self.temporary_attempts += 1
+                return self.test_page.goto_calls > 0
+
+            @staticmethod
+            def _response_count():
+                return 0
+
+            @staticmethod
+            def _send_message(_text):
+                pass
+
+            @staticmethod
+            def _wait_for_reply(**_kwargs):
+                pass
+
+            @staticmethod
+            def _get_last_response():
+                return "generated response " * 20
+
+        bot = Bot()
+        result = bot.generate_prompt("Product", "English", "points", [])
+
+        self.assertGreaterEqual(len(result), 200)
+        self.assertEqual(bot.test_page.goto_calls, 1)
+        self.assertEqual(bot.temporary_attempts, 2)
 
     def test_spanish_structural_fallbacks_drive_temporary_mode_thinking_and_upload(self):
         class Locator:

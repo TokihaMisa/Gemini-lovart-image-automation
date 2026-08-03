@@ -389,7 +389,20 @@ class GeminiBot:
                 raise GeminiLoginRequiredError()
             if status.state is not GeminiPageState.READY or not status.ready:
                 raise GeminiPageNotReadyError()
-            if not self._start_temporary_chat():
+            temporary_chat_started = self._start_temporary_chat()
+            if not temporary_chat_started:
+                self.logger.info(
+                    "Gemini: reopening the new-chat page to recover the temporary chat control"
+                )
+                status = navigate_gemini_with_retry(
+                    self.page, "https://gemini.google.com/app", policy, logger=self.logger
+                )
+                if status.state is GeminiPageState.WAITING_LOGIN:
+                    raise GeminiLoginRequiredError()
+                if status.state is not GeminiPageState.READY or not status.ready:
+                    raise GeminiPageNotReadyError()
+                temporary_chat_started = self._start_temporary_chat()
+            if not temporary_chat_started:
                 if self.cfg.get("allow_regular_chat_fallback") is not True:
                     raise GeminiPageStructureError(
                         "Gemini temporary chat control is missing on a ready page"

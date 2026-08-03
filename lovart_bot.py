@@ -158,20 +158,37 @@ class LovartBot:
             
         result, project_id, thread_id = func(*args, **kwargs)
         
-        # Fallback logic
-        if result and result.get("final_status") == "pending_confirmation":
+        def needs_fallback(value: dict | None) -> bool:
+            if not value:
+                return False
+            return value.get("final_status") == "pending_confirmation" or (
+                value.get("final_status") == "done"
+                and not value.get("generation_succeeded")
+            )
+
+        # A done thread can still contain only a text reply. Start a fresh
+        # thread with another model instead of repeatedly reading that result.
+        if needs_fallback(result):
             for fb_model in fallback_models:
                 attempted_models.append(fb_model)
-                self.logger.info(f"Lovart pending confirmation. Falling back to free model: {fb_model}")
+                reason = (
+                    "pending confirmation"
+                    if result.get("final_status") == "pending_confirmation"
+                    else "finished without image artifacts"
+                )
+                self.logger.info(
+                    f"Lovart {reason}. Starting a fresh fallback thread with: {fb_model}"
+                )
                 if os.environ.get("UI_MODE") == "1":
                     print(f"[UI_MODEL] {fb_model}", flush=True)
                 self.set_image_model(fb_model)
                 
                 # Update project_id to reuse the project if one was created
                 kwargs['project_id'] = project_id or kwargs.get('project_id', '')
+                kwargs['force_new_thread'] = True
                 
                 result, project_id, thread_id = func(*args, **kwargs)
-                if result and result.get("final_status") != "pending_confirmation":
+                if not needs_fallback(result):
                     break
         
         if result:
@@ -407,6 +424,7 @@ class LovartBot:
         language: str,
         selling_points: str,
         project_id: str = "",
+        force_new_thread: bool = False,
     ) -> tuple[dict, str, str]:
         if not project_id:
             project_id = read_status(product_dir).get("project_id") or self.create_project(
@@ -425,6 +443,7 @@ class LovartBot:
             language=language,
             selling_points=selling_points,
             tool_config=self.tool_config,
+            force_new_thread=force_new_thread,
         )
 
     def _submit_and_poll_once(
@@ -441,6 +460,7 @@ class LovartBot:
         language: str,
         selling_points: str,
         tool_config: dict,
+        force_new_thread: bool = False,
     ) -> tuple[dict, str, str]:
         status = read_status(product_dir)
         is_still_running = status.get("lovart_still_running")
@@ -454,7 +474,9 @@ class LovartBot:
         download_failed = status.get(f"lovart_{step_name}_download_failed")
         artifacts_pending = status.get("reason") == "Lovart finished without returning image artifacts."
 
-        if thread_id and (completed_without_file or download_failed or artifacts_pending):
+        if not force_new_thread and thread_id and (
+            completed_without_file or download_failed or artifacts_pending
+        ):
             self.logger.info(
                 f"Lovart API: recovering completed {step_name} artifacts "
                 f"from thread={thread_id} in project={project_id}"
@@ -463,7 +485,7 @@ class LovartBot:
             result = self._normalize_result(result, "done", project_id)
             return result, project_id, thread_id
 
-        if is_still_running and last_submitted and thread_id:
+        if not force_new_thread and is_still_running and last_submitted and thread_id:
             self.logger.info(f"Lovart API: Resuming previously timed out {step_name} thread={thread_id} in project={project_id}")
             # Clear the still_running flag locally so we don't accidentally get stuck in resume loops if it fails now
             update_status(product_dir, "lovart_still_running_resumed", lovart_still_running=False)

@@ -200,6 +200,56 @@ class LovartArtifactDownloadTests(unittest.TestCase):
         self.assertTrue(result["generation_succeeded"])
         self.assertEqual(bot.skill.result_calls, 3)
 
+    def test_text_only_done_result_starts_fresh_model_fallback_thread(self):
+        bot = LovartBot.__new__(LovartBot)
+        bot.logger = _Logger()
+        bot.tool_config = {
+            "image_model": "auto",
+            "tool_names": [],
+        }
+        calls = []
+
+        def execute(**kwargs):
+            calls.append(dict(kwargs))
+            if len(calls) == 1:
+                return {
+                    "final_status": "done",
+                    "generation_succeeded": False,
+                    "warning": "Lovart finished without returning image artifacts.",
+                }, "project-id", "text-only-thread"
+            return {
+                "final_status": "done",
+                "generation_succeeded": True,
+                "items": [
+                    {
+                        "artifacts": [
+                            {"type": "image", "content": "https://a.lovart.ai/image.png"}
+                        ]
+                    }
+                ],
+            }, "project-id", "fallback-thread"
+
+        with patch.object(bot, "set_image_model") as set_model:
+            def select_model(model_name):
+                bot.tool_config = {
+                    "image_model": model_name,
+                    "tool_names": [f"generate_image_{model_name}"],
+                }
+
+            set_model.side_effect = select_model
+            result, project_id, thread_id = bot._execute_with_fallback(
+                execute,
+                project_id="project-id",
+            )
+
+        self.assertTrue(result["generation_succeeded"])
+        self.assertEqual(project_id, "project-id")
+        self.assertEqual(thread_id, "fallback-thread")
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("force_new_thread", calls[0])
+        self.assertTrue(calls[1]["force_new_thread"])
+        set_model.assert_called_once_with("nano_banana_pro")
+
 
 if __name__ == "__main__":
     unittest.main()
