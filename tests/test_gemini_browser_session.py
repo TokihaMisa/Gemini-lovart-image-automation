@@ -67,6 +67,17 @@ class GeminiBrowserSessionTests(unittest.TestCase):
         self.assertTrue(status.ready)
         self.assertEqual(status.language, "es-ES")
 
+    def test_editor_on_gemini_stays_ready_when_conversation_mentions_account(self):
+        page = FakePage("https://gemini.google.com/app", {
+            "language": "en", "has_editor": True, "has_login_prompt": True,
+            "has_loading": False, "controls": ["Temporary chat", "Send"],
+        })
+
+        status = inspect_gemini_page(page)
+
+        self.assertEqual(status.state, GeminiPageState.READY)
+        self.assertTrue(status.ready)
+
     def test_captive_portal_editor_can_never_mark_gemini_ready(self):
         page = FakePage("http://captive.example/portal", {
             "language": "en", "has_editor": True, "has_login_prompt": False,

@@ -1,7 +1,7 @@
 {
-  "version": "1.3.6",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.6/update.zip",
-  "changelog": "修复 Lovart 已生成图片但 CDN 下载失败时误报 Unknown API error：新增成品下载重试、明确的代理域名提示，并在重跑时复用已完成任务下载成品，避免重复生成。",
-  "sha256": "236a50563b56aa09bb446a7b1202d4dc1d77304fcd1678326c862dd76c363a54",
-  "size": 129496932
+  "version": "1.3.7",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.7/update.zip",
+  "changelog": "修复连续任务中 Gemini 正常编辑页被对话文字误判为未登录；Lovart 显示完成后增加成品结果同步等待，并支持重跑时复用原线程获取延迟返回的图片。",
+  "sha256": "7203ff122e60770af37820f785848c241c53b9edcba798f237d9c70c1894b6fa",
+  "size": 129498428
 }

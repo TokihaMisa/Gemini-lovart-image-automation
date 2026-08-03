@@ -452,13 +452,15 @@ class LovartBot:
             and not status.get(f"lovart_{step_name}_local_path")
         )
         download_failed = status.get(f"lovart_{step_name}_download_failed")
+        artifacts_pending = status.get("reason") == "Lovart finished without returning image artifacts."
 
-        if thread_id and (completed_without_file or download_failed):
+        if thread_id and (completed_without_file or download_failed or artifacts_pending):
             self.logger.info(
                 f"Lovart API: recovering completed {step_name} artifacts "
                 f"from thread={thread_id} in project={project_id}"
             )
-            result = self._normalize_result(self.skill.get_result(thread_id), "done", project_id)
+            result = self._wait_for_result_artifacts(thread_id, self.skill.get_result(thread_id))
+            result = self._normalize_result(result, "done", project_id)
             return result, project_id, thread_id
 
         if is_still_running and last_submitted and thread_id:
@@ -808,7 +810,10 @@ class LovartBot:
                     if confirm.get("status") in ("done", "abort"):
                         print()
                         self.logger.info(f"Lovart API: done ({elapsed}s)")
-                        return self._normalize_result(self.skill.get_result(thread_id), confirm.get("status"), project_id)
+                        final_result = self.skill.get_result(thread_id)
+                        if confirm.get("status") == "done":
+                            final_result = self._wait_for_result_artifacts(thread_id, final_result)
+                        return self._normalize_result(final_result, confirm.get("status"), project_id)
 
                 if status == "abort":
                     print()
@@ -833,10 +838,32 @@ class LovartBot:
         try:
             final_status = self.skill.get_status(thread_id).get("status", "timeout")
             if final_status == "done":
-                return self._normalize_result(self.skill.get_result(thread_id), "done", project_id)
+                final_result = self._wait_for_result_artifacts(
+                    thread_id, self.skill.get_result(thread_id)
+                )
+                return self._normalize_result(final_result, "done", project_id)
         except Exception as exc:
             self.logger.warning(f"Lovart final status check failed: {exc}")
         return self._normalize_result(self.skill.get_result(thread_id), "timeout", project_id)
+
+    def _wait_for_result_artifacts(self, thread_id: str, result: dict) -> dict:
+        attempts = max(1, int(self.cfg.get("artifact_result_attempts", 4) or 4))
+        delay = max(0.0, float(self.cfg.get("artifact_result_retry_delay", 2) or 0))
+        for attempt in range(1, attempts):
+            if self._result_has_artifact(result):
+                break
+            self.logger.info(
+                "Lovart API: generation is done but image artifacts are still syncing "
+                f"({attempt}/{attempts - 1})"
+            )
+            if delay:
+                time.sleep(delay)
+            result = self.skill.get_result(thread_id)
+        return result
+
+    @staticmethod
+    def _result_has_artifact(result: dict) -> bool:
+        return any(item.get("artifacts") for item in (result.get("items") or []))
 
     @staticmethod
     def _normalize_result(result: dict, final_status: str, project_id: str) -> dict:
@@ -847,11 +874,9 @@ class LovartBot:
             result["generation_succeeded"] = False
             return result
 
-        has_artifact = False
+        has_artifact = LovartBot._result_has_artifact(result)
         used_model = "unknown"
         for item in (result.get("items") or []):
-            if item.get("artifacts"):
-                has_artifact = True
             for tc in item.get("tool_calls") or []:
                 name = tc.get("function", {}).get("name") or tc.get("name", "")
                 if name.startswith("generate_image_"):

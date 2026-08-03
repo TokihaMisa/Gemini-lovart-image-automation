@@ -223,7 +223,7 @@ def inspect_gemini_page(page: Any) -> LoginStatus:
         or bool(path_segments & {"login", "signin", "verify", "verification", "challenge"})
     )
     has_login_prompt = bool(payload.get("has_login_prompt"))
-    if is_account_or_login_url or has_login_prompt:
+    if is_account_or_login_url:
         return _status_for_page(
             GeminiPageState.WAITING_LOGIN,
             False,
@@ -238,6 +238,14 @@ def inspect_gemini_page(page: Any) -> LoginStatus:
             page,
             payload,
             "Gemini is ready.",
+        )
+    if has_login_prompt:
+        return _status_for_page(
+            GeminiPageState.WAITING_LOGIN,
+            False,
+            page,
+            payload,
+            "Sign in to Gemini in the browser window.",
         )
     if bool(payload.get("has_loading")):
         return _status_for_page(

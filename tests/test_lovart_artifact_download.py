@@ -160,6 +160,46 @@ class LovartArtifactDownloadTests(unittest.TestCase):
         self.assertEqual(project_id, "project-id")
         self.assertEqual(thread_id, "thread-id")
 
+    def test_done_status_waits_for_delayed_artifact_result(self):
+        bot = LovartBot.__new__(LovartBot)
+        bot.cfg = {
+            "wait_timeout": 10,
+            "poll_interval": 0,
+            "artifact_result_attempts": 3,
+            "artifact_result_retry_delay": 0,
+        }
+        bot.logger = _Logger()
+        bot._fast_mode = False
+
+        class Skill:
+            def __init__(self):
+                self.result_calls = 0
+
+            @staticmethod
+            def get_status(_thread_id):
+                return {"status": "done"}
+
+            def get_result(self, _thread_id):
+                self.result_calls += 1
+                if self.result_calls < 3:
+                    return {"items": [{"text": "still syncing"}]}
+                return {
+                    "items": [
+                        {
+                            "artifacts": [
+                                {"type": "image", "content": "https://a.lovart.ai/image.png"}
+                            ]
+                        }
+                    ]
+                }
+
+        bot.skill = Skill()
+        with patch("lovart_bot.time.sleep"):
+            result = bot._poll_with_progress("thread-id", "project-id")
+
+        self.assertTrue(result["generation_succeeded"])
+        self.assertEqual(bot.skill.result_calls, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
