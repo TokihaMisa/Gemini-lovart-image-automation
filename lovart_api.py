@@ -249,17 +249,33 @@ class AgentSkill:
                 if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
                     downloaded.append({"type": atype, "url": url, "local_path": local_path, "new": False})
                     continue
+                host = (urllib.parse.urlsplit(url).hostname or "").lower()
                 try:
-                    req = urllib.request.Request(url, headers={
-                        "User-Agent": "Mozilla/5.0",
-                        "Referer": "https://www.lovart.ai/",
-                    })
-                    with urllib.request.urlopen(req, timeout=60, context=_ssl_ctx) as resp:
-                        with open(local_path, "wb") as f:
-                            f.write(resp.read())
+                    def download_operation():
+                        req = urllib.request.Request(url, headers={
+                            "User-Agent": "Mozilla/5.0",
+                            "Referer": "https://www.lovart.ai/",
+                        })
+                        with urllib.request.urlopen(req, timeout=60, context=_ssl_ctx) as resp:
+                            return resp.read()
+
+                    payload = run_with_retry(
+                        download_operation,
+                        RetryPolicy(network_attempts=3, retry_delays=(2.0, 5.0)),
+                    )
+                    with open(local_path, "wb") as f:
+                        f.write(payload)
                     downloaded.append({"type": atype, "url": url, "local_path": local_path, "new": True})
-                except Exception:
-                    downloaded.append({"type": atype, "url": url, "local_path": None, "error": "download failed", "new": False})
+                except Exception as exc:
+                    downloaded.append({
+                        "type": atype,
+                        "url": url,
+                        "local_path": None,
+                        "error": "download failed",
+                        "error_kind": classify_network_error(exc).value,
+                        "host": host,
+                        "new": False,
+                    })
         return downloaded
 
     # ── Chat ─────────────────────────────────────────────────────────

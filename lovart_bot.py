@@ -3,9 +3,26 @@ import os
 import re
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from lovart_api import AgentSkill, AgentSkillError
 from utils import env_or_config, product_output_dir, update_status, read_status
+
+
+def _artifact_download_failure_message(downloaded: list[dict]) -> str:
+    failed = [item for item in downloaded if not item.get("local_path")]
+    if not failed:
+        return ""
+    hosts = sorted({
+        str(item.get("host") or urlsplit(str(item.get("url") or "")).hostname or "").lower()
+        for item in failed
+        if item.get("host") or item.get("url")
+    })
+    target = "、".join(host for host in hosts if host) or "Lovart 图片 CDN"
+    return (
+        f"Lovart 已生成完成，但从 {target} 下载图片失败；"
+        "请确认该域名已加入 Clash 代理规则后重试。"
+    )
 
 
 def build_lovart_project_name(product_id: str, product_name_cn: str = "") -> str:
@@ -211,16 +228,33 @@ class LovartBot:
                 downloaded = self.skill.download_artifacts(result, str(out_dir))
                 artifact_count = len([item for item in downloaded if item.get("local_path")])
                 project_url = f"https://www.lovart.ai/canvas?projectId={project_id}"
-                self.logger.info(f"Lovart API: artifacts saved to {out_dir}")
-                update_status(
-                    product_dir,
-                    "lovart_done",
-                    project_id=project_id,
-                    thread_id=thread_id,
-                    artifact_count=artifact_count,
-                    project_url=project_url,
-                    needs_manual_action=False,
-                )
+                download_warning = _artifact_download_failure_message(downloaded)
+                if artifact_count == 0 and download_warning:
+                    result["generation_succeeded"] = False
+                    result["warning"] = download_warning
+                    result["error"] = download_warning
+                    self.logger.warning(download_warning)
+                    update_status(
+                        product_dir,
+                        "lovart_download_failed",
+                        project_id=project_id,
+                        thread_id=thread_id,
+                        artifact_count=0,
+                        project_url=project_url,
+                        needs_manual_action=False,
+                        reason=download_warning,
+                    )
+                else:
+                    self.logger.info(f"Lovart API: artifacts saved to {out_dir}")
+                    update_status(
+                        product_dir,
+                        "lovart_done",
+                        project_id=project_id,
+                        thread_id=thread_id,
+                        artifact_count=artifact_count,
+                        project_url=project_url,
+                        needs_manual_action=False,
+                    )
             elif result.get("final_status") == "pending_confirmation":
                 confirmation = result.get("pending_confirmation") or {}
                 confirmation_text = self._save_pending_confirmation(product_dir, confirmation)
@@ -325,6 +359,23 @@ class LovartBot:
             first_image = image_files[0] if image_files else ""
             result["local_path"] = first_image
             result["downloaded"] = downloaded
+            download_warning = _artifact_download_failure_message(downloaded)
+            if not first_image and download_warning:
+                result["generation_succeeded"] = False
+                result["warning"] = download_warning
+                result["error"] = download_warning
+                self.logger.warning(download_warning)
+                update_status(
+                    product_dir,
+                    f"lovart_{step_name}_download_failed",
+                    project_id=project_id,
+                    thread_id=thread_id,
+                    local_path="",
+                    **{f"lovart_{step_name}_local_path": ""},
+                    artifact_count=0,
+                    reason=download_warning,
+                )
+                return result
             update_status(
                 product_dir,
                 f"lovart_{step_name}_done",
@@ -357,7 +408,10 @@ class LovartBot:
         selling_points: str,
         project_id: str = "",
     ) -> tuple[dict, str, str]:
-        project_id = project_id or self.create_project(product_id, product_name_cn)
+        if not project_id:
+            project_id = read_status(product_dir).get("project_id") or self.create_project(
+                product_id, product_name_cn
+            )
         return self._submit_and_poll_once(
             product_dir=product_dir,
             product_id=product_id,
@@ -392,7 +446,21 @@ class LovartBot:
         is_still_running = status.get("lovart_still_running")
         last_submitted = status.get(f"lovart_{step_name}_submitted")
         thread_id = status.get("thread_id")
-        
+        prompt_file = product_dir / f"lovart_prompt_{step_name}.txt"
+        completed_without_file = (
+            status.get(f"lovart_{step_name}_done")
+            and not status.get(f"lovart_{step_name}_local_path")
+        )
+        download_failed = status.get(f"lovart_{step_name}_download_failed")
+
+        if thread_id and (completed_without_file or download_failed):
+            self.logger.info(
+                f"Lovart API: recovering completed {step_name} artifacts "
+                f"from thread={thread_id} in project={project_id}"
+            )
+            result = self._normalize_result(self.skill.get_result(thread_id), "done", project_id)
+            return result, project_id, thread_id
+
         if is_still_running and last_submitted and thread_id:
             self.logger.info(f"Lovart API: Resuming previously timed out {step_name} thread={thread_id} in project={project_id}")
             # Clear the still_running flag locally so we don't accidentally get stuck in resume loops if it fails now
