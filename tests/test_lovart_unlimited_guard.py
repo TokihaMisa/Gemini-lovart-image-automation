@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from lovart_api import AgentSkillError
-from lovart_bot import LovartBot, resolve_lovart_tool_config
+from lovart_bot import LovartBot, resolve_lovart_tool_config, unlimited_model_catalog
 
 
 def unlimited_state(*tools, unlimited=True, enabled=True):
@@ -56,6 +56,7 @@ class LovartUnlimitedGuardTests(unittest.TestCase):
         bot.skill = skill
         bot._fast_mode = fast
         bot._unlimited_tool_names = ()
+        bot._configured_unlimited_models = ()
         bot.tool_config = resolve_lovart_tool_config({
             "image_model": "auto",
             "model_selection": "prefer",
@@ -149,6 +150,91 @@ class LovartUnlimitedGuardTests(unittest.TestCase):
 
         self.assertIn("credit-required", result["warning"])
         self.assertEqual(skill.confirm_calls, 0)
+
+    def test_catalog_preserves_server_order_and_plan_restrictions(self):
+        state = {
+            "unlimited": True,
+            "unlimited_enable": True,
+            "unlimited_list": [
+                {
+                    "name": "Nano Banana Pro",
+                    "status": 1,
+                    "extraItem": "1K",
+                    "alias_list": ["generate_image_nano_banana_pro"],
+                },
+                {
+                    "name": "Paid Model",
+                    "status": 0,
+                    "alias_list": ["generate_image_gpt_image_2"],
+                },
+            ],
+        }
+
+        self.assertEqual(
+            unlimited_model_catalog(state),
+            [{
+                "model": "nano_banana_pro",
+                "tool_name": "generate_image_nano_banana_pro",
+                "label": "Nano Banana Pro",
+                "restriction": "1K",
+            }],
+        )
+
+    def test_saved_annual_models_are_filtered_for_monthly_account(self):
+        skill = _ModeSkill([unlimited_state("generate_image_nano_banana")])
+        bot = self.make_bot(skill)
+        bot._configured_unlimited_models = (
+            "nano_banana_pro",
+            "nano_banana",
+            "gpt_image_2",
+        )
+
+        models = bot._unlimited_attempt_models(bot.tool_config)
+
+        self.assertEqual(models, ["nano_banana"])
+        self.assertTrue(any("will be skipped" in msg for msg in bot.logger.messages))
+
+    def test_unlimited_models_are_forced_one_at_a_time_in_saved_order(self):
+        skill = _ModeSkill([unlimited_state(
+            "generate_image_nano_banana",
+            "generate_image_nano_banana_2",
+        )])
+        bot = self.make_bot(skill)
+        bot._configured_unlimited_models = ("nano_banana_2", "nano_banana")
+        calls = []
+
+        def execute(**kwargs):
+            calls.append((bot.tool_config.copy(), kwargs.copy()))
+            if len(calls) == 1:
+                return {
+                    "final_status": "pending_confirmation",
+                    "generation_succeeded": False,
+                }, "project-1", "thread-paid"
+            return {
+                "final_status": "done",
+                "generation_succeeded": True,
+            }, "project-1", "thread-free"
+
+        result, project_id, thread_id = bot._execute_with_fallback(
+            execute, project_id="project-1"
+        )
+
+        self.assertEqual([call[0]["image_model"] for call in calls], [
+            "nano_banana_2", "nano_banana"
+        ])
+        self.assertTrue(all(call[0]["model_selection"] == "force" for call in calls))
+        self.assertTrue(calls[1][1]["force_new_thread"])
+        self.assertEqual(result["used_model"], "nano_banana_2 ➔ nano_banana")
+        self.assertEqual((project_id, thread_id), ("project-1", "thread-free"))
+        self.assertEqual(bot.tool_config["image_model"], "auto")
+
+    def test_stale_selection_with_no_live_unlimited_model_stops(self):
+        skill = _ModeSkill([unlimited_state("generate_image_nano_banana")])
+        bot = self.make_bot(skill)
+        bot._configured_unlimited_models = ("nano_banana_pro",)
+
+        with self.assertRaisesRegex(AgentSkillError, "重新检测并保存模型"):
+            bot._unlimited_attempt_models(bot.tool_config)
 
 
 if __name__ == "__main__":

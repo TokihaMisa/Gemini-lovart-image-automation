@@ -207,6 +207,7 @@ class LovartArtifactDownloadTests(unittest.TestCase):
             "image_model": "auto",
             "tool_names": [],
         }
+        bot._fast_mode = True
         calls = []
 
         def execute(**kwargs):

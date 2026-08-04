@@ -86,6 +86,85 @@ class WebUIModelSettingsTests(unittest.TestCase):
             self.assertIn("allow_regular_chat_fallback: false", text)
             self.assertIn("failed_retry_mode: finite", text)
             self.assertIn("failed_retry_error_types:", text)
+            self.assertIn("unlimited_models: []", text)
+
+    @patch("webui.AgentSkill")
+    def test_detect_lovart_unlimited_models_returns_only_enabled_supported_models(self, skill_cls):
+        skill_cls.return_value.query_mode.return_value = {
+            "unlimited": True,
+            "unlimited_enable": True,
+            "unlimited_list": [
+                {
+                    "name": "Nano Banana",
+                    "status": 1,
+                    "alias_list": ["generate_image_nano_banana"],
+                },
+                {
+                    "name": "Nano Banana Pro",
+                    "status": 0,
+                    "extraItem": "1K",
+                    "alias_list": ["generate_image_nano_banana_pro"],
+                },
+                {
+                    "name": "Unknown",
+                    "status": 1,
+                    "alias_list": ["generate_image_unknown"],
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text("lovart:\n  base_url: https://lovart.test\n", encoding="utf-8")
+            status, catalog = webui.detect_lovart_unlimited_models(
+                "access", "secret", config_path=path
+            )
+
+        self.assertIn("检测到 1 个", status)
+        self.assertEqual([item["model"] for item in catalog], ["nano_banana"])
+        skill_cls.assert_called_once()
+
+    def test_save_lovart_unlimited_models_uses_user_order_and_preserves_config(self):
+        catalog = [
+            {
+                "model": "nano_banana",
+                "label": "Nano Banana",
+                "restriction": "",
+            },
+            {
+                "model": "nano_banana_pro",
+                "label": "Nano Banana Pro",
+                "restriction": "1K",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text(
+                "lovart:\n  image_model: auto\nother:\n  keep: true\n",
+                encoding="utf-8",
+            )
+            status = webui.save_lovart_unlimited_models(
+                ["nano_banana", "nano_banana_pro"],
+                ["nano_banana_pro", "nano_banana"],
+                catalog,
+                config_path=path,
+            )
+            saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+        self.assertIn("已保存", status)
+        self.assertEqual(
+            saved["lovart"]["unlimited_models"],
+            ["nano_banana_pro", "nano_banana"],
+        )
+        self.assertEqual(saved["lovart"]["image_model"], "auto")
+        self.assertTrue(saved["other"]["keep"])
+
+    def test_move_lovart_model_changes_only_requested_position(self):
+        order = ["nano_banana", "nano_banana_2", "nano_banana_pro"]
+        self.assertEqual(
+            webui.move_lovart_model("nano_banana_pro", order, -1),
+            ["nano_banana", "nano_banana_pro", "nano_banana_2"],
+        )
+        self.assertEqual(order, ["nano_banana", "nano_banana_2", "nano_banana_pro"])
 
     def test_save_failed_retry_settings_preserves_other_config(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -349,6 +428,17 @@ class WebUIModelSettingsTests(unittest.TestCase):
         run_labels = {component_labels[item] for item in run_event["inputs"]}
         self.assertIn("Gemini API 地址", run_labels)
         self.assertIn("NVIDIA API 地址", run_labels)
+
+        detect_event = dependencies["detect_lovart_unlimited_models"]
+        self.assertEqual(
+            [component_labels[item] for item in detect_event["inputs"]],
+            ["LOVART_ACCESS_KEY", "LOVART_SECRET_KEY"],
+        )
+        save_lovart_event = dependencies["save_lovart_unlimited_models"]
+        self.assertIn(
+            "启用的无限模型",
+            [component_labels[item] for item in save_lovart_event["inputs"]],
+        )
 
     def test_api_save_and_run_offer_injectable_env_and_config_paths_without_new_ui_inputs(self):
         save_parameters = inspect.signature(save_api_settings).parameters

@@ -45,6 +45,54 @@ LOVART_IMAGE_MODELS = {
     "seedream_v4_5": "generate_image_seedream_v4_5",
 }
 
+LOVART_TOOL_MODELS = {
+    tool_name: model_name
+    for model_name, tool_name in LOVART_IMAGE_MODELS.items()
+    if tool_name
+}
+
+LOVART_MODEL_LABELS = {
+    "gpt_image_2": "GPT Image 2",
+    "nano_banana": "Nano Banana",
+    "nano_banana_2": "Nano Banana 2",
+    "nano_banana_pro": "Nano Banana Pro",
+    "midjourney": "Midjourney",
+    "seedream_v4": "Seedream 4",
+    "seedream_v4_5": "Seedream 4.5",
+}
+
+
+def unlimited_model_catalog(mode_state: dict) -> list[dict]:
+    """Return supported unlimited image models in the server-provided order."""
+    catalog = []
+    seen = set()
+    for item in mode_state.get("unlimited_list") or []:
+        if not isinstance(item, dict) or item.get("status", 1) not in (1, True):
+            continue
+        aliases = item.get("alias_list") or item.get("aliasList") or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        model_name = ""
+        tool_name = ""
+        for alias in aliases:
+            if isinstance(alias, str) and alias in LOVART_TOOL_MODELS:
+                tool_name = alias
+                model_name = LOVART_TOOL_MODELS[alias]
+                break
+        if not model_name or model_name in seen:
+            continue
+        seen.add(model_name)
+        restriction = item.get("extraItem") or item.get("extra_item") or ""
+        if isinstance(restriction, (list, tuple)):
+            restriction = " / ".join(str(value) for value in restriction if value)
+        catalog.append({
+            "model": model_name,
+            "tool_name": tool_name,
+            "label": str(item.get("name") or LOVART_MODEL_LABELS.get(model_name, model_name)),
+            "restriction": str(restriction or ""),
+        })
+    return catalog
+
 
 def resolve_lovart_tool_config(cfg: dict) -> dict:
     """Resolve Lovart model and reasoning options into AgentSkill.send kwargs."""
@@ -126,6 +174,14 @@ class LovartBot:
         )
         self._fast_mode = False
         self._unlimited_tool_names: tuple[str, ...] = ()
+        configured_order = self.cfg.get("unlimited_models") or []
+        if isinstance(configured_order, str):
+            configured_order = [part.strip() for part in configured_order.split(",")]
+        self._configured_unlimited_models = tuple(
+            model
+            for model in configured_order
+            if isinstance(model, str) and model in LOVART_IMAGE_MODELS and model != "auto"
+        )
 
     def set_fast_mode(self, fast: bool) -> None:
         """Set generation mode. True = fast/credits, False = unlimited/queue."""
@@ -157,14 +213,7 @@ class LovartBot:
 
     @staticmethod
     def _extract_unlimited_tool_names(mode_state: dict) -> tuple[str, ...]:
-        names = []
-        for item in mode_state.get("unlimited_list") or []:
-            if item.get("status", 1) not in (1, True):
-                continue
-            for alias in item.get("alias_list") or []:
-                if isinstance(alias, str) and alias.startswith("generate_") and alias not in names:
-                    names.append(alias)
-        return tuple(names)
+        return tuple(item["tool_name"] for item in unlimited_model_catalog(mode_state))
 
     def _verify_generation_mode(self, expected_unlimited: bool, reapply: bool = False) -> dict:
         if reapply:
@@ -227,61 +276,135 @@ class LovartBot:
             "mode": reasoning_mode,
         }
 
-    def set_image_model(self, model_name: str) -> None:
+    def set_image_model(self, model_name: str, selection: str = "prefer") -> None:
         """Override the current image model dynamically (e.g. for fallback)."""
-        temp_cfg = {"image_model": model_name, "model_selection": "prefer"}
+        temp_cfg = {
+            "image_model": model_name,
+            "model_selection": selection,
+            "reasoning_mode": self.tool_config.get("mode"),
+        }
         self.tool_config = resolve_lovart_tool_config(temp_cfg)
         self.logger.info(f"Lovart model dynamically overridden to: {model_name}")
 
+    def _unlimited_attempt_models(self, tool_config: dict) -> list[str]:
+        mode_state = self._verify_generation_mode(expected_unlimited=True, reapply=True)
+        allowed_tools = self._extract_unlimited_tool_names(mode_state)
+        if not allowed_tools:
+            raise AgentSkillError(
+                "为避免积分扣费，Lovart 没有返回当前账号可用的无限生成模型，任务已停止。"
+            )
+        self._unlimited_tool_names = allowed_tools
+
+        configured_models = getattr(self, "_configured_unlimited_models", ())
+        if configured_models:
+            requested_models = configured_models
+            requested_tools = tuple(LOVART_IMAGE_MODELS[model] for model in requested_models)
+            available_models = [
+                model for model, tool_name in zip(requested_models, requested_tools)
+                if tool_name in allowed_tools
+            ]
+            unavailable_models = [
+                model for model, tool_name in zip(requested_models, requested_tools)
+                if tool_name not in allowed_tools
+            ]
+            if unavailable_models:
+                self.logger.warning(
+                    "Lovart unlimited selection is no longer included in this account and will be skipped: "
+                    + ", ".join(unavailable_models)
+                )
+            if not available_models:
+                raise AgentSkillError(
+                    "已勾选的 Lovart 模型均不在当前账号的无限生成列表中。"
+                    "为避免积分扣费，任务已停止，请重新检测并保存模型。"
+                )
+            return available_models
+
+        requested_tools = tuple(tool_config.get("tool_names") or ())
+        unsupported = [name for name in requested_tools if name not in allowed_tools]
+        if unsupported:
+            raise AgentSkillError(
+                "所选 Lovart 模型不在当前账号的无限生成列表中："
+                + ", ".join(unsupported)
+                + "。为避免积分扣费，任务已停止。"
+            )
+        candidate_tools = requested_tools or allowed_tools
+        models = [
+            LOVART_TOOL_MODELS[tool_name]
+            for tool_name in candidate_tools
+            if tool_name in LOVART_TOOL_MODELS
+        ]
+        if not models:
+            raise AgentSkillError(
+                "当前账号返回的无限生成模型尚不受此版本支持。"
+                "为避免积分扣费，任务已停止。"
+            )
+        return models
+
     def _execute_with_fallback(self, func, *args, **kwargs):
-        import os
-        fallback_models = ["nano_banana_pro", "nano_banana_2", "gpt_image_2"]
-        attempted_models = []
-        
-        # Initial execution
-        initial_model = self.tool_config.get('image_model', 'auto')
-        attempted_models.append(initial_model)
-        if os.environ.get("UI_MODE") == "1":
-            print(f"[UI_MODEL] {initial_model}", flush=True)
-            
-        result, project_id, thread_id = func(*args, **kwargs)
-        
         def needs_fallback(value: dict | None) -> bool:
             if not value:
                 return False
-            return value.get("final_status") == "pending_confirmation" or (
+            return value.get("final_status") in {"pending_confirmation", "abort", "failed"} or (
                 value.get("final_status") == "done"
                 and not value.get("generation_succeeded")
             )
 
-        # A done thread can still contain only a text reply. Start a fresh
-        # thread with another model instead of repeatedly reading that result.
-        if needs_fallback(result):
-            for fb_model in fallback_models:
-                attempted_models.append(fb_model)
-                reason = (
-                    "pending confirmation"
-                    if result.get("final_status") == "pending_confirmation"
-                    else "finished without image artifacts"
-                )
-                self.logger.info(
-                    f"Lovart {reason}. Starting a fresh fallback thread with: {fb_model}"
-                )
+        original_tool_config = self.tool_config
+        fast_mode = getattr(self, "_fast_mode", False)
+        if fast_mode:
+            initial_model = original_tool_config.get("image_model", "auto")
+            attempt_models = list(dict.fromkeys([
+                initial_model, "nano_banana_pro", "nano_banana_2", "gpt_image_2"
+            ]))
+        else:
+            attempt_models = self._unlimited_attempt_models(original_tool_config)
+            self.logger.info(
+                "Lovart unlimited models will be tried one at a time: "
+                + ", ".join(attempt_models)
+            )
+
+        attempted_models = []
+        result = None
+        project_id = kwargs.get("project_id", "")
+        thread_id = ""
+        try:
+            for index, model_name in enumerate(attempt_models):
+                attempted_models.append(model_name)
+                if fast_mode:
+                    if index == 0:
+                        self.tool_config = original_tool_config
+                    else:
+                        self.set_image_model(model_name)
+                else:
+                    self.set_image_model(model_name, selection="force")
+
+                if index > 0:
+                    reason = (
+                        "pending credit confirmation"
+                        if result and result.get("final_status") == "pending_confirmation"
+                        else "failed to return usable image artifacts"
+                    )
+                    self.logger.info(
+                        f"Lovart {reason}. Starting a fresh thread with: {model_name}"
+                    )
+
                 if os.environ.get("UI_MODE") == "1":
-                    print(f"[UI_MODEL] {fb_model}", flush=True)
-                self.set_image_model(fb_model)
-                
-                # Update project_id to reuse the project if one was created
-                kwargs['project_id'] = project_id or kwargs.get('project_id', '')
-                kwargs['force_new_thread'] = True
-                
-                result, project_id, thread_id = func(*args, **kwargs)
+                    print(f"[UI_MODEL] {model_name}", flush=True)
+
+                call_kwargs = dict(kwargs)
+                if index > 0:
+                    call_kwargs["project_id"] = project_id or call_kwargs.get("project_id", "")
+                    call_kwargs["force_new_thread"] = True
+
+                result, project_id, thread_id = func(*args, **call_kwargs)
                 if not needs_fallback(result):
                     break
-        
+        finally:
+            self.tool_config = original_tool_config
+
         if result:
             result["used_model"] = " ➔ ".join(attempted_models)
-            
+
         return result, project_id, thread_id
 
     def create_project(self, product_id: str = "", product_name_cn: str = "") -> str:

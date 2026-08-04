@@ -78,6 +78,10 @@ lovart:
   # midjourney, seedream_v4, seedream_v4_5
   # Multiple models are allowed with commas, e.g. "nano_banana_2,nano_banana_pro".
   image_model: "auto"
+  # Filled by the WebUI account detector. In unlimited mode these models are
+  # revalidated against the live account entitlement and tried in this order.
+  unlimited_models: []
+  unlimited_model_catalog: []
   # prefer = let Lovart Agent auto-plan but prefer this image model.
   # force = force only this image generation tool.
   model_selection: "prefer"

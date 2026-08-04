@@ -47,6 +47,8 @@ from gemini_browser_session import (
     read_login_status,
     request_login_helper_close,
 )
+from lovart_api import AgentSkill, AgentSkillError
+from lovart_bot import LOVART_IMAGE_MODELS, LOVART_MODEL_LABELS, unlimited_model_catalog
 
 
 PROMPT_FORM_FIELDS = (
@@ -411,6 +413,8 @@ lovart:
   base_url: https://lgw.lovart.ai
   image_model: auto
   model_selection: prefer
+  unlimited_models: []
+  unlimited_model_catalog: []
   reasoning_mode: fast
   wait_forever_on_credit_prompt: true
   max_confirmation_rounds: 5
@@ -799,6 +803,135 @@ def save_api_settings(
         message = exc.user_message if isinstance(exc, ModelProviderError) else str(exc)
         return f"❌ API 与模型设置保存失败，原配置未被部分覆盖：{message}"
     return "✅ 密钥、API 地址和模型已保存"
+
+
+def normalize_lovart_model_catalog(catalog) -> list[dict]:
+    normalized = []
+    seen = set()
+    for item in catalog or []:
+        if not isinstance(item, dict):
+            continue
+        model = str(item.get("model") or "").strip()
+        tool_name = LOVART_IMAGE_MODELS.get(model)
+        if not tool_name or model in seen:
+            continue
+        seen.add(model)
+        normalized.append({
+            "model": model,
+            "tool_name": tool_name,
+            "label": str(item.get("label") or LOVART_MODEL_LABELS.get(model, model)),
+            "restriction": str(item.get("restriction") or ""),
+        })
+    return normalized
+
+
+def lovart_model_choices(catalog, order=None):
+    normalized = normalize_lovart_model_catalog(catalog)
+    by_model = {item["model"]: item for item in normalized}
+    ordered_models = [model for model in (order or []) if model in by_model]
+    ordered_models.extend(model for model in by_model if model not in ordered_models)
+    choices = []
+    for model in ordered_models:
+        item = by_model[model]
+        suffix = f" ({item['restriction']})" if item["restriction"] else ""
+        choices.append((f"{item['label']}{suffix}", model))
+    return choices
+
+
+def format_lovart_model_order(selected, order, catalog) -> str:
+    selected_set = set(selected or [])
+    labels = {model: label for label, model in lovart_model_choices(catalog, order)}
+    ordered = [model for model in (order or []) if model in selected_set]
+    if not ordered:
+        return "尚未选择无限模型。"
+    return "  >  ".join(
+        f"{index}. {labels.get(model, model)}"
+        for index, model in enumerate(ordered, 1)
+    )
+
+
+def move_lovart_model(model, order, direction):
+    current = [item for item in (order or []) if isinstance(item, str)]
+    if model not in current or direction not in {-1, 1}:
+        return current
+    index = current.index(model)
+    target = index + direction
+    if 0 <= target < len(current):
+        current[index], current[target] = current[target], current[index]
+    return current
+
+
+def detect_lovart_unlimited_models(
+    access_key,
+    secret_key,
+    *,
+    config_path="config.yaml",
+):
+    access_key = str(access_key or "").strip()
+    secret_key = str(secret_key or "").strip()
+    if not access_key or not secret_key:
+        return "❌ 请先填写 Lovart Access Key 和 Secret Key。", []
+
+    config = load_config(config_path)
+    lovart_config = config.get("lovart", {}) or {}
+    client = AgentSkill(
+        base_url=os.environ.get(
+            "LOVART_BASE_URL", lovart_config.get("base_url", "https://lgw.lovart.ai")
+        ),
+        access_key=access_key,
+        secret_key=secret_key,
+        timeout=min(int(lovart_config.get("timeout", 600)), 60),
+        poll_interval=lovart_config.get("poll_interval", 10),
+    )
+    try:
+        mode_state = client.query_mode()
+    except (AgentSkillError, OSError, ValueError) as exc:
+        return f"❌ Lovart 无限模型检测失败：{exc}", []
+
+    if mode_state.get("unlimited_enable") is False:
+        return "❌ 当前 Lovart 账号没有启用无限生成权限。", []
+    catalog = normalize_lovart_model_catalog(unlimited_model_catalog(mode_state))
+    if not catalog:
+        return "❌ Lovart 没有返回本客户端支持的无限生成模型。", []
+
+    channel = "无限生成" if mode_state.get("unlimited") else "高速生成"
+    details = "、".join(
+        item["label"] + (f" ({item['restriction']})" if item["restriction"] else "")
+        for item in catalog
+    )
+    return f"✅ 检测到 {len(catalog)} 个无限模型；当前通道：{channel}。\n\n{details}", catalog
+
+
+def save_lovart_unlimited_models(
+    selected_models,
+    model_order,
+    catalog,
+    *,
+    config_path="config.yaml",
+):
+    target = Path(config_path)
+    try:
+        normalized_catalog = normalize_lovart_model_catalog(catalog)
+        available = {item["model"] for item in normalized_catalog}
+        selected = [model for model in (selected_models or []) if model in available]
+        selected_set = set(selected)
+        ordered = [model for model in (model_order or []) if model in selected_set]
+        ordered.extend(model for model in selected if model not in ordered)
+        if not ordered:
+            raise ValueError("请至少勾选一个检测到的无限模型")
+
+        current = yaml.safe_load(target.read_text(encoding="utf-8")) or {} if target.exists() else {}
+        if not isinstance(current, dict):
+            raise ValueError("config.yaml 顶层必须是配置对象")
+        current.setdefault("lovart", {}).update({
+            "unlimited_models": ordered,
+            "unlimited_model_catalog": normalized_catalog,
+            "unlimited_models_checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        save_config(current, target)
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+        return f"❌ 无限模型设置保存失败：{exc}"
+    return "✅ 无限模型及尝试顺序已保存；任务执行时仍会实时复核套餐权限。"
 
 
 def save_failed_retry_settings(
@@ -1585,7 +1718,27 @@ def build_ui():
     allow_regular_chat_fallback_value = (
         config.get("gemini", {}).get("allow_regular_chat_fallback") is True
     )
-    failed_retry_policy = FailedRetryPolicy.from_config(config.get("lovart", {}))
+    lovart_config = config.get("lovart", {}) or {}
+    failed_retry_policy = FailedRetryPolicy.from_config(lovart_config)
+    saved_lovart_catalog = normalize_lovart_model_catalog(
+        lovart_config.get("unlimited_model_catalog") or []
+    )
+    saved_lovart_order = [
+        model
+        for model in (lovart_config.get("unlimited_models") or [])
+        if isinstance(model, str) and model in LOVART_IMAGE_MODELS and model != "auto"
+    ]
+    if not saved_lovart_catalog and saved_lovart_order:
+        saved_lovart_catalog = [
+            {
+                "model": model,
+                "tool_name": LOVART_IMAGE_MODELS[model],
+                "label": LOVART_MODEL_LABELS.get(model, model),
+                "restriction": "",
+            }
+            for model in saved_lovart_order
+        ]
+    saved_lovart_choices = lovart_model_choices(saved_lovart_catalog, saved_lovart_order)
 
     def refresh_provider_controls(provider, api_key, base_url, current_model, prompt_source_value):
         status, choices, selected, catalog = refresh_provider_models(
@@ -1635,9 +1788,38 @@ def build_ui():
         nvidia_update = gr.update(value=updated_nvidia) if updated_nvidia != nvidia_model else gr.skip()
         return gemini_update, nvidia_update
 
+    def detect_lovart_controls(access_key, secret_key):
+        status, catalog = detect_lovart_unlimited_models(access_key, secret_key)
+        if not catalog:
+            return status, gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
+        order = [item["model"] for item in catalog]
+        choices = lovart_model_choices(catalog, order)
+        return (
+            status,
+            gr.update(choices=choices, value=order),
+            gr.update(choices=choices, value=order[0]),
+            catalog,
+            order,
+            format_lovart_model_order(order, order, catalog),
+        )
+
+    def move_lovart_controls(model, selected, catalog, order, direction):
+        updated_order = move_lovart_model(model, order, direction)
+        choices = lovart_model_choices(catalog, updated_order)
+        selected_set = set(selected or [])
+        updated_selected = [item for item in updated_order if item in selected_set]
+        return (
+            gr.update(choices=choices, value=updated_selected),
+            gr.update(choices=choices, value=model),
+            updated_order,
+            format_lovart_model_order(updated_selected, updated_order, catalog),
+        )
+
     with gr.Blocks(title="Lovart Image Automation WebUI") as demo:
         gemini_catalog_state = gr.State([])
         nvidia_catalog_state = gr.State([])
+        lovart_catalog_state = gr.State(saved_lovart_catalog)
+        lovart_order_state = gr.State(saved_lovart_order)
         with gr.Row():
             gr.HTML("<h1 class='gradient-text' style='text-align: center; margin-top: 20px; flex-grow: 1;'>🎨 Lovart Image Automation Pro</h1>")
             shutdown_btn = gr.Button("🛑 完全退出并关闭服务", variant="stop", scale=0, min_width=180, elem_classes="action-btn")
@@ -1767,6 +1949,112 @@ def build_ui():
 
                     lovart_access = gr.Textbox(label="LOVART_ACCESS_KEY", value=get_env("LOVART_ACCESS_KEY"), type="password")
                     lovart_secret = gr.Textbox(label="LOVART_SECRET_KEY", value=get_env("LOVART_SECRET_KEY"), type="password")
+
+                    gr.Markdown("### Lovart 当前账号无限模型")
+                    detect_lovart_models_btn = gr.Button(
+                        "检测当前账号无限模型",
+                        variant="secondary",
+                    )
+                    lovart_unlimited_models = gr.CheckboxGroup(
+                        choices=saved_lovart_choices,
+                        value=saved_lovart_order,
+                        label="启用的无限模型",
+                        show_select_all=True,
+                    )
+                    with gr.Row():
+                        lovart_model_to_move = gr.Dropdown(
+                            choices=saved_lovart_choices,
+                            value=saved_lovart_order[0] if saved_lovart_order else None,
+                            label="调整顺序",
+                            scale=8,
+                        )
+                        move_lovart_up_btn = gr.Button("↑", min_width=48, scale=1)
+                        move_lovart_down_btn = gr.Button("↓", min_width=48, scale=1)
+                    lovart_model_order_preview = gr.Textbox(
+                        value=format_lovart_model_order(
+                            saved_lovart_order,
+                            saved_lovart_order,
+                            saved_lovart_catalog,
+                        ),
+                        label="任务尝试顺序",
+                        interactive=False,
+                    )
+                    save_lovart_models_btn = gr.Button("保存无限模型及顺序")
+                    lovart_model_status = gr.Textbox(
+                        label="检测与保存状态",
+                        interactive=False,
+                        lines=2,
+                    )
+
+                    detect_lovart_models_btn.click(
+                        fn=detect_lovart_controls,
+                        inputs=[lovart_access, lovart_secret],
+                        outputs=[
+                            lovart_model_status,
+                            lovart_unlimited_models,
+                            lovart_model_to_move,
+                            lovart_catalog_state,
+                            lovart_order_state,
+                            lovart_model_order_preview,
+                        ],
+                        api_name="detect_lovart_unlimited_models",
+                    )
+                    move_lovart_up_btn.click(
+                        fn=lambda model, selected, catalog, order: move_lovart_controls(
+                            model, selected, catalog, order, -1
+                        ),
+                        inputs=[
+                            lovart_model_to_move,
+                            lovart_unlimited_models,
+                            lovart_catalog_state,
+                            lovart_order_state,
+                        ],
+                        outputs=[
+                            lovart_unlimited_models,
+                            lovart_model_to_move,
+                            lovart_order_state,
+                            lovart_model_order_preview,
+                        ],
+                        api_name=False,
+                    )
+                    move_lovart_down_btn.click(
+                        fn=lambda model, selected, catalog, order: move_lovart_controls(
+                            model, selected, catalog, order, 1
+                        ),
+                        inputs=[
+                            lovart_model_to_move,
+                            lovart_unlimited_models,
+                            lovart_catalog_state,
+                            lovart_order_state,
+                        ],
+                        outputs=[
+                            lovart_unlimited_models,
+                            lovart_model_to_move,
+                            lovart_order_state,
+                            lovart_model_order_preview,
+                        ],
+                        api_name=False,
+                    )
+                    lovart_unlimited_models.change(
+                        fn=format_lovart_model_order,
+                        inputs=[
+                            lovart_unlimited_models,
+                            lovart_order_state,
+                            lovart_catalog_state,
+                        ],
+                        outputs=lovart_model_order_preview,
+                        api_name=False,
+                    )
+                    save_lovart_models_btn.click(
+                        fn=save_lovart_unlimited_models,
+                        inputs=[
+                            lovart_unlimited_models,
+                            lovart_order_state,
+                            lovart_catalog_state,
+                        ],
+                        outputs=lovart_model_status,
+                        api_name="save_lovart_unlimited_models",
+                    )
 
                     gr.Markdown("### 失败任务补偿重试")
                     failed_retry_mode = gr.Radio(
