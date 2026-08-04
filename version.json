@@ -1,7 +1,7 @@
 {
-  "version": "1.3.11",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.11/update.zip",
-  "changelog": "新增 Lovart 当前账号无限图片模型检测：可查看套餐内图片模型及 1K、Low 1K 等限制，多选并调整尝试顺序；任务执行前实时复核账号权限，每次仅强制放行一个已勾选的无限图片模型，遇到积分确认、模型中止或无图片产物时自动切换下一个，视频模型不会混入图片任务。",
-  "sha256": "50f90ad6700bff8a275abfd37525e4052513ef30f566e3b4f516becd54aafd65",
-  "size": 129513446
+  "version": "1.3.12",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.12/update.zip",
+  "changelog": "修复 Lovart 轮询网络卡住问题：状态和结果请求最长等待 10 秒后返回进度循环并持续重试；命令行和 WebUI 原位刷新已用时间及第 N 次重试，不再堆积重复日志；网络恢复后自动继续获取结果，程序重启后复用已保存的 project_id 和 thread_id，避免重复提交同一生成任务。",
+  "sha256": "1e2cd98d21b8c52315156a42bbe6349eacdb59eef34b6fdad8c232ec9f113c2a",
+  "size": 129520350
 }

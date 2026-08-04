@@ -49,6 +49,8 @@ class AgentSkill:
         secret_key: str,
         timeout: int = 120,
         poll_interval: int = 3,
+        poll_request_timeout: int | None = None,
+        poll_request_attempts: int | None = None,
         path_prefix: str = "/v1/openapi",
     ):
         self.base_url = base_url.rstrip("/")
@@ -56,6 +58,16 @@ class AgentSkill:
         self.secret_key = secret_key
         self.timeout = timeout
         self.poll_interval = poll_interval
+        self.poll_request_timeout = (
+            max(1.0, float(poll_request_timeout))
+            if poll_request_timeout is not None
+            else None
+        )
+        self.poll_request_attempts = (
+            max(1, int(poll_request_attempts))
+            if poll_request_attempts is not None
+            else None
+        )
         self.prefix = path_prefix
 
 
@@ -76,7 +88,15 @@ class AgentSkill:
             "X-Signed-Path": path,
         }
 
-    def _request(self, method: str, path: str, body=None, params=None, retries: int | None = None) -> dict:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body=None,
+        params=None,
+        retries: int | None = None,
+        request_timeout: int | float | None = None,
+    ) -> dict:
         if retries is None:
             retries = 3 if method == "GET" else 1
 
@@ -95,7 +115,8 @@ class AgentSkill:
             if idempotency_key:
                 headers["Idempotency-Key"] = idempotency_key
             req = urllib.request.Request(url, data=data, headers=headers, method=method)
-            with urllib.request.urlopen(req, timeout=self.timeout, context=_ssl_ctx) as resp:
+            timeout = self.timeout if request_timeout is None else request_timeout
+            with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx) as resp:
                 return json.loads(resp.read().decode())
 
         attempts = max(1, retries)
@@ -319,10 +340,22 @@ class AgentSkill:
         return self._request("POST", f"{self.prefix}/chat", body=body)["thread_id"]
 
     def get_status(self, thread_id: str) -> dict:
-        return self._request("GET", f"{self.prefix}/chat/status", params={"thread_id": thread_id})
+        return self._request(
+            "GET",
+            f"{self.prefix}/chat/status",
+            params={"thread_id": thread_id},
+            retries=self.poll_request_attempts,
+            request_timeout=self.poll_request_timeout,
+        )
 
     def get_result(self, thread_id: str) -> dict:
-        return self._request("GET", f"{self.prefix}/chat/result", params={"thread_id": thread_id})
+        return self._request(
+            "GET",
+            f"{self.prefix}/chat/result",
+            params={"thread_id": thread_id},
+            retries=self.poll_request_attempts,
+            request_timeout=self.poll_request_timeout,
+        )
 
     def poll(self, thread_id: str, timeout: Optional[int] = None, verbose: bool = False) -> str:
         """Poll until done/abort/pending_confirmation. Returns final status.

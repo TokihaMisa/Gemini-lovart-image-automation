@@ -2,9 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from urllib.error import URLError
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from lovart_api import AgentSkill
+from lovart_api import AgentSkill, AgentSkillError
 from lovart_bot import LovartBot
 
 
@@ -199,6 +199,107 @@ class LovartArtifactDownloadTests(unittest.TestCase):
 
         self.assertTrue(result["generation_succeeded"])
         self.assertEqual(bot.skill.result_calls, 3)
+
+    def test_poll_connection_errors_refresh_one_terminal_line_and_recover(self):
+        bot = LovartBot.__new__(LovartBot)
+        bot.cfg = {
+            "wait_timeout": 10,
+            "poll_interval": 0.1,
+            "artifact_result_attempts": 1,
+        }
+        bot.logger = Mock()
+        bot._fast_mode = False
+
+        class Skill:
+            def __init__(self):
+                self.status_calls = 0
+
+            def get_status(self, _thread_id):
+                self.status_calls += 1
+                if self.status_calls <= 2:
+                    raise AgentSkillError("network unavailable")
+                return {"status": "done"}
+
+            @staticmethod
+            def get_result(_thread_id):
+                return {
+                    "items": [
+                        {
+                            "artifacts": [
+                                {"type": "image", "content": "https://a.lovart.ai/image.png"}
+                            ]
+                        }
+                    ]
+                }
+
+        bot.skill = Skill()
+        with patch("lovart_bot.time.sleep"), patch("builtins.print") as output:
+            result = bot._poll_with_progress("thread-id", "project-id")
+
+        self.assertTrue(result["generation_succeeded"])
+        reconnect_calls = [
+            call for call in output.call_args_list
+            if call.args and "持续重试中" in str(call.args[0])
+        ]
+        self.assertEqual(len(reconnect_calls), 2)
+        self.assertTrue(all(call.args[0].startswith("\r") for call in reconnect_calls))
+        self.assertTrue(all(call.kwargs.get("end") == "" for call in reconnect_calls))
+        self.assertIn("第 1 次", reconnect_calls[0].args[0])
+        self.assertIn("第 2 次", reconnect_calls[1].args[0])
+        self.assertEqual(bot.logger.warning.call_count, 1)
+        self.assertTrue(any("recovered" in str(call.args[0]) for call in bot.logger.info.call_args_list))
+
+    def test_legacy_submitted_status_resumes_original_thread_after_restart(self):
+        bot = LovartBot.__new__(LovartBot)
+        bot.cfg = {}
+        bot.logger = _Logger()
+        bot.skill = Mock()
+        resumed_result = {
+            "final_status": "done",
+            "generation_succeeded": True,
+            "items": [
+                {
+                    "artifacts": [
+                        {"type": "image", "content": "https://a.lovart.ai/image.png"}
+                    ]
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "lovart_bot.read_status",
+            return_value={
+                "project_id": "original-project",
+                "thread_id": "original-thread",
+                "lovart_white_bg_submitted": True,
+            },
+        ), patch("lovart_bot.update_status"), patch.object(
+            bot, "_poll_with_progress", return_value=resumed_result
+        ) as poll, patch.object(
+            bot, "_resolve_pending_confirmations", side_effect=lambda **kwargs: kwargs["result"]
+        ), patch.object(bot, "_upload_images") as upload:
+            result, project_id, thread_id = bot._submit_and_poll_once(
+                product_dir=Path(tmp),
+                product_id="SKU-1",
+                step_name="white_bg",
+                attempt_name="primary",
+                project_id="original-project",
+                prompt="prompt",
+                image_paths=["image.png"],
+                confirmation_advisor=None,
+                product_name_cn="Product",
+                language="English",
+                selling_points="",
+                tool_config={"image_model": "auto", "model_selection": "auto", "mode": None},
+            )
+
+        upload.assert_not_called()
+        bot.skill.send.assert_not_called()
+        poll.assert_called_once_with(
+            "original-thread", "original-project", product_dir=Path(tmp)
+        )
+        self.assertTrue(result["generation_succeeded"])
+        self.assertEqual((project_id, thread_id), ("original-project", "original-thread"))
 
     def test_text_only_done_result_starts_fresh_model_fallback_thread(self):
         bot = LovartBot.__new__(LovartBot)

@@ -171,6 +171,8 @@ class LovartBot:
             secret_key=secret_key,
             timeout=self.cfg.get("timeout", 600),
             poll_interval=self.cfg.get("poll_interval", 10),
+            poll_request_timeout=self.cfg.get("poll_request_timeout", 10),
+            poll_request_attempts=self.cfg.get("poll_request_attempts", 1),
         )
         self._fast_mode = False
         self._unlimited_tool_names: tuple[str, ...] = ()
@@ -677,6 +679,19 @@ class LovartBot:
         is_still_running = status.get("lovart_still_running")
         last_submitted = status.get(f"lovart_{step_name}_submitted")
         thread_id = status.get("thread_id")
+        terminal_step = any((
+            status.get(f"lovart_{step_name}_done"),
+            status.get(f"lovart_{step_name}_failed"),
+            status.get(f"lovart_{step_name}_download_failed"),
+            status.get("needs_manual_action"),
+            status.get("lovart_done"),
+        ))
+        explicit_submission_active = status.get("lovart_submission_active") is True
+        legacy_submission_active = (
+            "lovart_submission_active" not in status
+            and last_submitted
+            and not terminal_step
+        )
         prompt_file = product_dir / f"lovart_prompt_{step_name}.txt"
         completed_without_file = (
             status.get(f"lovart_{step_name}_done")
@@ -696,10 +711,24 @@ class LovartBot:
             result = self._normalize_result(result, "done", project_id)
             return result, project_id, thread_id
 
-        if not force_new_thread and is_still_running and last_submitted and thread_id:
-            self.logger.info(f"Lovart API: Resuming previously timed out {step_name} thread={thread_id} in project={project_id}")
+        if (
+            not force_new_thread
+            and last_submitted
+            and thread_id
+            and (is_still_running or explicit_submission_active or legacy_submission_active)
+        ):
+            self.logger.info(
+                f"Lovart API: resuming previously submitted {step_name} "
+                f"thread={thread_id} in project={project_id}"
+            )
             # Clear the still_running flag locally so we don't accidentally get stuck in resume loops if it fails now
-            update_status(product_dir, "lovart_still_running_resumed", lovart_still_running=False)
+            update_status(
+                product_dir,
+                "lovart_still_running_resumed",
+                lovart_still_running=False,
+                lovart_submission_active=True,
+                lovart_active_step=step_name,
+            )
         else:
             file_suffix = step_name if attempt_name == "primary" else f"{step_name}_{attempt_name}"
             attachment_records = self._upload_images(image_paths)
@@ -732,17 +761,19 @@ class LovartBot:
             )
             self.logger.info(f"Lovart API: sent {step_name} project={project_id}, thread={thread_id}")
             
-        update_status(
-            product_dir,
-            f"lovart_{step_name}_submitted",
-            project_id=project_id,
-            thread_id=thread_id,
-            image_model=tool_config["image_model"],
-            model_selection=tool_config["model_selection"],
-            reasoning_mode=tool_config["mode"] or "default",
-            prompt_file=str(prompt_file),
-            attempt=attempt_name,
-        )
+            update_status(
+                product_dir,
+                f"lovart_{step_name}_submitted",
+                project_id=project_id,
+                thread_id=thread_id,
+                lovart_submission_active=True,
+                lovart_active_step=step_name,
+                image_model=tool_config["image_model"],
+                model_selection=tool_config["model_selection"],
+                reasoning_mode=tool_config["mode"] or "default",
+                prompt_file=str(prompt_file),
+                attempt=attempt_name,
+            )
         result = self._poll_with_progress(thread_id, project_id, product_dir=product_dir)
         result = self._resolve_pending_confirmations(
             result=result,
@@ -755,6 +786,23 @@ class LovartBot:
             thread_id=thread_id,
             confirmation_advisor=confirmation_advisor,
         )
+        if result.get("final_status") == "timeout":
+            update_status(
+                product_dir,
+                "lovart_still_running",
+                project_id=project_id,
+                thread_id=thread_id,
+                lovart_submission_active=True,
+                lovart_active_step=step_name,
+                reason="Lovart polling reached the local wait timeout; remote task may still be running",
+            )
+        else:
+            update_status(
+                product_dir,
+                f"lovart_{step_name}_poll_finished",
+                lovart_submission_active=False,
+                lovart_active_step="",
+            )
         return result, project_id, thread_id
 
     def _upload_images(self, paths: list[str]) -> list[dict]:
@@ -987,8 +1035,8 @@ class LovartBot:
         return ""
 
     def _poll_with_progress(self, thread_id: str, project_id: str, product_dir: Path | None = None) -> dict:
-        timeout = self.cfg.get("wait_timeout", 10800)
-        interval = self.cfg.get("poll_interval", 10)
+        timeout = max(1.0, float(self.cfg.get("wait_timeout", 10800) or 10800))
+        interval = max(0.1, float(self.cfg.get("poll_interval", 10) or 10))
         deadline = time.time() + timeout
         status_names = {
             "pending": "排队中...",
@@ -997,15 +1045,31 @@ class LovartBot:
             "abort": "已取消",
         }
         start = time.time()
+        poll_error_count = 0
 
         while time.time() < deadline:
             try:
                 status_info = self.skill.get_status(thread_id)
                 status = status_info.get("status", "unknown")
                 elapsed = int(time.time() - start)
-                dots = "." * ((elapsed // interval) % 4)
+                dots = "." * ((elapsed // max(1, int(interval))) % 4)
 
                 result = self.skill.get_result(thread_id)
+                if poll_error_count:
+                    if os.environ.get("UI_MODE") != "1":
+                        print()
+                    self.logger.info(
+                        f"Lovart polling connection recovered after {poll_error_count} failed checks"
+                    )
+                    if product_dir:
+                        update_status(
+                            product_dir,
+                            "lovart_poll_connection_recovered",
+                            lovart_poll_reconnecting=False,
+                            poll_error_count=0,
+                            poll_elapsed_seconds=elapsed,
+                        )
+                    poll_error_count = 0
                 pending_confirmation = result.get("pending_confirmation")
                 if pending_confirmation:
                     estimated_cost = self._confirmation_estimated_cost(pending_confirmation)
@@ -1063,7 +1127,26 @@ class LovartBot:
                 else:
                     print(f"\r  [{elapsed}s] {status_names.get(status, status)}{dots}   ", end="", flush=True)
             except Exception as exc:
-                self.logger.warning(f"Lovart poll error: {exc}")
+                poll_error_count += 1
+                elapsed = int(time.time() - start)
+                retry_text = f"连接失败，持续重试中（第 {poll_error_count} 次）"
+                if poll_error_count == 1:
+                    self.logger.warning(f"Lovart poll error: {exc}")
+                if product_dir:
+                    update_status(
+                        product_dir,
+                        "lovart_poll_reconnecting",
+                        project_id=project_id,
+                        thread_id=thread_id,
+                        lovart_submission_active=True,
+                        poll_error_count=poll_error_count,
+                        poll_elapsed_seconds=elapsed,
+                        reason=str(exc),
+                    )
+                if os.environ.get("UI_MODE") == "1":
+                    print(f"[UI_PROGRESS] {elapsed}s | {retry_text}", flush=True)
+                else:
+                    print(f"\r  [{elapsed}s] {retry_text}   ", end="", flush=True)
 
             time.sleep(interval)
 
@@ -1081,7 +1164,12 @@ class LovartBot:
                 return self._normalize_result(final_result, "done", project_id)
         except Exception as exc:
             self.logger.warning(f"Lovart final status check failed: {exc}")
-        return self._normalize_result(self.skill.get_result(thread_id), "timeout", project_id)
+        try:
+            final_result = self.skill.get_result(thread_id)
+        except Exception as exc:
+            self.logger.warning(f"Lovart final result check failed: {exc}")
+            final_result = {"warning": str(exc)}
+        return self._normalize_result(final_result, "timeout", project_id)
 
     def _wait_for_result_artifacts(self, thread_id: str, result: dict) -> dict:
         attempts = max(1, int(self.cfg.get("artifact_result_attempts", 4) or 4))

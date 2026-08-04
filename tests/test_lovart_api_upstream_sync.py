@@ -75,6 +75,26 @@ class LovartUpstreamSyncTests(unittest.TestCase):
         self.assertTrue(keys[0])
         self.assertEqual(keys[0], keys[1])
 
+    def test_poll_requests_use_short_timeout_without_internal_retry(self):
+        client = AgentSkill(
+            "https://lovart.test",
+            "access-key",
+            "secret-key",
+            timeout=600,
+            poll_request_timeout=10,
+            poll_request_attempts=1,
+        )
+
+        with patch(
+            "lovart_api.urllib.request.urlopen",
+            side_effect=URLError(TimeoutError("timed out")),
+        ) as urlopen:
+            with self.assertRaises(AgentSkillError):
+                client.get_status("thread-id")
+
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 10)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -421,6 +421,8 @@ lovart:
   max_auto_confirm_credits: 10
   wait_timeout: 10800
   poll_interval: 10
+  poll_request_timeout: 10
+  poll_request_attempts: 1
   timeout: 600
   upload_attempts: 3
   upload_retry_delay: 2
@@ -1374,7 +1376,12 @@ def run_process(
                 if current_pid and current_pid in products_dict:
                     products_dict[current_pid]["status"] = current_status
                     products_dict[current_pid]["color"] = status_color
-                    products_dict[current_pid].setdefault("logs", []).append(f"<span style='color: #60a5fa;'>⏳ 绘制进度: {step_str} | 已用时: {time_str}</span>")
+                    progress_line = f"<span data-live-progress='true' style='color: #60a5fa;'>⏳ 绘制进度: {step_str} | 已用时: {time_str}</span>"
+                    product_logs = products_dict[current_pid].setdefault("logs", [])
+                    if product_logs and "data-live-progress='true'" in product_logs[-1]:
+                        product_logs[-1] = progress_line
+                    else:
+                        product_logs.append(progress_line)
         elif clean_line.startswith("OK") or "completed" in clean_line.lower() or "SUCCESS" in clean_line:
             current_status = "🎉 单个商品全部完成"
             status_color = "#10b981"
