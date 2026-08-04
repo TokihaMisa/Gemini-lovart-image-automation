@@ -1,7 +1,7 @@
 {
-  "version": "1.3.9",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.9/update.zip",
-  "changelog": "新增失败任务补偿重试设置：支持关闭、有限次数或无限重试，可自定义补偿轮次、重试间隔和允许重试的错误类型；整批任务完成后只循环处理选中的失败任务，并排除密钥、登录和人工确认等永久性错误。",
-  "sha256": "f375a55bdf8561260392418637d2073dd4b99aa08f3c1e1a8f111f5157c467f8",
-  "size": 129506911
+  "version": "1.3.10",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.10/update.zip",
+  "changelog": "紧急修复无限生成模式可能消耗积分：每次提交前重新设置并回读服务端无限模式，auto 仅允许使用账号 unlimited_list 返回的免费模型工具，无限模式不再显式发送 fast 字段，并禁止自动确认任何付费操作；模式或免费模型无法验证时会在生成前停止。",
+  "sha256": "1fde6f16d1373aff761413d292cdee6d64e4ffe425611d8ffa12a016fe1cf804",
+  "size": 129508566
 }

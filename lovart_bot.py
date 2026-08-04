@@ -125,12 +125,26 @@ class LovartBot:
             poll_interval=self.cfg.get("poll_interval", 10),
         )
         self._fast_mode = False
+        self._unlimited_tool_names: tuple[str, ...] = ()
 
     def set_fast_mode(self, fast: bool) -> None:
         """Set generation mode. True = fast/credits, False = unlimited/queue."""
         self._fast_mode = fast
         self.skill.set_mode(unlimited=not fast)
-        self.logger.info(f"Lovart mode set to: {'fast' if fast else 'unlimited'}")
+        mode_state = self._verify_generation_mode(expected_unlimited=not fast)
+        self.logger.info(
+            f"Lovart mode verified by server: {'fast' if fast else 'unlimited'}"
+        )
+        if not fast:
+            self._unlimited_tool_names = self._extract_unlimited_tool_names(mode_state)
+            if not self._unlimited_tool_names:
+                raise AgentSkillError(
+                    "为避免积分扣费，Lovart 没有返回可用于无限生成的模型列表，任务已停止。"
+                )
+            self.logger.info(
+                "Lovart unlimited model guard: "
+                + ", ".join(self._unlimited_tool_names)
+            )
         if self.tool_config["tool_names"]:
             self.logger.info(
                 "Lovart image model: "
@@ -140,6 +154,78 @@ class LovartBot:
             self.logger.info("Lovart image model: auto")
         if self.tool_config["mode"]:
             self.logger.info(f"Lovart reasoning mode: {self.tool_config['mode']}")
+
+    @staticmethod
+    def _extract_unlimited_tool_names(mode_state: dict) -> tuple[str, ...]:
+        names = []
+        for item in mode_state.get("unlimited_list") or []:
+            if item.get("status", 1) not in (1, True):
+                continue
+            for alias in item.get("alias_list") or []:
+                if isinstance(alias, str) and alias.startswith("generate_") and alias not in names:
+                    names.append(alias)
+        return tuple(names)
+
+    def _verify_generation_mode(self, expected_unlimited: bool, reapply: bool = False) -> dict:
+        if reapply:
+            self.skill.set_mode(unlimited=expected_unlimited)
+        mode_state = self.skill.query_mode()
+        if bool(mode_state.get("unlimited")) != expected_unlimited:
+            self.skill.set_mode(unlimited=expected_unlimited)
+            mode_state = self.skill.query_mode()
+        if bool(mode_state.get("unlimited")) != expected_unlimited:
+            expected_name = "无限生成" if expected_unlimited else "高速生成"
+            raise AgentSkillError(
+                f"Lovart 服务端未能切换到{expected_name}，为避免错误计费，任务已停止。"
+            )
+        if expected_unlimited and mode_state.get("unlimited_enable") is False:
+            raise AgentSkillError(
+                "当前 Lovart 账号未启用无限生成权限，为避免积分扣费，任务已停止。"
+            )
+        return mode_state
+
+    def _prepare_send_options(self, tool_config: dict) -> dict:
+        if self._fast_mode:
+            return {
+                "prefer_models": tool_config["prefer_models"],
+                "include_tools": tool_config["include_tools"],
+                "mode": tool_config["mode"],
+            }
+
+        # The generation mode is account-wide and another Lovart client can
+        # change it. Reapply and verify immediately before every submission.
+        mode_state = self._verify_generation_mode(expected_unlimited=True, reapply=True)
+        allowed_tools = self._extract_unlimited_tool_names(mode_state)
+        if not allowed_tools:
+            raise AgentSkillError(
+                "为避免积分扣费，无法验证 Lovart 无限生成模型列表，任务已停止。"
+            )
+        self._unlimited_tool_names = allowed_tools
+
+        requested_tools = tuple(tool_config.get("tool_names") or ())
+        unsupported = [name for name in requested_tools if name not in allowed_tools]
+        if unsupported:
+            raise AgentSkillError(
+                "所选 Lovart 模型不在当前账号的无限生成列表中："
+                + ", ".join(unsupported)
+                + "。为避免积分扣费，任务已停止。"
+            )
+
+        if tool_config.get("model_selection") == "force" and requested_tools:
+            include_tools = list(requested_tools)
+        else:
+            include_tools = list(allowed_tools)
+
+        # Explicit chat mode='fast' is unnecessary in unlimited generation
+        # and is omitted to avoid any ambiguity with the paid fast channel.
+        reasoning_mode = tool_config.get("mode")
+        if reasoning_mode == "fast":
+            reasoning_mode = None
+        return {
+            "prefer_models": tool_config.get("prefer_models"),
+            "include_tools": include_tools,
+            "mode": reasoning_mode,
+        }
 
     def set_image_model(self, model_name: str) -> None:
         """Override the current image model dynamically (e.g. for fallback)."""
@@ -514,13 +600,12 @@ class LovartBot:
                 f"Lovart API: sending {step_name} prompt ({len(prompt)} chars), "
                 f"attempt={attempt_name}, model={tool_config['image_model']} ({tool_config['model_selection']})"
             )
+            send_options = self._prepare_send_options(tool_config)
             thread_id = self.skill.send(
                 prompt=prompt,
                 project_id=project_id,
                 attachments=attachment_urls if attachment_urls else None,
-                prefer_models=tool_config["prefer_models"],
-                include_tools=tool_config["include_tools"],
-                mode=tool_config["mode"],
+                **send_options,
             )
             self.logger.info(f"Lovart API: sent {step_name} project={project_id}, thread={thread_id}")
             
@@ -611,9 +696,14 @@ class LovartBot:
                 reason="Lovart returned pending_confirmation",
             )
 
-            if estimated_cost is not None and not self._fast_mode:
+            if not self._fast_mode:
+                cost_text = (
+                    f"a {estimated_cost:g}-credit"
+                    if estimated_cost is not None
+                    else "a credit-required"
+                )
                 result["warning"] = (
-                    f"Lovart showed a {estimated_cost:g}-credit confirmation in unlimited mode; "
+                    f"Lovart showed {cost_text} confirmation in unlimited mode; "
                     "left unconfirmed for manual review."
                 )
                 update_status(
