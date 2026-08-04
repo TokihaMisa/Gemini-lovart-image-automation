@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
@@ -17,6 +18,8 @@ import urllib.request
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 import zipfile
+
+import certifi
 
 from network_retry import RetryKind, RetryPolicy, classify_network_error, run_with_retry
 from version import UPDATE_INFO_URL, VERSION
@@ -81,6 +84,21 @@ class UpdateError(Exception):
     """An expected update failure whose message is safe to display."""
 
 
+def _build_https_context() -> ssl.SSLContext:
+    """Trust both the host platform roots and the bundled public CA set."""
+
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    return context
+
+
+def _open_https(request, data=None, timeout=None):
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=_build_https_context())
+    )
+    return opener.open(request, data=data, timeout=timeout)
+
+
 def _numeric_version(value: object) -> tuple[int, int, int]:
     if not isinstance(value, str) or not _VERSION_RE.fullmatch(value):
         raise UpdateError("更新信息中的版本号无效，请稍后重试。")
@@ -118,6 +136,12 @@ def _cache_busted_manifest_url() -> str:
 def _safe_network_guidance(exc: BaseException, action: str) -> str:
     kind = classify_network_error(exc)
     if kind is RetryKind.PERMANENT_TLS:
+        if action == "下载更新":
+            return (
+                "下载更新失败：TLS 证书验证未通过。使用 Clash 等代理时，请确保 "
+                "github.com 和 release-assets.githubusercontent.com 均走同一可用代理；"
+                "同时检查系统时间、VPN、安全软件及企业根证书。"
+            )
         return f"{action}失败：TLS 证书验证未通过，请检查系统时间、代理、VPN 或安全软件后重试。"
     if kind is RetryKind.AUTH:
         return f"{action}失败：更新服务拒绝了请求，请稍后重试或联系维护人员。"
@@ -148,7 +172,7 @@ def check_update_details(
 ) -> UpdateCheckResult:
     """Return a structured, display-safe result for an update check."""
 
-    opener = opener or urllib.request.urlopen
+    opener = opener or _open_https
     request = urllib.request.Request(
         _cache_busted_manifest_url(),
         headers={
@@ -404,7 +428,7 @@ def prepare_update(
     """Download, verify, validate and extract into a fresh app-local staging area."""
 
     digest, size = _validated_integrity(expected_sha256, expected_size)
-    opener = opener or urllib.request.urlopen
+    opener = opener or _open_https
     parsed_url = urlsplit(url) if isinstance(url, str) else None
     if parsed_url is None or parsed_url.scheme.lower() != "https" or not parsed_url.netloc:
         raise UpdateError("更新下载地址不安全，已停止安装。")

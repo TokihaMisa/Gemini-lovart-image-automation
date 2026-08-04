@@ -6,3 +6,4 @@ tenacity
 rich
 gradio
 pydantic
+certifi

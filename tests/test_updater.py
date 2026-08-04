@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import ssl
 import stat
 import tempfile
 import unittest
@@ -86,6 +87,28 @@ class UpdateCheckTests(unittest.TestCase):
         self.assertIn("/master/version.json?", requests[0][0].full_url)
         self.assertEqual(requests[0][0].get_header("Cache-control"), "no-cache")
         self.assertEqual(requests[0][0].get_header("Pragma"), "no-cache")
+
+    def test_https_context_merges_bundled_public_ca_certificates(self):
+        empty_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        self.assertEqual(empty_context.cert_store_stats()["x509_ca"], 0)
+
+        with mock.patch(
+            "updater.ssl.create_default_context", return_value=empty_context
+        ):
+            context = updater._build_https_context()
+
+        self.assertIs(context, empty_context)
+        self.assertGreater(context.cert_store_stats()["x509_ca"], 0)
+
+    def test_default_update_check_uses_hybrid_https_opener(self):
+        response = FakeResponse(self.manifest(version=updater.VERSION))
+        open_https = mock.Mock(return_value=response)
+
+        with mock.patch("updater._open_https", open_https):
+            result = updater.check_update_details(sleep=lambda _delay: None)
+
+        self.assertEqual(result.status, updater.UpdateStatus.UP_TO_DATE)
+        open_https.assert_called_once()
 
     def test_stdlib_signature_receives_manifest_timeout_as_keyword(self):
         calls = []
@@ -347,6 +370,26 @@ class DownloadAndInstallTests(unittest.TestCase):
 
         self.assertTrue(prepared.archive_path.exists())
         self.assertEqual(len(calls), 1)
+
+    def test_download_tls_failure_names_github_release_proxy_rule(self):
+        detail = "certificate detail must stay private"
+
+        with self.assertRaises(updater.UpdateError) as raised:
+            updater.prepare_update(
+                "https://github.com/example/project/releases/download/v1/update.zip",
+                hashlib.sha256(self.archive).hexdigest(),
+                len(self.archive),
+                app_dir=self.app_dir,
+                opener=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    ssl.SSLCertVerificationError(detail)
+                ),
+                sleep=lambda _delay: None,
+            )
+
+        message = str(raised.exception)
+        self.assertIn("release-assets.githubusercontent.com", message)
+        self.assertIn("Clash", message)
+        self.assertNotIn(detail, message)
 
     def test_size_and_hash_mismatch_leave_no_verified_archive(self):
         cases = (
