@@ -133,6 +133,50 @@ class WebUIModelSettingsTests(unittest.TestCase):
             if item["type"] == "button"
         ]
         self.assertTrue(any("可能产生一次图片费用" in value for value in button_values))
+        self.assertIn(
+            "清除已保存 GPT Image 密钥",
+            {labels[item] for item in dependencies["save_api_settings"]["outputs"]},
+        )
+        self.assertIn(
+            "清除已保存 GPT Image 密钥",
+            {labels[item] for item in dependencies["run_process"]["outputs"]},
+        )
+
+    def test_save_ui_clear_flow_updates_indicator_resets_checkbox_and_allows_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            env_path = Path(tmp) / ".env"
+            config_path.write_text("{}\n", encoding="utf-8")
+            env_path.write_text("OPENAI_IMAGE_API_KEY=old-secret\n", encoding="utf-8")
+            cleared = webui.save_api_settings_from_ui(
+                "", "", "", "", "",
+                "https://gemini.test/v1beta", "gemini-model",
+                "https://nvidia.test/v1", "nvidia-model",
+                "https://hapiopen.cc/v1", "gpt-image-2", "1K",
+                "lovart", "lovart", True,
+                config_path=config_path,
+                env_path=env_path,
+            )
+            replaced = webui.save_api_settings_from_ui(
+                "", "", "", "", "replacement-secret",
+                "https://gemini.test/v1beta", "gemini-model",
+                "https://nvidia.test/v1", "nvidia-model",
+                "https://hapiopen.cc/v1", "gpt-image-2", "1K",
+                "openai_image", "openai_image", cleared[2],
+                config_path=config_path,
+                env_path=env_path,
+            )
+            saved_env = env_path.read_text(encoding="utf-8")
+
+        self.assertEqual(cleared, (
+            webui.API_SETTINGS_SAVE_SUCCESS,
+            "GPT Image 密钥状态：未保存",
+            False,
+        ))
+        self.assertEqual(replaced[1:], ("GPT Image 密钥状态：已保存", False))
+        self.assertNotIn("old-secret", saved_env)
+        self.assertIn("OPENAI_IMAGE_API_KEY=replacement-secret", saved_env)
+        self.assertNotIn("replacement-secret", str((cleared, replaced)))
 
     @patch("webui.load_config", return_value={})
     def test_build_ui_uses_gradio6_launch_options_without_constructor_warning(self, _load_config):
@@ -1033,6 +1077,107 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--support-provider") + 1], "openai_image")
         self.assertEqual(argv[argv.index("--detail-provider") + 1], "lovart")
         self.assertIn("output folder with spaces", popen.call_args.kwargs["env"]["LOVART_OUTPUT_DIR"])
+
+    @patch("webui.subprocess.Popen")
+    def test_lovart_only_launch_ignores_malformed_unused_gpt_settings(self, popen):
+        child = Mock()
+        child.stdout = io.StringIO("")
+        child.poll.return_value = 0
+        popen.return_value = child
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            env_path = Path(tmp) / ".env"
+            config_path.write_text(
+                "gemini_api:\n  base_url: https://gemini.test/v1beta\n  model: gemini-model\n"
+                "nvidia_api:\n  base_url: https://nvidia.test/v1\n  model: nvidia-model\n"
+                "openai_image:\n  base_url: deliberately-malformed\n  model: saved-model\n  resolution: BAD\n",
+                encoding="utf-8",
+            )
+
+            output = list(run_process(
+                None, "output", "gemini_api", "gemini-model", "unlimited", "auto",
+                "https://gemini.test/v1beta", "https://nvidia.test/v1",
+                "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                "", "not-a-url", "", "BAD", "lovart", "lovart", False,
+                config_path=config_path,
+                env_path=env_path,
+            ))
+            saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(any("Starting" in item for item in output))
+        self.assertEqual(saved["image_generation"], {
+            "support_provider": "lovart",
+            "detail_provider": "lovart",
+        })
+        self.assertEqual(saved["openai_image"]["base_url"], "deliberately-malformed")
+        self.assertEqual(saved["openai_image"]["resolution"], "BAD")
+
+    def test_selected_gpt_route_rejects_malformed_or_missing_selected_settings(self):
+        cases = [
+            ("not-a-url", "gpt-image-2", "1K", "test-key"),
+            ("https://hapiopen.cc/v1", "gpt-image-2", "1K", ""),
+        ]
+        for base_url, model, resolution, key in cases:
+            with self.subTest(base_url=base_url, key=bool(key)), tempfile.TemporaryDirectory() as tmp:
+                config_path = Path(tmp) / "config.yaml"
+                env_path = Path(tmp) / ".env"
+                config_path.write_text(
+                    "gemini_api:\n  base_url: https://gemini.test/v1beta\n  model: gemini-model\n"
+                    "nvidia_api:\n  base_url: https://nvidia.test/v1\n  model: nvidia-model\n",
+                    encoding="utf-8",
+                )
+                process = run_process(
+                    None, "output", "gemini_api", "gemini-model", "unlimited", "auto",
+                    "https://gemini.test/v1beta", "https://nvidia.test/v1",
+                    "gemini-key", "nvidia-key", "", "",
+                    key, base_url, model, resolution,
+                    "openai_image", "lovart", False,
+                    config_path=config_path,
+                    env_path=env_path,
+                )
+                with patch(
+                    "webui.subprocess.Popen",
+                    side_effect=AssertionError(
+                        "invalid selected GPT settings launched subprocess"
+                    ),
+                ):
+                    status = next(process)
+
+            self.assertNotIn("Starting", status)
+            self.assertTrue("GPT Image" in status or "API" in status)
+
+    @patch("webui.subprocess.Popen")
+    def test_start_ui_clear_flow_updates_indicator_and_resets_checkbox(self, popen):
+        child = Mock()
+        child.stdout = io.StringIO("")
+        child.poll.return_value = 0
+        popen.return_value = child
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            env_path = Path(tmp) / ".env"
+            config_path.write_text(
+                "gemini_api:\n  base_url: https://gemini.test/v1beta\n  model: gemini-model\n"
+                "nvidia_api:\n  base_url: https://nvidia.test/v1\n  model: nvidia-model\n",
+                encoding="utf-8",
+            )
+            env_path.write_text("OPENAI_IMAGE_API_KEY=old-secret\n", encoding="utf-8")
+
+            updates = list(webui.run_process_from_ui(
+                None, "output", "gemini_api", "gemini-model", "unlimited", "auto",
+                "https://gemini.test/v1beta", "https://nvidia.test/v1",
+                "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                "", "malformed-unused", "", "BAD", "lovart", "lovart", True,
+                config_path=config_path,
+                env_path=env_path,
+            ))
+
+        synchronized = next(
+            item for item in updates
+            if isinstance(item, tuple) and isinstance(item[1], str)
+        )
+        self.assertIn("未保存", synchronized[1])
+        self.assertFalse(synchronized[2])
+        self.assertNotIn("old-secret", str(updates))
 
     @patch("webui.save_config")
     @patch("webui.load_config")

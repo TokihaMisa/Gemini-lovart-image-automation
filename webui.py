@@ -76,6 +76,7 @@ PROMPT_FORM_FIELDS = (
 )
 
 active_processes = []
+API_SETTINGS_SAVE_SUCCESS = "✅ 密钥、API 地址和模型已保存"
 _gemini_login_launch_lock = threading.Lock()
 _gemini_login_launches: dict[str, float] = {}
 _GEMINI_LOGIN_LAUNCH_GRACE_SECONDS = 10.0
@@ -849,6 +850,16 @@ def persist_openai_image_settings(
     return updated
 
 
+def persist_image_routing_settings(config, support_provider, detail_provider):
+    updated = deepcopy(config)
+    updated["image_generation"] = {
+        **updated.get("image_generation", {}),
+        "support_provider": normalize_image_provider(support_provider),
+        "detail_provider": normalize_image_provider(detail_provider),
+    }
+    return updated
+
+
 def save_api_settings(
     gemini_key,
     nvidia_key,
@@ -899,7 +910,7 @@ def save_api_settings(
     except (ModelProviderError, OpenAIImageAPIError, OSError, ValueError, yaml.YAMLError) as exc:
         message = exc.user_message if isinstance(exc, ModelProviderError) else str(exc)
         return f"❌ API 与模型设置保存失败，原配置未被部分覆盖：{message}"
-    return "✅ 密钥、API 地址和模型已保存"
+    return API_SETTINGS_SAVE_SUCCESS
 
 
 def normalize_lovart_model_catalog(catalog) -> list[dict]:
@@ -1115,17 +1126,24 @@ def get_env(key: str) -> str:
     return ""
 
 
-def openai_image_key_status(env_path: str | Path = ".env") -> str:
+def _openai_image_key_is_saved(env_path: str | Path = ".env") -> bool:
     target = Path(env_path)
-    saved = False
-    if target.exists():
-        with target.open("r", encoding="utf-8") as stream:
-            saved = any(
-                line.startswith("OPENAI_IMAGE_API_KEY=")
-                and bool(line.split("=", 1)[1].strip())
-                for line in stream
-            )
-    return "GPT Image 密钥状态：已保存" if saved else "GPT Image 密钥状态：未保存"
+    if not target.exists():
+        return False
+    with target.open("r", encoding="utf-8") as stream:
+        return any(
+            line.startswith("OPENAI_IMAGE_API_KEY=")
+            and bool(line.split("=", 1)[1].strip())
+            for line in stream
+        )
+
+
+def openai_image_key_status(env_path: str | Path = ".env") -> str:
+    return (
+        "GPT Image 密钥状态：已保存"
+        if _openai_image_key_is_saved(env_path)
+        else "GPT Image 密钥状态：未保存"
+    )
 
 
 def run_process(
@@ -1174,14 +1192,32 @@ def run_process(
             nvidia_base_url,
             nvidia_model,
         )
-        config = persist_openai_image_settings(
+        config = persist_image_routing_settings(
             config,
-            openai_image_base_url,
-            openai_image_model,
-            openai_image_resolution,
             support_provider,
             detail_provider,
         )
+        uses_openai_image = "openai_image" in {
+            normalize_image_provider(support_provider),
+            normalize_image_provider(detail_provider),
+        }
+        if uses_openai_image:
+            submitted_openai_key = bool(str(openai_image_key or "").strip())
+            if clear_openai_image_key or not (
+                submitted_openai_key or _openai_image_key_is_saved(env_path)
+            ):
+                raise OpenAIImageAPIError(
+                    "missing_key",
+                    "请先填写或保存 GPT Image API 密钥。",
+                )
+            config = persist_openai_image_settings(
+                config,
+                openai_image_base_url,
+                openai_image_model,
+                openai_image_resolution,
+                support_provider,
+                detail_provider,
+            )
         if "lovart" not in config:
             config["lovart"] = {}
         config["lovart"]["image_model"] = lovart_image_model
@@ -1199,8 +1235,12 @@ def run_process(
             env_path=env_path,
             snapshots=transaction_snapshots,
         )
-    except (ModelProviderError, OSError, ValueError, yaml.YAMLError) as exc:
-        message = exc.user_message if isinstance(exc, ModelProviderError) else str(exc)
+    except (ModelProviderError, OpenAIImageAPIError, OSError, ValueError, yaml.YAMLError) as exc:
+        message = (
+            exc.user_message
+            if isinstance(exc, (ModelProviderError, OpenAIImageAPIError))
+            else str(exc)
+        )
         if not transaction_started and not transaction_snapshots[config_target][0]:
             restore_errors = _restore_file_snapshots({
                 config_target: transaction_snapshots[config_target]
@@ -1898,6 +1938,9 @@ def save_api_settings_from_ui(
     support_provider,
     detail_provider,
     clear_openai_image_key,
+    *,
+    config_path="config.yaml",
+    env_path=".env",
 ):
     status = save_api_settings(
         gemini_key,
@@ -1915,8 +1958,67 @@ def save_api_settings_from_ui(
         support_provider,
         detail_provider,
         clear_openai_image_key=clear_openai_image_key,
+        config_path=config_path,
+        env_path=env_path,
     )
-    return status, openai_image_key_status()
+    clear_update = False if status == API_SETTINGS_SAVE_SUCCESS else gr.skip()
+    return status, openai_image_key_status(env_path), clear_update
+
+
+def run_process_from_ui(
+    excel_file,
+    custom_output_dir,
+    prompt_source,
+    prompt_model,
+    lovart_mode,
+    lovart_image_model,
+    gemini_base_url,
+    nvidia_base_url,
+    gemini_key,
+    nvidia_key,
+    lovart_access,
+    lovart_secret,
+    openai_image_key,
+    openai_image_base_url,
+    openai_image_model,
+    openai_image_resolution,
+    support_provider,
+    detail_provider,
+    clear_openai_image_key,
+    *,
+    config_path="config.yaml",
+    env_path=".env",
+):
+    process_updates = run_process(
+        excel_file,
+        custom_output_dir,
+        prompt_source,
+        prompt_model,
+        lovart_mode,
+        lovart_image_model,
+        gemini_base_url,
+        nvidia_base_url,
+        gemini_key,
+        nvidia_key,
+        lovart_access,
+        lovart_secret,
+        openai_image_key,
+        openai_image_base_url,
+        openai_image_model,
+        openai_image_resolution,
+        support_provider,
+        detail_provider,
+        clear_openai_image_key,
+        config_path=config_path,
+        env_path=env_path,
+    )
+    synchronized = False
+    for dashboard in process_updates:
+        if not synchronized and str(dashboard).startswith("Starting"):
+            synchronized = True
+            yield dashboard, openai_image_key_status(env_path), False
+        else:
+            yield dashboard, gr.skip(), gr.skip()
 
 
 def pick_directory(current_dir):
@@ -2438,7 +2540,11 @@ def build_ui():
                             detail_provider,
                             clear_openai_image_key,
                         ],
-                        outputs=[save_status, openai_image_key_indicator],
+                        outputs=[
+                            save_status,
+                            openai_image_key_indicator,
+                            clear_openai_image_key,
+                        ],
                         api_name="save_api_settings",
                     )
                     open_gemini_login_btn.click(
@@ -2661,7 +2767,7 @@ def build_ui():
             outputs=prompt_model,
         )
         start_btn.click(
-            fn=run_process,
+            fn=run_process_from_ui,
             inputs=[
                 excel_file, custom_output_dir, prompt_source, prompt_model, lovart_mode, lovart_image_model,
                 gemini_base_url, nvidia_base_url,
@@ -2670,7 +2776,12 @@ def build_ui():
                 openai_image_resolution, support_provider, detail_provider,
                 clear_openai_image_key,
             ],
-            outputs=progress_dashboard
+            outputs=[
+                progress_dashboard,
+                openai_image_key_indicator,
+                clear_openai_image_key,
+            ],
+            api_name="run_process",
         )
         
         def shutdown_server():
