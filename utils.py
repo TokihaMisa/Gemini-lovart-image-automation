@@ -25,8 +25,9 @@ def get_resource_path(filename: str) -> Path:
     return cwd_path
 
 
-def load_config(path: str = "config.yaml") -> dict:
-    load_dotenv()
+def load_config(path: str = "config.yaml", *, load_environment: bool = True) -> dict:
+    if load_environment:
+        load_dotenv()
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
@@ -172,6 +173,7 @@ def append_result(
     status: str = "success",
     error: str = "",
     used_model: str = "",
+    preserve_existing_model: bool = False,
 ) -> None:
     """Upsert one product outcome to results.csv using real CSV escaping."""
     path = Path(results_path)
@@ -198,7 +200,7 @@ def append_result(
 
     if product_id not in by_id:
         order.append(product_id)
-    elif not new_row["used_model"]:
+    elif preserve_existing_model and not new_row["used_model"]:
         new_row["used_model"] = by_id[product_id].get("used_model", "")
     by_id[product_id] = new_row
 
@@ -407,7 +409,7 @@ def build_design_prompt(
         f"上传图片是我的{product_name_cn}产品。\n"
         "【角色设定】你是一名资深电商设计师，擅长平面设计、信息层级和文字排版。\n"
         f"请设计一套包含{settings['detail_page_count']}屏的电商详情页；一屏对应一张详情成品图，不是多套设计版本。\n"
-        "你当前只负责输出可交给 Lovart 的逐屏文字设计提示词，不要直接生成图片。\n"
+        "你当前只负责输出可交给用户选择的图片生成提供商的逐屏文字设计提示词，不要直接生成图片。\n"
         f"整体风格：{settings['design_style']}\n"
         f"每屏必须包含：{sections}\n"
         f"图片画质：{settings['image_quality']}\n"

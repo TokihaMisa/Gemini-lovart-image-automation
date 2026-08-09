@@ -202,7 +202,10 @@ class OpenAIImageProvider:
             completed = set()
         failed: list[int] = []
         errors: list[str] = []
-        used_model = ""
+        config = getattr(self.api, "config", None)
+        used_model = str(
+            getattr(config, "model", "gpt-image-2") or "gpt-image-2"
+        ).strip()
         for screen in sorted(request.screens, key=lambda item: item.index):
             if screen.index in completed:
                 continue

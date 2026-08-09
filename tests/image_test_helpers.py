@@ -118,7 +118,7 @@ class RecordingOpenAIAPI:
             raise RuntimeError(f"screen {index} failed")
         self.generated_indexes.append(index)
         write_valid_png(output_path)
-        return SimpleNamespace(local_path=str(output_path), model="gpt-image-2")
+        return SimpleNamespace(local_path=str(output_path), model=self.config.model)
 
 
 class PipelineOpenAIProvider:

@@ -87,6 +87,63 @@ def test_cli_provider_overrides_take_precedence_before_selected_provider_validat
     assert routing == GenerationRouting("openai_image", "openai_image", 3)
 
 
+@pytest.mark.parametrize(
+    ("support_provider", "detail_provider"),
+    [
+        ("lovart", "lovart"),
+        ("lovart", "openai_image"),
+        ("openai_image", "lovart"),
+        ("openai_image", "openai_image"),
+    ],
+)
+def test_main_dry_run_needs_no_credentials_or_external_clients(
+    tmp_path, support_provider, detail_provider
+):
+    import main
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "prompt_settings:\n  detail_page_count: 2\n",
+        encoding="utf-8",
+    )
+    product = SimpleNamespace(
+        id="SKU-DRY",
+        name_cn="Dry run",
+        language="English",
+        image_size="1:1",
+        image_paths=["product.png"],
+    )
+    fail = AssertionError
+    argv = [
+        "--config", str(config_path),
+        "--dry-run",
+        "--prompt-source", "gemini_browser",
+        "--lovart", "fast",
+        "--support-provider", support_provider,
+        "--detail-provider", detail_provider,
+    ]
+
+    with (
+        patch.dict(os.environ, {}, clear=True),
+        patch("utils.load_dotenv", side_effect=fail("credential environment read")),
+        patch("setup_wizard.missing_or_placeholder_env_keys", side_effect=fail("Lovart credential check")),
+        patch("main.LovartBot", side_effect=fail("Lovart client construction")),
+        patch("main.OpenAIImageAPI", side_effect=fail("GPT client construction")),
+        patch("main._build_image_provider_registry", side_effect=fail("provider registry construction")),
+        patch("main._build_gemini_api", side_effect=fail("Gemini client construction")),
+        patch("main._build_nvidia_api", side_effect=fail("NVIDIA client construction")),
+        patch("main._run_browser_flow", side_effect=fail("browser launch")),
+        patch("main._choose_prompt_source", side_effect=fail("prompt provider setup")),
+        patch("main.setup_logging", return_value=Mock()),
+        patch("main.create_run_dir", return_value=tmp_path / "run"),
+        patch("main.read_products", return_value=[product]),
+        patch("main._dry_run_products", return_value=(0, 0, 1, 0)) as dry_run,
+    ):
+        main.main(argv)
+
+    dry_run.assert_called_once()
+
+
 def test_ui_detail_progress_reports_only_counts_and_failed_indexes(tmp_path, capsys):
     with patch.dict(os.environ, {"UI_MODE": "1"}):
         run_product_pipeline(
@@ -642,6 +699,41 @@ def test_openai_detail_success_clears_stale_lovart_project_link(tmp_path):
     assert status["project_url"] == ""
 
 
+def test_lovart_support_openai_detail_preserves_project_for_switch_back(tmp_path):
+    first = run_product_pipeline(
+        tmp_path, "lovart", "openai_image", detail_count=2
+    )
+
+    first_status = read_status(first.product_dir)
+    assert first.success == 1
+    assert first_status["project_id"] == "project-routing"
+    assert first_status["project_url"].endswith("projectId=project-routing")
+    assert first_status["lovart_white_bg_local_path"]
+    assert first_status["lovart_scene_local_path"]
+
+    switched_lovart = Mock()
+    switched_lovart.validate_project.return_value = True
+    switched_lovart.create_project.side_effect = AssertionError(
+        "valid support project was replaced"
+    )
+    switched_lovart.create_and_generate.return_value = {
+        "generation_succeeded": True,
+        "project_id": "project-routing",
+        "used_model": "nano_banana_2",
+    }
+    switched = run_product_pipeline(
+        tmp_path,
+        "lovart",
+        "lovart",
+        detail_count=2,
+        lovart=switched_lovart,
+    )
+
+    assert switched.success == 1
+    switched_lovart.create_project.assert_not_called()
+    assert switched_lovart.create_and_generate.call_args.kwargs["project_id"] == "project-routing"
+
+
 def test_legacy_lovart_completion_is_migrated_with_provider_and_snapshot(tmp_path):
     product_dir = tmp_path / "products" / "SKU-ROUTING"
     white = write_valid_png(product_dir / "lovart_steps" / "white_bg" / "white.png")
@@ -862,15 +954,92 @@ def test_building_all_openai_registry_does_not_construct_lovart():
     from main import _build_image_provider_registry
 
     config = {
-        "openai_image": {"api_key": "test-key"},
+        "openai_image": {"model": "gpt-image-2"},
         "lovart": {"api_key": "must-not-be-read"},
     }
-    with patch("main.LovartBot") as lovart_bot:
+    with patch.dict(os.environ, {"OPENAI_IMAGE_API_KEY": "test-key"}, clear=True), patch("main.LovartBot") as lovart_bot:
         registry = _build_image_provider_registry(config, Mock())
         provider = registry.get("openai_image")
 
     assert provider is not None
     lovart_bot.assert_not_called()
+
+
+def test_openai_registry_ignores_legacy_yaml_key_and_reports_missing_env_key(capsys):
+    from main import _build_image_provider_registry
+    from openai_image_api import OpenAIImageAPIError
+
+    legacy_secret = "legacy-" + "sentinel-secret"
+    config = {
+        "openai_image": {
+            "api_key": legacy_secret,
+            "base_url": "https://hapiopen.cc/v1",
+            "model": "gpt-image-2",
+        }
+    }
+
+    with patch.dict(os.environ, {}, clear=True):
+        registry = _build_image_provider_registry(config, Mock())
+        with pytest.raises(OpenAIImageAPIError, match="密钥") as caught:
+            registry.get("openai_image")
+
+    captured = capsys.readouterr()
+    combined_output = captured.out + captured.err + str(caught.value)
+    assert legacy_secret not in combined_output
+
+
+def test_provider_switch_immediate_gpt_401_reports_current_configured_model(tmp_path):
+    from openai_image_api import OpenAIImageAPIError
+
+    product_dir = tmp_path / "products" / "SKU-ROUTING"
+    update_status(
+        product_dir,
+        "failed",
+        detail_provider="lovart",
+        used_model="nano_banana_2",
+    )
+
+    api = Mock()
+    api.config = SimpleNamespace(
+        base_url="https://images.example/v1",
+        model="gpt-image-current",
+        resolution="1K",
+    )
+    api.generate_edit.side_effect = OpenAIImageAPIError(
+        "http_401", "GPT Image request was rejected."
+    )
+    run = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=2,
+        openai_api=api,
+    )
+
+    assert (run.success, run.fail) == (0, 1)
+    assert read_status(product_dir)["used_model"] == "gpt-image-current"
+    assert run.append_result.call_args.kwargs["used_model"] == "gpt-image-current"
+
+
+@pytest.mark.parametrize(("fail_indexes", "expected_counts"), [
+    (set(), (1, 0)),
+    ({2}, (0, 1)),
+])
+def test_gpt_success_and_partial_failure_retain_configured_model(
+    tmp_path, fail_indexes, expected_counts
+):
+    run = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=2,
+        fail_indexes=fail_indexes,
+        openai_model="gpt-image-current",
+    )
+
+    assert (run.success, run.fail) == expected_counts
+    assert read_status(run.product_dir)["used_model"] == "gpt-image-current"
+    assert run.append_result.call_args.kwargs["used_model"] == "gpt-image-current"
 
 
 def test_all_openai_main_does_not_enter_lovart_setup(tmp_path):

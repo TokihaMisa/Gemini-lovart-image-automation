@@ -112,7 +112,7 @@ class HighPriorityBehaviorTests(unittest.TestCase):
         self.assertEqual(rows[1]["product_id"], "SKU-NEW")
         self.assertEqual(rows[1]["project_url"], "https://example.test/new")
 
-    def test_append_result_keeps_existing_model_when_status_update_has_no_model(self):
+    def test_append_result_keeps_existing_model_for_explicit_same_provider_skip(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "results.csv"
             append_result(
@@ -129,6 +129,7 @@ class HighPriorityBehaviorTests(unittest.TestCase):
                 "Product",
                 status="failed",
                 error="temporary failure",
+                preserve_existing_model=True,
             )
 
             with path.open("r", encoding="utf-8", newline="") as fh:
@@ -136,6 +137,31 @@ class HighPriorityBehaviorTests(unittest.TestCase):
 
         self.assertEqual(row["status"], "failed")
         self.assertEqual(row["used_model"], "gpt-image-2")
+
+    def test_append_result_blank_model_does_not_keep_prior_provider_model_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "results.csv"
+            append_result(
+                path,
+                "SKU-MODEL-SWITCH",
+                "Product",
+                status="success",
+                used_model="nano_banana_2",
+            )
+
+            append_result(
+                path,
+                "SKU-MODEL-SWITCH",
+                "Product",
+                status="failed",
+                error="new provider failed",
+            )
+
+            with path.open("r", encoding="utf-8", newline="") as fh:
+                row = next(csv.DictReader(fh))
+
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["used_model"], "")
 
     def test_split_image_roles_preserves_empty_accessory_and_dimension_slots(self):
         roles = split_image_roles(["product.png", "", "", "ref1.png", "", "ref2.png"])

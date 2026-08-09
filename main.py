@@ -692,8 +692,7 @@ def _build_image_provider_registry(config, logger, lovart=None):
         return LovartImageProvider(bot, logger=logger)
 
     def build_openai_provider():
-        image_config = config.get("openai_image", {})
-        api_key = env_or_config(image_config, "api_key", "OPENAI_IMAGE_API_KEY")
+        api_key = str(os.environ.get("OPENAI_IMAGE_API_KEY") or "").strip()
         api_config = OpenAIImageAPIConfig.from_config(config, api_key=api_key)
         return OpenAIImageProvider(OpenAIImageAPI(api_config, logger=logger), logger=logger)
 
@@ -1148,6 +1147,7 @@ def _process_products_once(
                     project_url,
                     status="success",
                     used_model=str(status.get("used_model") or ""),
+                    preserve_existing_model=True,
                 )
                 logger.info(
                     f"SKIP [{idx}/{len(products)}] {product.id} already completed"
@@ -1243,6 +1243,28 @@ def _process_products_once(
                 prompt_settings=prompt_settings,
                 target_count=target_count,
             )
+            status_before_detail = read_status(product_dir)
+            previous_detail_provider = str(
+                status_before_detail.get("detail_provider") or ""
+            )
+            previous_used_model = str(status_before_detail.get("used_model") or "")
+            execution_settings = _detail_execution_settings(detail_provider)
+            configured_detail_model = str(
+                execution_settings.get("model")
+                or execution_settings.get("image_model")
+                or ""
+            ).strip()
+            initial_used_model = configured_detail_model or (
+                previous_used_model
+                if previous_detail_provider == effective_routing.detail_provider
+                else ""
+            )
+            update_status(
+                product_dir,
+                "detail_generation_started",
+                detail_provider=effective_routing.detail_provider,
+                used_model=initial_used_model,
+            )
             detail_result = detail_provider.generate_detail_set(
                 DetailSetRequest(
                     product_id=product.id,
@@ -1266,12 +1288,12 @@ def _process_products_once(
             status = read_status(product_dir)
             completed_count = max(0, int(detail_result.completed_count))
             detail_images = list(detail_result.local_paths)
-            previous_detail_provider = str(status.get("detail_provider") or "")
             used_model = str(
                 detail_result.used_model
                 or raw_result.get("used_model")
+                or configured_detail_model
                 or (
-                    status.get("used_model")
+                    previous_used_model
                     if previous_detail_provider == effective_routing.detail_provider
                     else ""
                 )
@@ -1304,8 +1326,14 @@ def _process_products_once(
                     or _lovart_project_url(project_id)
                 )
             else:
-                project_id = ""
-                project_url = ""
+                if effective_routing.support_provider == PROVIDER_LOVART:
+                    project_id = str(status.get("project_id") or lovart_project_id)
+                    project_url = str(
+                        status.get("project_url") or _lovart_project_url(project_id)
+                    )
+                else:
+                    project_id = ""
+                    project_url = ""
             update_status(
                 product_dir,
                 "detail_result_recorded",
@@ -1802,7 +1830,7 @@ def main(argv=None):
     if args.generate_template:
         _generate_excel_template()
 
-    config = load_config(args.config)
+    config = load_config(args.config, load_environment=not args.dry_run)
     prompt_settings = get_prompt_settings(config)
     routing = routing_from_config(config, prompt_settings)
     routing = _routing_with_cli_overrides(routing, args)
@@ -1810,18 +1838,6 @@ def main(argv=None):
         routing.support_provider,
         routing.detail_provider,
     }
-    if uses_lovart:
-        try:
-            from setup_wizard import missing_or_placeholder_env_keys
-            missing_keys = missing_or_placeholder_env_keys(Path(".env"))
-            if missing_keys:
-                print("\n[!] Auto-Diagnostic Failed: Required environment variables are missing or invalid:")
-                for key in missing_keys:
-                    print(f"  - {key}")
-                print("\nPlease fill them in `.env` before running.")
-                sys.exit(1)
-        except ImportError:
-            pass
     logger = setup_logging()
     run_dir = create_run_dir()
     logger.info("Image Automation started")
@@ -1860,6 +1876,19 @@ def main(argv=None):
         print(f"Run summary: {run_dir}")
         logger.info(f"Dry-run complete. Parsed={skipped}")
         return
+
+    if uses_lovart:
+        try:
+            from setup_wizard import missing_or_placeholder_env_keys
+            missing_keys = missing_or_placeholder_env_keys(Path(".env"))
+            if missing_keys:
+                print("\n[!] Auto-Diagnostic Failed: Required environment variables are missing or invalid:")
+                for key in missing_keys:
+                    print(f"  - {key}")
+                print("\nPlease fill them in `.env` before running.")
+                sys.exit(1)
+        except ImportError:
+            pass
 
     prompt_source = _choose_prompt_source(config, args)
     if uses_lovart:

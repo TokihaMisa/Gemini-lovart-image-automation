@@ -59,7 +59,9 @@ class PromptSettingsTests(unittest.TestCase):
         self.assertIn("所有提示词生成模型", text)
         self.assertIn("只输出文字", text)
         self.assertIn("Excel", text)
-        self.assertIn("Lovart", text)
+        self.assertIn("用户选择的图片生成提供商", text)
+        self.assertIn("不得切换或回退", text)
+        self.assertNotIn("Lovart", text)
         self.assertGreaterEqual(len(LOCKED_PROMPT_RULES), 6)
 
     def test_preview_contains_normalized_values_and_locked_rules(self):
@@ -123,6 +125,8 @@ class PromptCompositionTests(unittest.TestCase):
         self.assertNotIn("默认语言：英文", prompt)
         self.assertIn("避免使用夸张促销词", prompt)
         self.assertIn("只输出", prompt)
+        self.assertIn("用户选择的图片生成提供商", prompt)
+        self.assertNotIn("Lovart", prompt)
 
     def test_excel_empty_values_use_configured_fallbacks(self):
         prompt = build_design_prompt("咖啡机", "", "卖点", image_size="", prompt_settings=self.settings)

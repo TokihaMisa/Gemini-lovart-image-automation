@@ -325,10 +325,36 @@ class WebUIModelSettingsTests(unittest.TestCase):
             "detail_provider": "openai_image",
         })
 
+    def test_openai_and_route_persistence_scrub_legacy_yaml_api_key(self):
+        legacy_secret = "legacy-" + "sentinel-secret"
+        original = {
+            "openai_image": {
+                "api_key": legacy_secret,
+                "base_url": "https://hapiopen.cc/v1",
+                "model": "old-model",
+                "resolution": "1K",
+            }
+        }
+
+        dedicated = webui.persist_openai_image_settings(
+            original,
+            "https://hapiopen.cc/v1", "gpt-image-2", "2K",
+            "openai_image", "openai_image",
+        )
+        route_only = webui.persist_image_routing_settings(
+            original, "lovart", "lovart"
+        )
+
+        self.assertFalse("api_key" in dedicated["openai_image"])
+        self.assertFalse("api_key" in route_only["openai_image"])
+
     def test_save_api_settings_replaces_nonblank_openai_key_without_writing_it_to_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path, env_path = Path(tmp) / "config.yaml", Path(tmp) / ".env"
-            config_path.write_text("other: keep\n", encoding="utf-8")
+            config_path.write_text(
+                "other: keep\nopenai_image:\n  api_key: legacy-sentinel-secret\n",
+                encoding="utf-8",
+            )
             env_path.write_text(
                 "OPENAI_IMAGE_API_KEY=old-key\nUNRELATED_ENV=preserve\n",
                 encoding="utf-8",
@@ -347,6 +373,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
             saved_env = env_path.read_text(encoding="utf-8")
             self.assertNotIn("OPENAI_IMAGE_API_KEY", yaml.safe_dump(saved_config))
             self.assertNotIn("new-key", yaml.safe_dump(saved_config))
+            self.assertFalse("api_key" in saved_config["openai_image"])
             self.assertNotIn("OPENAI_IMAGE_API_KEY=old-key", saved_env)
             self.assertIn("OPENAI_IMAGE_API_KEY=new-key", saved_env)
             self.assertIn("UNRELATED_ENV=preserve", saved_env)
@@ -749,12 +776,13 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertEqual(values[0], DEFAULT_PROMPT_SETTINGS["detail_page_count"])
         self.assertIn("锁定规则", values[-1])
 
-    def test_locked_preview_mentions_selected_image_provider_excel_and_lovart(self):
+    def test_locked_preview_is_provider_neutral_and_forbids_fallback(self):
         preview = reset_prompt_settings_form()[-1]
         self.assertIn("所有提示词生成模型", preview)
         self.assertIn("Excel", preview)
-        self.assertIn("Lovart", preview)
         self.assertIn("用户选择的图片生成提供商", preview)
+        self.assertIn("不得切换或回退", preview)
+        self.assertNotIn("Lovart", preview)
         self.assertIn("不可编辑", preview)
 
     @patch("webui.load_config")
@@ -1090,7 +1118,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
             config_path.write_text(
                 "gemini_api:\n  base_url: https://gemini.test/v1beta\n  model: gemini-model\n"
                 "nvidia_api:\n  base_url: https://nvidia.test/v1\n  model: nvidia-model\n"
-                "openai_image:\n  base_url: deliberately-malformed\n  model: saved-model\n  resolution: BAD\n",
+                "openai_image:\n  api_key: legacy-sentinel-secret\n  base_url: deliberately-malformed\n  model: saved-model\n  resolution: BAD\n",
                 encoding="utf-8",
             )
 
@@ -1111,6 +1139,8 @@ class WebUIModelSettingsTests(unittest.TestCase):
         })
         self.assertEqual(saved["openai_image"]["base_url"], "deliberately-malformed")
         self.assertEqual(saved["openai_image"]["resolution"], "BAD")
+        self.assertFalse("api_key" in saved["openai_image"])
+        self.assertNotIn("legacy-sentinel-secret", str(output))
 
     def test_selected_gpt_route_rejects_malformed_or_missing_selected_settings(self):
         cases = [

@@ -842,6 +842,7 @@ def persist_openai_image_settings(
         "model": str(model or "gpt-image-2").strip() or "gpt-image-2",
         "resolution": normalize_resolution(resolution),
     }
+    updated["openai_image"].pop("api_key", None)
     updated["image_generation"] = {
         **updated.get("image_generation", {}),
         "support_provider": normalize_image_provider(support_provider),
@@ -852,6 +853,9 @@ def persist_openai_image_settings(
 
 def persist_image_routing_settings(config, support_provider, detail_provider):
     updated = deepcopy(config)
+    openai_image = updated.get("openai_image")
+    if isinstance(openai_image, dict):
+        openai_image.pop("api_key", None)
     updated["image_generation"] = {
         **updated.get("image_generation", {}),
         "support_provider": normalize_image_provider(support_provider),
