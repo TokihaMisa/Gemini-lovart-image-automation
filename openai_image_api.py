@@ -1,13 +1,38 @@
 """Validated configuration primitives for OpenAI Images-compatible APIs."""
 
+from __future__ import annotations
+
+import base64
+import binascii
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Final
+import http.client
+import io
+import ipaddress
+import json
+import mimetypes
+import os
+from pathlib import Path
+import secrets
+import socket
+import tempfile
+import time
+from typing import Any, Callable, Final, Sequence
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
+import urllib.request
+
+from PIL import Image, UnidentifiedImageError
+
+from network_retry import PERMANENT_TLS_GUIDANCE, RetryKind, classify_network_error
 
 
 DEFAULT_OPENAI_IMAGE_BASE_URL: Final = "https://hapiopen.cc/v1"
 _VALID_RESOLUTIONS: Final = {"1K", "2K", "4K"}
+_TEST_IMAGE_BASE64: Final = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8Dw"
+    "HwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+)
 
 
 class OpenAIImageAPIError(Exception):
@@ -130,6 +155,299 @@ def normalize_openai_image_base_url(value: object | None) -> str:
 
     path = "/" + "/".join(path_segments)
     return urlunsplit((parsed.scheme.lower(), parsed.netloc, path, "", ""))
+
+
+class OpenAIImageAPI:
+    """Minimal transport for the standard OpenAI-compatible Images edits API."""
+
+    def __init__(
+        self,
+        config: OpenAIImageAPIConfig,
+        logger: Any | None = None,
+        sleep: Callable[[float], None] | None = None,
+    ) -> None:
+        self.config = config
+        self.logger = logger
+        self._sleep = sleep or time.sleep
+
+    def generate_edit(
+        self,
+        prompt: str,
+        image_paths: Sequence[str | Path],
+        output_path: str | Path,
+        image_size: str = "",
+    ) -> GeneratedImage:
+        files = _validated_image_paths(image_paths)
+        body, content_type = encode_multipart(
+            fields={
+                "model": self.config.model,
+                "prompt": append_aspect_instruction(prompt, image_size),
+                "size": self.config.resolution,
+            },
+            files=[("image[]", path) for path in files],
+        )
+        payload = self._request_json("/images/edits", body, content_type)
+        image_bytes = self._extract_image_bytes(payload)
+        target = Path(output_path)
+        atomic_save_validated_image(image_bytes, target)
+        return GeneratedImage(local_path=str(target), model=self.config.model)
+
+    def test_edit(self, output_dir: str | Path) -> GeneratedImage:
+        directory = Path(output_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        source_path: Path | None = None
+        try:
+            descriptor, raw_path = tempfile.mkstemp(
+                prefix=".openai-image-test-", suffix=".png", dir=directory
+            )
+            source_path = Path(raw_path)
+            with os.fdopen(descriptor, "wb") as source:
+                source.write(base64.b64decode(_TEST_IMAGE_BASE64))
+            return self.generate_edit(
+                "Generate a small product-image API compatibility test.",
+                [source_path],
+                directory / "openai-image-test.png",
+            )
+        finally:
+            if source_path is not None:
+                try:
+                    source_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _request_json(self, endpoint: str, body: bytes, content_type: str) -> dict[str, Any]:
+        request = urllib.request.Request(
+            f"{self.config.base_url}{endpoint}", data=body, method="POST"
+        )
+        request.add_header("Accept", "application/json")
+        request.add_header("Authorization", f"Bearer {self.config.api_key}")
+        request.add_header("Content-Type", content_type)
+        raw_response = self._request_bytes(request)
+        try:
+            decoded = json.loads(raw_response.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise OpenAIImageAPIError(
+                "invalid_response", "GPT Image API returned an unreadable response."
+            ) from None
+        if not isinstance(decoded, dict):
+            raise OpenAIImageAPIError(
+                "invalid_response", "GPT Image API returned an invalid response."
+            )
+        return decoded
+
+    def _request_bytes(
+        self,
+        request: urllib.request.Request,
+        open_request: Callable[..., Any] | None = None,
+    ) -> bytes:
+        attempts = max(1, int(self.config.max_attempts))
+        request_opener = open_request or urllib.request.urlopen
+        for attempt in range(1, attempts + 1):
+            try:
+                with request_opener(request, timeout=self.config.timeout) as response:
+                    return response.read()
+            except (HTTPError, URLError, TimeoutError, socket.timeout, OSError, http.client.HTTPException) as exc:
+                error = _transport_error(exc)
+                if not error.retryable or attempt >= attempts:
+                    raise error from None
+                self._notice_retry(attempt, attempts)
+        raise RuntimeError("image request retry loop exhausted")
+
+    def _notice_retry(self, attempt: int, attempts: int) -> None:
+        delay = _retry_delay(self.config.retry_delays, attempt)
+        if self.logger is not None:
+            self.logger.warning("GPT Image request failed (%s/%s); retrying.", attempt, attempts)
+        self._sleep(delay)
+
+    def _extract_image_bytes(self, payload: dict[str, Any]) -> bytes:
+        data = payload.get("data")
+        if not isinstance(data, list) or not data:
+            raise OpenAIImageAPIError("invalid_response", "GPT Image API returned no image.")
+        first = data[0]
+        if not isinstance(first, dict):
+            raise OpenAIImageAPIError("invalid_response", "GPT Image API returned an invalid image.")
+        encoded = first.get("b64_json")
+        if isinstance(encoded, str) and encoded:
+            try:
+                return base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error):
+                raise OpenAIImageAPIError(
+                    "invalid_response", "GPT Image API returned invalid image data."
+                ) from None
+        remote_url = first.get("url")
+        if not isinstance(remote_url, str) or not remote_url:
+            raise OpenAIImageAPIError("invalid_response", "GPT Image API returned no image data.")
+        validate_remote_image_url(remote_url)
+        request = urllib.request.Request(remote_url, method="GET")
+        request.add_header("Accept", "image/*")
+        opener = urllib.request.build_opener(_RejectRedirectHandler())
+        return self._request_bytes(request, opener.open)
+
+
+def append_aspect_instruction(prompt: str, image_size: str) -> str:
+    """Keep the spreadsheet's requested ratio in the provider prompt without resizing."""
+    source = str(prompt or "").strip()
+    aspect = str(image_size or "").strip()
+    if not aspect:
+        return source
+    return f"{source}\n\nPreserve the requested image aspect ratio exactly: {aspect}."
+
+
+def encode_multipart(
+    fields: Mapping[str, str], files: Sequence[tuple[str, Path]]
+) -> tuple[bytes, str]:
+    """Create a conventional multipart body using a fresh opaque boundary."""
+    boundary = secrets.token_hex(24)
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.extend((
+            f"--{boundary}\r\n".encode("ascii"),
+            f'Content-Disposition: form-data; name="{_safe_multipart_token(name)}"\r\n\r\n'.encode("utf-8"),
+            str(value).encode("utf-8"),
+            b"\r\n",
+        ))
+    for field_name, path in files:
+        filename = _safe_filename(path.name)
+        media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        chunks.extend((
+            f"--{boundary}\r\n".encode("ascii"),
+            (
+                "Content-Disposition: form-data; "
+                f'name="{_safe_multipart_token(field_name)}"; filename="{filename}"\r\n'
+            ).encode("utf-8"),
+            f"Content-Type: {media_type}\r\n\r\n".encode("ascii"),
+            path.read_bytes(),
+            b"\r\n",
+        ))
+    chunks.append(f"--{boundary}--\r\n".encode("ascii"))
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def validate_remote_image_url(url: str) -> None:
+    """Reject result URLs that could target local or non-public network addresses."""
+    raw_url = str(url or "")
+    if "\r" in raw_url or "\n" in raw_url:
+        _raise_unsafe_result_url()
+    try:
+        parsed = urlsplit(raw_url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        _raise_unsafe_result_url()
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or hostname.rstrip(".").lower() == "localhost"
+        or port is not None and not 0 < port <= 65535
+    ):
+        _raise_unsafe_result_url()
+    try:
+        resolved = socket.getaddrinfo(
+            hostname,
+            port or (443 if parsed.scheme.lower() == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+    except (OSError, ValueError):
+        _raise_unsafe_result_url()
+    if not resolved:
+        _raise_unsafe_result_url()
+    for entry in resolved:
+        try:
+            address = ipaddress.ip_address(entry[4][0])
+        except (ValueError, IndexError):
+            _raise_unsafe_result_url()
+        if not address.is_global:
+            _raise_unsafe_result_url()
+
+
+def atomic_save_validated_image(image_bytes: bytes, target: Path) -> None:
+    """Verify response bytes with Pillow before atomically publishing them."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            image.verify()
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
+        raise OpenAIImageAPIError("invalid_image", "GPT Image API returned an invalid image.") from None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as temporary:
+            temporary.write(image_bytes)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, target)
+    except OSError:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise OpenAIImageAPIError("save_failed", "Could not save the generated image.") from None
+
+
+def _validated_image_paths(image_paths: Sequence[str | Path]) -> list[Path]:
+    paths = [Path(path) for path in image_paths]
+    if not paths:
+        raise OpenAIImageAPIError("missing_input_image", "At least one source image is required.")
+    for path in paths:
+        try:
+            if not path.is_file() or path.stat().st_size <= 0:
+                raise ValueError
+            with Image.open(path) as image:
+                image.verify()
+        except (OSError, UnidentifiedImageError, SyntaxError, ValueError):
+            raise OpenAIImageAPIError(
+                "invalid_input_image", "Each source file must be a non-empty readable image."
+            ) from None
+    return paths
+
+
+def _transport_error(exc: BaseException) -> OpenAIImageAPIError:
+    if isinstance(exc, HTTPError):
+        if exc.code in {401, 403}:
+            return OpenAIImageAPIError("authentication", "GPT Image API authentication failed.", exc.code)
+        if exc.code in {400, 404}:
+            return OpenAIImageAPIError("invalid_request", "GPT Image API request or endpoint is invalid.", exc.code)
+        if exc.code == 429:
+            return OpenAIImageAPIError("rate_limit", "GPT Image API is rate limiting requests.", exc.code, True)
+        if 500 <= exc.code < 600:
+            return OpenAIImageAPIError("server_error", "GPT Image API is temporarily unavailable.", exc.code, True)
+        return OpenAIImageAPIError("http_error", "GPT Image API request failed.", exc.code)
+    kind = classify_network_error(exc)
+    if kind is RetryKind.PERMANENT_TLS:
+        return OpenAIImageAPIError("tls_certificate", PERMANENT_TLS_GUIDANCE)
+    if kind is RetryKind.TRANSIENT:
+        return OpenAIImageAPIError("network", "Could not reach GPT Image API.", retryable=True)
+    return OpenAIImageAPIError("network", "Could not reach GPT Image API.")
+
+
+def _retry_delay(delays: Sequence[float], failed_attempt: int) -> float:
+    if not delays:
+        return 0.0
+    return max(0.0, float(delays[min(failed_attempt - 1, len(delays) - 1)]))
+
+
+def _safe_multipart_token(value: str) -> str:
+    return str(value).replace("\r", "").replace("\n", "").replace('"', "")
+
+
+def _safe_filename(filename: str) -> str:
+    safe = _safe_multipart_token(Path(filename).name)
+    return safe or "image"
+
+
+def _raise_unsafe_result_url() -> None:
+    raise OpenAIImageAPIError("unsafe_result_url", "Generated image URL is not safe to download.")
+
+
+class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Do not let a validated public result URL redirect to an unvalidated host."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> urllib.request.Request:
+        _raise_unsafe_result_url()
 
 
 def _raise_invalid_base_url() -> None:
