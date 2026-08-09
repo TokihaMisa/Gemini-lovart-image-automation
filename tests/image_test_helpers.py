@@ -28,14 +28,25 @@ def write_truncated_png(path: Path) -> str:
 
 
 class RecordingImageProvider:
-    def __init__(self, name: str, fail_indexes=frozenset()) -> None:
+    def __init__(
+        self,
+        name: str,
+        fail_indexes=frozenset(),
+        fail_support_steps=frozenset(),
+    ) -> None:
         self.name = name
         self.fail_indexes = frozenset(fail_indexes)
+        self.fail_support_steps = frozenset(fail_support_steps)
         self.generated_indexes: list[int] = []
         self.support_steps: list[str] = []
 
     def generate_support_image(self, request):
         self.support_steps.append(request.step_name)
+        if request.step_name in self.fail_support_steps:
+            return ImageProviderResult(
+                succeeded=False,
+                error=f"{request.step_name} support failed",
+            )
         path = write_valid_png(
             request.product_dir / self.name / "support" / f"{request.step_name}.png"
         )
@@ -101,8 +112,11 @@ class RecordingOpenAIAPI:
 class PipelineOpenAIProvider:
     name = "openai_image"
 
-    def __init__(self, api) -> None:
-        self.support = RecordingImageProvider(self.name)
+    def __init__(self, api, fail_support_steps=frozenset()) -> None:
+        self.support = RecordingImageProvider(
+            self.name,
+            fail_support_steps=fail_support_steps,
+        )
         self.detail = OpenAIImageProvider(api)
 
     def generate_support_image(self, request):
@@ -122,6 +136,7 @@ class PipelineRunResult:
     registry: RecordingRegistry
     generated_indexes: tuple[int, ...]
     append_result: Mock
+    gemini: Mock
 
 
 def run_product_pipeline(
@@ -131,8 +146,10 @@ def run_product_pipeline(
     detail_count=2,
     prompt_screen_count=None,
     fail_indexes=frozenset(),
+    fail_support_steps=frozenset(),
     lovart=None,
     openai_api=None,
+    resume=True,
 ):
     product_dir = Path(tmp_path) / "products" / "SKU-ROUTING"
     product_image = write_valid_png(product_dir / "product.png")
@@ -179,7 +196,10 @@ def run_product_pipeline(
     if openai_api is None:
         openai_api = RecordingOpenAIAPI(fail_indexes=fail_indexes)
     lovart_provider = LovartImageProvider(lovart)
-    openai_provider = PipelineOpenAIProvider(openai_api)
+    openai_provider = PipelineOpenAIProvider(
+        openai_api,
+        fail_support_steps=fail_support_steps,
+    )
     registry = RecordingRegistry(lovart_provider, openai_provider)
     routing = GenerationRouting(support_provider, detail_provider, detail_count)
     run_dir = Path(tmp_path) / "run"
@@ -198,6 +218,7 @@ def run_product_pipeline(
             lovart,
             logger,
             run_dir,
+            resume=resume,
             image_registry=registry,
             routing=routing,
         )
@@ -207,5 +228,5 @@ def run_product_pipeline(
         recorded_indexes if isinstance(recorded_indexes, (list, tuple)) else ()
     )
     return PipelineRunResult(
-        *counters, product_dir, registry, generated_indexes, append_result
+        *counters, product_dir, registry, generated_indexes, append_result, gemini
     )

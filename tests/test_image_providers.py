@@ -126,6 +126,162 @@ def test_openai_detail_set_keeps_paid_success_when_later_screen_fails(tmp_path: 
     assert read_completed_detail_indexes(tmp_path, expected_count=2) == {1}
 
 
+def test_openai_detail_set_stops_after_first_exhausted_screen_and_resumes_in_order(
+    tmp_path: Path,
+):
+    from image_providers import DetailSetRequest, OpenAIImageProvider
+
+    reference = write_valid_png(tmp_path / "reference.png")
+    first_path = write_valid_png(tmp_path / "gpt_image" / "detail" / "01.png")
+    first_api = Mock()
+    first_api.generate_edit.side_effect = [
+        GeneratedImage(first_path, "gpt-image-2"),
+        RuntimeError("screen 2 exhausted retries"),
+        AssertionError("screen 3 must not be called in the failed run"),
+    ]
+    request = DetailSetRequest(
+        product_id="P1",
+        product_dir=tmp_path,
+        screens=(
+            DetailScreen(1, "hero"),
+            DetailScreen(2, "feature"),
+            DetailScreen(3, "proof"),
+        ),
+        image_paths=(reference,),
+        image_size="1:1",
+        target_count=3,
+        input_fingerprint="inputs-v1",
+        resume=True,
+    )
+
+    first = OpenAIImageProvider(first_api).generate_detail_set(request)
+
+    assert first_api.generate_edit.call_count == 2
+    assert first.completed_count == 1
+    assert first.failed_indexes == (2,)
+
+    resumed_api = Mock()
+
+    def finish_missing(*, output_path, **_kwargs):
+        path = write_valid_png(Path(output_path))
+        return GeneratedImage(path, "gpt-image-2")
+
+    resumed_api.generate_edit.side_effect = finish_missing
+    resumed = OpenAIImageProvider(resumed_api).generate_detail_set(request)
+
+    assert [
+        Path(call.kwargs["output_path"]).stem
+        for call in resumed_api.generate_edit.call_args_list
+    ] == ["02", "03"]
+    assert resumed.succeeded is True
+    assert resumed.completed_count == 3
+
+
+def test_openai_detail_set_no_resume_replaces_all_prior_checkpoints(tmp_path: Path):
+    from image_providers import DetailSetRequest, OpenAIImageProvider, record_detail_checkpoint
+
+    first_path = write_valid_png(tmp_path / "gpt_image" / "detail" / "01.png")
+    second_path = write_valid_png(tmp_path / "gpt_image" / "detail" / "02.png")
+    record_detail_checkpoint(
+        tmp_path,
+        1,
+        "done",
+        first_path,
+        attempts=4,
+        input_fingerprint="inputs-v1",
+    )
+    record_detail_checkpoint(
+        tmp_path,
+        2,
+        "done",
+        second_path,
+        attempts=3,
+        input_fingerprint="inputs-v1",
+    )
+    api = Mock()
+
+    def regenerate(*, output_path, **_kwargs):
+        path = write_valid_png(Path(output_path))
+        return GeneratedImage(path, "gpt-image-2")
+
+    api.generate_edit.side_effect = regenerate
+    request = DetailSetRequest(
+        product_id="P1",
+        product_dir=tmp_path,
+        screens=(DetailScreen(1, "hero"), DetailScreen(2, "feature")),
+        image_paths=(write_valid_png(tmp_path / "reference.png"),),
+        image_size="1:1",
+        target_count=2,
+        input_fingerprint="inputs-v1",
+        resume=False,
+    )
+
+    result = OpenAIImageProvider(api).generate_detail_set(request)
+
+    assert api.generate_edit.call_count == 2
+    assert result.succeeded is True
+    checkpoints = __import__("utils").read_status(tmp_path)["detail_checkpoints"]
+    assert checkpoints["1"]["attempts"] == 1
+    assert checkpoints["2"]["attempts"] == 1
+
+
+def test_openai_detail_set_reconciles_only_matching_running_canonical_output(
+    tmp_path: Path,
+):
+    from image_providers import DetailSetRequest, OpenAIImageProvider, record_detail_checkpoint
+    from utils import read_status
+
+    canonical = write_valid_png(tmp_path / "gpt_image" / "detail" / "01.png")
+    record_detail_checkpoint(
+        tmp_path,
+        1,
+        "running",
+        attempts=1,
+        input_fingerprint="inputs-v1",
+    )
+    api = Mock()
+    request = DetailSetRequest(
+        product_id="P1",
+        product_dir=tmp_path,
+        screens=(DetailScreen(1, "hero"),),
+        image_paths=(write_valid_png(tmp_path / "reference.png"),),
+        image_size="1:1",
+        target_count=1,
+        input_fingerprint="inputs-v1",
+        resume=True,
+    )
+
+    result = OpenAIImageProvider(api).generate_detail_set(request)
+
+    api.generate_edit.assert_not_called()
+    assert result.succeeded is True
+    assert result.local_paths == (canonical,)
+    checkpoint = read_status(tmp_path)["detail_checkpoints"]["1"]
+    assert checkpoint["state"] == "done"
+    assert checkpoint["input_fingerprint"] == "inputs-v1"
+
+    unrelated_dir = tmp_path / "unrelated"
+    arbitrary = write_valid_png(unrelated_dir / "01.png")
+    other_product = tmp_path / "other-product"
+    write_valid_png(other_product / "gpt_image" / "detail" / "01.png")
+    wrong_api = Mock()
+    wrong_api.generate_edit.return_value = GeneratedImage(arbitrary, "gpt-image-2")
+    wrong_request = DetailSetRequest(
+        product_id="P2",
+        product_dir=other_product,
+        screens=(DetailScreen(1, "hero"),),
+        image_paths=(write_valid_png(other_product / "reference.png"),),
+        image_size="1:1",
+        target_count=1,
+        input_fingerprint="inputs-v2",
+        resume=True,
+    )
+
+    OpenAIImageProvider(wrong_api).generate_detail_set(wrong_request)
+
+    wrong_api.generate_edit.assert_called_once()
+
+
 def test_lovart_adapter_preserves_pending_confirmation_result(tmp_path: Path):
     from image_providers import LovartImageProvider, SupportImageRequest
 

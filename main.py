@@ -28,6 +28,7 @@ from image_generation import (
     GenerationRouting,
     PROVIDER_LOVART,
     PROVIDER_OPENAI_IMAGE,
+    build_detail_input_fingerprint,
     compose_detail_image_prompt,
     ensure_detail_page_count_snapshot,
     normalize_image_provider,
@@ -525,7 +526,13 @@ def _is_completed_for_detail_provider(
         target_count = int(status["detail_page_count_snapshot"])
     except (KeyError, TypeError, ValueError):
         return False
-    completed_count = len(read_completed_detail_indexes(product_dir, target_count))
+    completed_count = len(
+        read_completed_detail_indexes(
+            product_dir,
+            target_count,
+            str(status.get("detail_input_fingerprint") or ""),
+        )
+    )
     if completed_count == target_count:
         return True
     update_status(
@@ -537,6 +544,81 @@ def _is_completed_for_detail_provider(
         artifact_count=completed_count,
     )
     return False
+
+
+def _prepare_detail_input_state(
+    product_dir: Path,
+    input_fingerprint: str,
+    support_provider: str,
+    detail_provider: str,
+    *,
+    resume: bool,
+) -> None:
+    status = read_status(product_dir)
+    saved_fingerprint = str(status.get("detail_input_fingerprint") or "")
+    legacy_lovart_completion = bool(
+        resume
+        and not saved_fingerprint
+        and support_provider == PROVIDER_LOVART
+        and detail_provider == PROVIDER_LOVART
+        and status.get("lovart_done")
+        and str(status.get("detail_provider") or "") in {"", PROVIDER_LOVART}
+    )
+    has_detail_state = bool(
+        status.get("detail_provider")
+        or status.get("detail_generation_complete")
+        or status.get("partial_complete")
+        or status.get("detail_checkpoints")
+        or status.get("detail_images")
+        or status.get("lovart_done")
+        or (product_dir / "detail_prompt.txt").exists()
+        or (product_dir / "lovart_prompt.txt").exists()
+    )
+    if resume and saved_fingerprint == input_fingerprint:
+        return
+    if resume and (not has_detail_state or legacy_lovart_completion):
+        update_status(
+            product_dir,
+            "detail_inputs_fingerprinted",
+            detail_input_fingerprint=input_fingerprint,
+        )
+        return
+
+    for prompt_name in ("detail_prompt.txt", "lovart_prompt.txt"):
+        prompt_path = product_dir / prompt_name
+        if prompt_path.exists():
+            prompt_path.unlink()
+    output_dir = product_dir / "gpt_image" / "detail"
+    if output_dir.exists():
+        for output_path in output_dir.iterdir():
+            if output_path.is_file():
+                output_path.unlink()
+    update_status(
+        product_dir,
+        "detail_inputs_invalidated",
+        detail_input_fingerprint=input_fingerprint,
+        detail_provider="",
+        detail_checkpoints={},
+        detail_images=[],
+        detail_completed_count=0,
+        detail_failed_indexes=[],
+        detail_generation_complete=False,
+        partial_complete=False,
+        artifact_count=0,
+        used_model="",
+        lovart_done=False,
+        failed=False,
+        needs_manual_action=False,
+        lovart_still_running=False,
+        reason="",
+        detail_prompt_ready=False,
+        lovart_prompt_ready=False,
+        detail_result_recorded=False,
+        detail_generation_done=False,
+        detail_prompt_chars=0,
+        lovart_prompt_chars=0,
+        gemini_chars=0,
+    )
 
 
 class _SupportImageGenerationError(RuntimeError):
@@ -797,6 +879,11 @@ def _process_products_once(
             language=product.language,
             image_count=len(product.image_paths),
         )
+        target_count = ensure_detail_page_count_snapshot(
+            product_dir,
+            effective_routing.detail_page_count,
+            replace_existing=not resume,
+        )
 
         status = read_status(product_dir)
         if resume and is_product_completed(product_dir):
@@ -808,50 +895,6 @@ def _process_products_once(
             if callable(validate_completed_support):
                 validate_completed_support(product, product_dir, status)
                 status = read_status(product_dir)
-        support_complete = resume and _is_completed_for_support_provider(
-            product_dir,
-            status,
-            effective_routing.support_provider,
-        )
-        detail_complete = False
-        if support_complete:
-            if detail_provider is None:
-                detail_provider = registry.get(effective_routing.detail_provider)
-                if hasattr(detail_provider, "confirmation_advisor"):
-                    detail_provider.confirmation_advisor = gemini
-            detail_complete = _is_completed_for_detail_provider(
-                product_dir,
-                status,
-                effective_routing.detail_provider,
-                effective_routing.detail_page_count,
-            )
-        if support_complete and detail_complete:
-            skipped += 1
-            project_url = status.get("project_url", "")
-            from utils import get_output_dir
-            append_result(
-                f"{get_output_dir()}/results.csv",
-                product.id,
-                product.name_cn,
-                project_url,
-                status="success",
-                used_model=str(status.get("used_model") or ""),
-            )
-            logger.info(f"SKIP [{idx}/{len(products)}] {product.id} already completed")
-            if project_url:
-                console.print(f"  [green]SKIP[/green] {product.id} already completed: [link={project_url}]{project_url}[/link]")
-            summary_rows.append({
-                "product_id": product.id,
-                "product_name": product.name_cn,
-                "status": "skipped",
-                "project_url": project_url,
-                "gemini_chars": status.get("gemini_chars", ""),
-                "artifact_count": status.get("artifact_count", ""),
-                "duration_seconds": 0,
-                "error": "",
-                "used_model": status.get("used_model", ""),
-            })
-            continue
 
         logger.info(f"[{idx}/{len(products)}] {product.id} - {product.name_cn}")
         console.print(Panel(
@@ -978,9 +1021,80 @@ def _process_products_once(
                 support_stage = "support_images_ready"
             update_status(product_dir, support_stage, **support_fields)
 
-            target_count = ensure_detail_page_count_snapshot(
-                product_dir, effective_routing.detail_page_count
+            fingerprint_settings = dict(prompt_settings)
+            fingerprint_settings["detail_page_count"] = target_count
+            detail_input_fingerprint = build_detail_input_fingerprint(
+                support_provider=effective_routing.support_provider,
+                detail_provider=effective_routing.detail_provider,
+                product_id=product.id,
+                product_name_cn=product.name_cn,
+                language=product.language,
+                selling_points=product.selling_points,
+                image_size=getattr(product, "image_size", ""),
+                reference_images_are_product=getattr(
+                    product,
+                    "reference_images_are_product",
+                    False,
+                ),
+                prompt_settings=fingerprint_settings,
+                target_count=target_count,
+                image_inputs={
+                    "product_source": (product_image,),
+                    "white_bg": (white_image,),
+                    "scene": (scene_image,),
+                    "accessory": (accessory_image,) if accessory_image else (),
+                    "dimension": (dimension_image,) if dimension_image else (),
+                    "reference_images": tuple(reference_images),
+                    "reference_sheet": (reference_sheet,) if reference_sheet else (),
+                },
             )
+            _prepare_detail_input_state(
+                product_dir,
+                detail_input_fingerprint,
+                effective_routing.support_provider,
+                effective_routing.detail_provider,
+                resume=resume,
+            )
+            status = read_status(product_dir)
+            if resume and _is_completed_for_detail_provider(
+                product_dir,
+                status,
+                effective_routing.detail_provider,
+                target_count,
+            ):
+                status = read_status(product_dir)
+                skipped += 1
+                project_url = status.get("project_url", "")
+                from utils import get_output_dir
+                append_result(
+                    f"{get_output_dir()}/results.csv",
+                    product.id,
+                    product.name_cn,
+                    project_url,
+                    status="success",
+                    used_model=str(status.get("used_model") or ""),
+                )
+                logger.info(
+                    f"SKIP [{idx}/{len(products)}] {product.id} already completed"
+                )
+                if project_url:
+                    console.print(
+                        f"  [green]SKIP[/green] {product.id} already completed: "
+                        f"[link={project_url}]{project_url}[/link]"
+                    )
+                summary_rows.append({
+                    "product_id": product.id,
+                    "product_name": product.name_cn,
+                    "status": "skipped",
+                    "project_url": project_url,
+                    "gemini_chars": status.get("gemini_chars", ""),
+                    "artifact_count": status.get("artifact_count", ""),
+                    "duration_seconds": 0,
+                    "error": "",
+                    "used_model": status.get("used_model", ""),
+                })
+                continue
+
             detail_prompt_path = product_dir / "detail_prompt.txt"
             detail_prompt = ""
             screens = []
@@ -1079,6 +1193,8 @@ def _process_products_once(
                     product_name_cn=product.name_cn,
                     language=product.language,
                     selling_points=product.selling_points,
+                    input_fingerprint=detail_input_fingerprint,
+                    resume=resume,
                     confirmation_advisor=gemini,
                     progress_callback=_emit_ui_detail_progress,
                 )

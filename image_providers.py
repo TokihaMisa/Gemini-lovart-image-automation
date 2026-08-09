@@ -47,6 +47,8 @@ class DetailSetRequest:
     product_name_cn: str = ""
     language: str = ""
     selling_points: str = ""
+    input_fingerprint: str = ""
+    resume: bool = True
     confirmation_advisor: Any | None = None
     progress_callback: Callable[[int, int, int, tuple[int, ...]], None] | None = None
 
@@ -85,6 +87,7 @@ def record_detail_checkpoint(
     local_path: str = "",
     error: str = "",
     attempts: int = 0,
+    input_fingerprint: str = "",
 ) -> None:
     """Atomically persist the state of one GPT detail screen."""
     status = read_status(product_dir)
@@ -95,11 +98,16 @@ def record_detail_checkpoint(
         "local_path": str(local_path),
         "error": str(error),
         "attempts": max(0, int(attempts)),
+        "input_fingerprint": str(input_fingerprint or ""),
     }
     update_status(product_dir, "detail_checkpoint_updated", **{_CHECKPOINT_FIELD: saved})
 
 
-def read_completed_detail_indexes(product_dir: str | Path, expected_count: int) -> set[int]:
+def read_completed_detail_indexes(
+    product_dir: str | Path,
+    expected_count: int,
+    input_fingerprint: str = "",
+) -> set[int]:
     """Return only checkpointed screens whose saved image remains usable."""
     status = read_status(product_dir)
     checkpoints = status.get(_CHECKPOINT_FIELD, {})
@@ -111,6 +119,7 @@ def read_completed_detail_indexes(product_dir: str | Path, expected_count: int) 
         if (
             isinstance(checkpoint, Mapping)
             and checkpoint.get("state") == "done"
+            and _checkpoint_matches_fingerprint(checkpoint, input_fingerprint)
             and is_valid_image_file(checkpoint.get("local_path"))
         ):
             completed.add(index)
@@ -141,7 +150,25 @@ class OpenAIImageProvider:
         )
 
     def generate_detail_set(self, request: DetailSetRequest) -> ImageProviderResult:
-        completed = read_completed_detail_indexes(request.product_dir, request.target_count)
+        if request.resume:
+            completed = read_completed_detail_indexes(
+                request.product_dir,
+                request.target_count,
+                request.input_fingerprint,
+            )
+            for screen in sorted(request.screens, key=lambda item: item.index):
+                if screen.index not in completed and _reconcile_running_detail_output(
+                    request,
+                    screen.index,
+                ):
+                    completed.add(screen.index)
+        else:
+            update_status(
+                request.product_dir,
+                "detail_checkpoints_restarted",
+                **{_CHECKPOINT_FIELD: {}},
+            )
+            completed = set()
         failed: list[int] = []
         errors: list[str] = []
         used_model = ""
@@ -149,7 +176,13 @@ class OpenAIImageProvider:
             if screen.index in completed:
                 continue
             attempts = _checkpoint_attempts(request.product_dir, screen.index) + 1
-            record_detail_checkpoint(request.product_dir, screen.index, "running", attempts=attempts)
+            record_detail_checkpoint(
+                request.product_dir,
+                screen.index,
+                "running",
+                attempts=attempts,
+                input_fingerprint=request.input_fingerprint,
+            )
             output_path = request.product_dir / "gpt_image" / "detail" / f"{screen.index:02d}.png"
             try:
                 generated = self.api.generate_edit(
@@ -162,7 +195,12 @@ class OpenAIImageProvider:
                 failed.append(screen.index)
                 errors.append(f"screen {screen.index}: {exc}")
                 record_detail_checkpoint(
-                    request.product_dir, screen.index, "failed", error=str(exc), attempts=attempts
+                    request.product_dir,
+                    screen.index,
+                    "failed",
+                    error=str(exc),
+                    attempts=attempts,
+                    input_fingerprint=request.input_fingerprint,
                 )
                 if request.progress_callback:
                     request.progress_callback(
@@ -171,9 +209,16 @@ class OpenAIImageProvider:
                         len(completed),
                         tuple(failed),
                     )
-                continue
+                break
             local_path = str(generated.local_path)
-            record_detail_checkpoint(request.product_dir, screen.index, "done", local_path, attempts=attempts)
+            record_detail_checkpoint(
+                request.product_dir,
+                screen.index,
+                "done",
+                local_path,
+                attempts=attempts,
+                input_fingerprint=request.input_fingerprint,
+            )
             completed.add(screen.index)
             used_model = str(generated.model) or used_model
             if request.progress_callback:
@@ -184,7 +229,11 @@ class OpenAIImageProvider:
                     tuple(failed),
                 )
 
-        local_paths = _completed_paths(request.product_dir, request.target_count)
+        local_paths = _completed_paths(
+            request.product_dir,
+            request.target_count,
+            request.input_fingerprint,
+        )
         completed_count = len(completed)
         return ImageProviderResult(
             succeeded=completed_count == request.target_count,
@@ -348,6 +397,43 @@ def _checkpoint_for_index(checkpoints: Mapping[str, object], index: int) -> obje
     return checkpoints.get(str(index), checkpoints.get(f"{index:02d}"))
 
 
+def _checkpoint_matches_fingerprint(
+    checkpoint: Mapping[str, object],
+    input_fingerprint: str,
+) -> bool:
+    expected = str(input_fingerprint or "")
+    return not expected or str(checkpoint.get("input_fingerprint") or "") == expected
+
+
+def _reconcile_running_detail_output(request: DetailSetRequest, index: int) -> bool:
+    checkpoints = read_status(request.product_dir).get(_CHECKPOINT_FIELD, {})
+    if not isinstance(checkpoints, Mapping):
+        return False
+    checkpoint = _checkpoint_for_index(checkpoints, index)
+    if (
+        not isinstance(checkpoint, Mapping)
+        or checkpoint.get("state") != "running"
+        or not _checkpoint_matches_fingerprint(checkpoint, request.input_fingerprint)
+    ):
+        return False
+    canonical_path = request.product_dir / "gpt_image" / "detail" / f"{index:02d}.png"
+    if not is_valid_image_file(canonical_path):
+        return False
+    try:
+        attempts = max(0, int(checkpoint.get("attempts", 0)))
+    except (TypeError, ValueError):
+        attempts = 0
+    record_detail_checkpoint(
+        request.product_dir,
+        index,
+        "done",
+        str(canonical_path),
+        attempts=attempts,
+        input_fingerprint=request.input_fingerprint,
+    )
+    return True
+
+
 def _checkpoint_attempts(product_dir: str | Path, index: int) -> int:
     checkpoints = read_status(product_dir).get(_CHECKPOINT_FIELD, {})
     if not isinstance(checkpoints, Mapping):
@@ -361,14 +447,23 @@ def _checkpoint_attempts(product_dir: str | Path, index: int) -> int:
         return 0
 
 
-def _completed_paths(product_dir: str | Path, expected_count: int) -> tuple[str, ...]:
+def _completed_paths(
+    product_dir: str | Path,
+    expected_count: int,
+    input_fingerprint: str = "",
+) -> tuple[str, ...]:
     checkpoints = read_status(product_dir).get(_CHECKPOINT_FIELD, {})
     if not isinstance(checkpoints, Mapping):
         return ()
     paths: list[str] = []
     for index in range(1, max(0, int(expected_count)) + 1):
         checkpoint = _checkpoint_for_index(checkpoints, index)
-        if isinstance(checkpoint, Mapping) and is_valid_image_file(checkpoint.get("local_path")):
+        if (
+            isinstance(checkpoint, Mapping)
+            and checkpoint.get("state") == "done"
+            and _checkpoint_matches_fingerprint(checkpoint, input_fingerprint)
+            and is_valid_image_file(checkpoint.get("local_path"))
+        ):
             paths.append(str(checkpoint["local_path"]))
     return tuple(paths)
 

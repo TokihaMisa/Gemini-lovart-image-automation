@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+from PIL import Image
 
 from image_generation import GenerationRouting
 from image_providers import ImageProviderResult, SupportImageRequest
@@ -104,7 +105,6 @@ def test_ui_detail_progress_reports_only_counts_and_failed_indexes(tmp_path, cap
     assert payloads == [
         {"current": 1, "target": 3, "completed": 1, "failed": []},
         {"current": 2, "target": 3, "completed": 1, "failed": [2]},
-        {"current": 3, "target": 3, "completed": 2, "failed": [2]},
     ]
     assert all(set(payload) == {"current", "target", "completed", "failed"} for payload in payloads)
 
@@ -162,6 +162,10 @@ def test_single_detail_screen_snapshot_prevents_extra_generation_on_resume(tmp_p
     assert status["detail_page_count_snapshot"] == 1
     assert status["detail_completed_count"] == 1
     assert len(status["detail_images"]) == 1
+    assert status["detail_input_fingerprint"] == read_status(
+        first.product_dir
+    )["detail_input_fingerprint"]
+    second.gemini.generate_prompt.assert_not_called()
 
 
 def test_screen_count_mismatch_makes_no_paid_image_calls(tmp_path):
@@ -196,10 +200,10 @@ def test_partial_detail_failure_keeps_completed_images_and_resumes_only_missing(
     first_status = read_status(first.product_dir)
     assert first_status["partial_complete"] is True
     assert first_status["detail_generation_complete"] is False
-    assert first_status["detail_completed_count"] == 2
+    assert first_status["detail_completed_count"] == 1
     assert first_status["detail_failed_indexes"] == [2]
-    assert first_status["artifact_count"] == 2
-    assert len(first_status["detail_images"]) == 2
+    assert first_status["artifact_count"] == 1
+    assert len(first_status["detail_images"]) == 1
     assert first.append_result.call_args.kwargs["used_model"] == "gpt-image-2"
 
     second = run_product_pipeline(
@@ -210,7 +214,7 @@ def test_partial_detail_failure_keeps_completed_images_and_resumes_only_missing(
         fail_indexes=set(),
     )
 
-    assert second.generated_indexes == (2,)
+    assert second.generated_indexes == (2, 3)
     second_status = read_status(second.product_dir)
     assert second_status["detail_page_count_snapshot"] == 3
     assert second_status["detail_generation_complete"] is True
@@ -232,6 +236,86 @@ def test_partial_detail_failure_keeps_completed_images_and_resumes_only_missing(
     assert skipped.append_result.call_args.kwargs["used_model"] == "gpt-image-2"
     summary = json.loads((tmp_path / "run" / "summary.json").read_text(encoding="utf-8"))
     assert summary[0]["used_model"] == "gpt-image-2"
+
+
+def test_detail_fingerprint_change_from_support_content_regenerates_prompt_and_set(
+    tmp_path,
+):
+    first = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=2
+    )
+    first_status = read_status(first.product_dir)
+    first_fingerprint = first_status["detail_input_fingerprint"]
+    white_path = Path(first_status["white_bg_local_path"])
+    Image.new("RGB", (2, 2), (0, 0, 255)).save(white_path, format="PNG")
+
+    second = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=2
+    )
+
+    assert (second.success, second.skipped) == (1, 0)
+    assert second.generated_indexes == (1, 2)
+    second.gemini.generate_prompt.assert_called_once()
+    assert read_status(second.product_dir)["detail_input_fingerprint"] != first_fingerprint
+
+
+def test_support_provider_switch_invalidates_detail_prompt_and_gpt_checkpoints(tmp_path):
+    first = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=2
+    )
+    first_fingerprint = read_status(first.product_dir)["detail_input_fingerprint"]
+
+    switched = run_product_pipeline(
+        tmp_path, "lovart", "openai_image", detail_count=2
+    )
+
+    assert (switched.success, switched.skipped) == (1, 0)
+    assert switched.generated_indexes == (1, 2)
+    switched.gemini.generate_prompt.assert_called_once()
+    assert read_status(switched.product_dir)["detail_input_fingerprint"] != first_fingerprint
+
+
+def test_snapshot_is_written_before_support_failure_and_survives_setting_change(tmp_path):
+    failed = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=3,
+        fail_support_steps={"white_bg"},
+    )
+
+    assert (failed.success, failed.fail) == (0, 1)
+    assert read_status(failed.product_dir)["detail_page_count_snapshot"] == 3
+    failed.gemini.generate_prompt.assert_not_called()
+
+    resumed = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=9,
+    )
+
+    assert resumed.generated_indexes == (1, 2, 3)
+    assert read_status(resumed.product_dir)["detail_page_count_snapshot"] == 3
+
+
+def test_no_resume_regenerates_the_configured_gpt_detail_set(tmp_path):
+    first = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=2
+    )
+    assert first.generated_indexes == (1, 2)
+
+    rerun = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=2,
+        resume=False,
+    )
+
+    assert (rerun.success, rerun.skipped) == (1, 0)
+    assert rerun.generated_indexes == (1, 2)
+    rerun.gemini.generate_prompt.assert_called_once()
 
 
 def test_completed_openai_detail_set_regenerates_only_corrupt_screen(tmp_path):

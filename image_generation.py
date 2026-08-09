@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from pathlib import Path
 import re
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from prompt_settings import normalize_prompt_settings
 from utils import read_status, update_status
@@ -115,14 +117,84 @@ def _validate_screen_indexes(screens: list[DetailScreen], expected_count: int) -
         )
 
 
-def ensure_detail_page_count_snapshot(product_dir: str | Path, configured_count: int) -> int:
+def ensure_detail_page_count_snapshot(
+    product_dir: str | Path,
+    configured_count: int,
+    *,
+    replace_existing: bool = False,
+) -> int:
     status = read_status(product_dir)
     existing = status.get("detail_page_count_snapshot")
-    if existing is not None:
+    if existing is not None and not replace_existing:
         return normalize_prompt_settings({"detail_page_count": existing})["detail_page_count"]
     count = normalize_prompt_settings({"detail_page_count": configured_count})["detail_page_count"]
     update_status(product_dir, "detail_target_snapshotted", detail_page_count_snapshot=count)
     return count
+
+
+def build_detail_input_fingerprint(
+    *,
+    support_provider: str,
+    detail_provider: str,
+    product_id: object,
+    product_name_cn: object,
+    language: object,
+    selling_points: object,
+    image_size: object,
+    reference_images_are_product: object,
+    prompt_settings: Mapping[str, object] | None,
+    target_count: int,
+    image_inputs: Mapping[str, Sequence[str | Path]],
+) -> str:
+    """Hash every deterministic input that can alter the detail prompt or result."""
+    settings = normalize_prompt_settings(prompt_settings)
+    settings["detail_page_count"] = int(target_count)
+    hashed_images = {
+        str(role): [_hash_detail_input_file(path) for path in paths]
+        for role, paths in sorted(image_inputs.items(), key=lambda item: str(item[0]))
+    }
+    payload = {
+        "schema": 1,
+        "providers": {
+            "support": normalize_image_provider(support_provider),
+            "detail": normalize_image_provider(detail_provider),
+        },
+        "product": {
+            "id": str(product_id or ""),
+            "name_cn": str(product_name_cn or ""),
+            "language": str(language or ""),
+            "selling_points": str(selling_points or ""),
+            "image_size": str(image_size or ""),
+            "reference_images_are_product": bool(reference_images_are_product),
+        },
+        "prompt_settings": settings,
+        "target_count": int(target_count),
+        "image_inputs": hashed_images,
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _hash_detail_input_file(path_value: str | Path) -> dict[str, object]:
+    path = Path(path_value)
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with path.open("rb") as source:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                size += len(chunk)
+    except OSError:
+        return {"state": "unreadable"}
+    return {"sha256": digest.hexdigest(), "size": size}
 
 
 def compose_detail_image_prompt(
