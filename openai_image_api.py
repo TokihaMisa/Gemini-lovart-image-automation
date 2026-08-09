@@ -416,7 +416,9 @@ def _validate_response_contract(
 def _is_expected_content_type(content_type: str, expected: str) -> bool:
     media_type = content_type.split(";", 1)[0].strip().lower()
     if expected == "json":
-        return media_type == "application/json" or media_type.endswith("+json")
+        return media_type == "application/json" or (
+            media_type.startswith("application/") and media_type.endswith("+json")
+        )
     return media_type.startswith("image/") and len(media_type) > len("image/")
 
 

@@ -210,6 +210,7 @@ def test_generate_edit_posts_multipart_and_saves_b64_png(build_opener, tmp_path)
     [
         (302, "application/json", fake_png_response().body),
         (200, "text/html", fake_png_response().body),
+        (200, "text/problem+json", fake_png_response().body),
         (200, "application/problem+json", b""),
     ],
 )
@@ -369,8 +370,8 @@ def test_generate_edit_rejects_invalid_result_download_contract(
     assert "test-key" not in str(ctx.value)
 
 
-@patch("openai_image_api.urllib.request.urlopen")
-def test_generate_edit_rejects_invalid_input_before_network_call(urlopen, tmp_path):
+@patch("openai_image_api.urllib.request.build_opener")
+def test_generate_edit_rejects_invalid_input_before_network_call(build_opener, tmp_path):
     """Fails if arbitrary files are uploaded as images to the paid endpoint."""
     source = tmp_path / "not-an-image.png"
     source.write_bytes(b"not an image")
@@ -379,11 +380,11 @@ def test_generate_edit_rejects_invalid_input_before_network_call(urlopen, tmp_pa
         make_client().generate_edit("prompt", [source], tmp_path / "out.png")
 
     assert ctx.value.code == "invalid_input_image"
-    urlopen.assert_not_called()
+    build_opener.assert_not_called()
 
 
-@patch("openai_image_api.urllib.request.urlopen")
-def test_generate_edit_rejects_checksum_corrupt_input_before_network_call(urlopen, tmp_path):
+@patch("openai_image_api.urllib.request.build_opener")
+def test_generate_edit_rejects_checksum_corrupt_input_before_network_call(build_opener, tmp_path):
     """Fails if a structurally PNG-like but corrupt source reaches the paid endpoint."""
     source = tmp_path / "corrupt.png"
     source.write_bytes(base64.b64decode(CORRUPT_PNG_BASE64))
@@ -392,7 +393,7 @@ def test_generate_edit_rejects_checksum_corrupt_input_before_network_call(urlope
         make_client().generate_edit("prompt", [source], tmp_path / "out.png")
 
     assert ctx.value.code == "invalid_input_image"
-    urlopen.assert_not_called()
+    build_opener.assert_not_called()
 
 
 @patch("openai_image_api.urllib.request.build_opener")
