@@ -1,10 +1,11 @@
 import inspect
+import io
 import os
 import tempfile
 import unittest
 import warnings
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import yaml
 import webui
@@ -47,6 +48,92 @@ def gemini_model(model_id="gemini-2.5-flash"):
 
 
 class WebUIModelSettingsTests(unittest.TestCase):
+    @patch("webui.OpenAIImageAPI")
+    def test_paid_image_test_runs_only_when_handler_is_explicitly_called(self, api_cls):
+        api_cls.return_value.test_edit.return_value.local_path = "test-output.png"
+
+        message = webui.test_openai_image_edit(
+            "test-key", "https://hapiopen.cc", "gpt-image-2", "1K"
+        )
+
+        self.assertIn("测试成功", message)
+        api_cls.return_value.test_edit.assert_called_once()
+
+    @patch("webui.OpenAIImageAPI")
+    @patch("webui.load_config", return_value={})
+    def test_ui_build_and_save_never_run_paid_image_test(self, _load_config, api_cls):
+        demo = build_ui()
+        self.assertIsNotNone(demo)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            env_path = Path(tmp) / ".env"
+            save_api_settings(
+                "", "", "", "", "",
+                "https://gemini.test/v1beta", "gemini-model",
+                "https://nvidia.test/v1", "nvidia-model",
+                "https://hapiopen.cc/v1", "gpt-image-2", "1K",
+                "openai_image", "openai_image",
+                config_path=config_path,
+                env_path=env_path,
+            )
+
+        api_cls.assert_not_called()
+
+    @patch("webui.load_config", return_value={})
+    def test_ui_exposes_gpt_image_settings_routes_and_explicit_charge_button(self, _load_config):
+        demo = build_ui()
+        components = demo.config["components"]
+        labels = {
+            item["id"]: item.get("props", {}).get("label") for item in components
+        }
+        by_label = {
+            item.get("props", {}).get("label"): item
+            for item in components
+            if item.get("props", {}).get("label")
+        }
+        dependencies = {
+            item["api_name"]: item for item in demo.config["dependencies"]
+        }
+
+        self.assertEqual(by_label["GPT Image API 密钥"]["props"]["type"], "password")
+        self.assertEqual(by_label["GPT Image API 密钥"]["props"]["value"], "")
+        self.assertTrue(by_label["GPT Image API 地址"]["props"]["value"].endswith("/v1"))
+        self.assertEqual(by_label["GPT Image 模型"]["props"]["value"], "gpt-image-2")
+        self.assertEqual(
+            {
+                choice[1] if isinstance(choice, (list, tuple)) else choice
+                for choice in by_label["GPT Image 分辨率"]["props"]["choices"]
+            },
+            {"1K", "2K", "4K"},
+        )
+        self.assertFalse(by_label["清除已保存 GPT Image 密钥"]["props"]["value"])
+
+        run_labels = {labels[item] for item in dependencies["run_process"]["inputs"]}
+        self.assertIn("白底图和场景图来源", run_labels)
+        self.assertIn("最终套图来源", run_labels)
+        self.assertIn("清除已保存 GPT Image 密钥", run_labels)
+        save_labels = {labels[item] for item in dependencies["save_api_settings"]["inputs"]}
+        self.assertIn("清除已保存 GPT Image 密钥", save_labels)
+        markdown_values = [
+            str(item.get("props", {}).get("value", ""))
+            for item in components
+            if item["type"] == "markdown"
+        ]
+        self.assertTrue(any("GPT Image 密钥状态：" in value for value in markdown_values))
+
+        paid_test = dependencies["test_openai_image_edit"]
+        self.assertGreaterEqual(
+            {labels[item] for item in paid_test["inputs"]},
+            {"GPT Image API 密钥", "GPT Image API 地址", "GPT Image 模型", "GPT Image 分辨率"},
+        )
+        button_values = [
+            str(item.get("props", {}).get("value", ""))
+            for item in components
+            if item["type"] == "button"
+        ]
+        self.assertTrue(any("可能产生一次图片费用" in value for value in button_values))
+
     @patch("webui.load_config", return_value={})
     def test_build_ui_uses_gradio6_launch_options_without_constructor_warning(self, _load_config):
         launch_options_factory = getattr(webui, "gradio_launch_kwargs", None)
@@ -141,6 +228,16 @@ class WebUIModelSettingsTests(unittest.TestCase):
             )
 
             self.assertNotIn("OPENAI_IMAGE_API_KEY=", env_path.read_text(encoding="utf-8"))
+
+    def test_openai_image_key_indicator_reports_saved_without_echoing_secret(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text("OPENAI_IMAGE_API_KEY=super-secret\n", encoding="utf-8")
+
+            indicator = webui.openai_image_key_status(env_path)
+
+        self.assertIn("已保存", indicator)
+        self.assertNotIn("super-secret", indicator)
 
     def test_persist_openai_image_settings_normalizes_config_without_mutating_input(self):
         original = {"other": {"keep": True}}
@@ -906,6 +1003,36 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertEqual(saved["gemini_api"]["base_url"], "https://gemini.current.test/v1beta")
         self.assertEqual(saved["nvidia_api"]["model"], "nvidia-old")
         self.assertEqual(saved["nvidia_api"]["base_url"], "https://nvidia.current.test/v1")
+
+    @patch("webui.subprocess.Popen")
+    @patch("webui.save_config")
+    @patch("webui.load_config")
+    @patch("webui.save_env")
+    def test_run_process_forwards_provider_overrides_as_literal_subprocess_argv(
+        self, _save_env, load_config, _save_config, popen
+    ):
+        load_config.return_value = {
+            "gemini_api": {"model": "gemini-model"},
+            "nvidia_api": {"model": "nvidia-model"},
+        }
+        child = Mock()
+        child.stdout = io.StringIO("")
+        child.poll.return_value = 0
+        popen.return_value = child
+
+        output = list(run_process(
+            None, "output folder with spaces", "gemini_api", "gemini-model",
+            "unlimited", "auto", "https://gemini.test/v1beta",
+            "https://nvidia.test/v1", "gemini-key", "nvidia-key", "", "",
+            "openai-key", "https://hapiopen.cc/v1", "gpt-image-2", "2K",
+            "openai_image", "lovart", False,
+        ))
+
+        self.assertTrue(output)
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[argv.index("--support-provider") + 1], "openai_image")
+        self.assertEqual(argv[argv.index("--detail-provider") + 1], "lovart")
+        self.assertIn("output folder with spaces", popen.call_args.kwargs["env"]["LOVART_OUTPUT_DIR"])
 
     @patch("webui.save_config")
     @patch("webui.load_config")

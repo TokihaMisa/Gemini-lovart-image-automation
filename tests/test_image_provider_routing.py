@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -15,6 +16,97 @@ from tests.image_test_helpers import (
     write_valid_png,
 )
 from utils import is_product_completed, read_status, update_status
+
+
+def test_cli_provider_overrides_are_parsed():
+    from main import parse_args
+
+    args = parse_args([
+        "--support-provider", "openai_image",
+        "--detail-provider", "lovart",
+    ])
+
+    assert args.support_provider == "openai_image"
+    assert args.detail_provider == "lovart"
+
+
+def test_cli_provider_overrides_take_precedence_before_selected_provider_validation(tmp_path):
+    import main
+
+    args = SimpleNamespace(
+        generate_template=False,
+        config="config.yaml",
+        limit=None,
+        dry_run=False,
+        prompt_source="gemini_api",
+        gemini=None,
+        nvidia_model=None,
+        lovart="ask",
+        resume=True,
+        lovart_image_model=None,
+        lovart_model_selection=None,
+        lovart_reasoning=None,
+        support_provider="openai_image",
+        detail_provider="openai_image",
+    )
+    product = SimpleNamespace(
+        id="SKU-CLI",
+        name_cn="Product",
+        language="English",
+        image_size="1:1",
+        image_paths=["product.png"],
+    )
+    config = {
+        "image_generation": {
+            "support_provider": "lovart",
+            "detail_provider": "lovart",
+        }
+    }
+
+    with (
+        patch("main.parse_args", return_value=args),
+        patch("main.load_config", return_value=config),
+        patch("main.get_prompt_settings", return_value={"detail_page_count": 3}),
+        patch("setup_wizard.missing_or_placeholder_env_keys", side_effect=AssertionError("unselected Lovart validated")),
+        patch("main.setup_logging", return_value=Mock()),
+        patch("main.create_run_dir", return_value=tmp_path / "run"),
+        patch("main.read_products", return_value=[product]),
+        patch("main._choose_prompt_source", return_value="gemini_api"),
+        patch("main._resolve_lovart_mode", side_effect=AssertionError("unselected Lovart configured")),
+        patch("main._choose_lovart_tool_options", side_effect=AssertionError("unselected Lovart tools configured")),
+        patch("main._build_image_provider_registry", return_value=Mock()),
+        patch("main._build_gemini_api", return_value=Mock()),
+        patch("main._process_products", return_value=(1, 0, 0, 0)) as process_products,
+        patch("main.signal.signal"),
+        patch("utils.organize_output_folders"),
+    ):
+        main.main([])
+
+    routing = process_products.call_args.kwargs["routing"]
+    assert routing == GenerationRouting("openai_image", "openai_image", 3)
+
+
+def test_ui_detail_progress_reports_only_counts_and_failed_indexes(tmp_path, capsys):
+    with patch.dict(os.environ, {"UI_MODE": "1"}):
+        run_product_pipeline(
+            tmp_path,
+            "openai_image",
+            "openai_image",
+            detail_count=3,
+            fail_indexes={2},
+        )
+
+    lines = [
+        line for line in capsys.readouterr().out.splitlines()
+        if line.startswith("[UI_DETAIL_PROGRESS]")
+    ]
+    payloads = [json.loads(line.split("]", 1)[1].strip()) for line in lines]
+    assert payloads == [
+        {"current": 1, "target": 3, "completed": 1, "failed": []},
+        {"current": 2, "target": 3, "completed": 1, "failed": [2]},
+        {"current": 3, "target": 3, "completed": 2, "failed": [2]},
+    ]
+    assert all(set(payload) == {"current", "target", "completed", "failed"} for payload in payloads)
 
 
 @pytest.mark.parametrize(

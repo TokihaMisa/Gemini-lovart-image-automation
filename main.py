@@ -30,6 +30,7 @@ from image_generation import (
     PROVIDER_OPENAI_IMAGE,
     compose_detail_image_prompt,
     ensure_detail_page_count_snapshot,
+    normalize_image_provider,
     routing_from_config,
     split_detail_screens,
 )
@@ -146,7 +147,43 @@ def parse_args(argv=None):
         default=None,
         help="Override Lovart chat reasoning mode.",
     )
+    parser.add_argument(
+        "--support-provider",
+        choices=[PROVIDER_LOVART, PROVIDER_OPENAI_IMAGE],
+        default=None,
+        help="Override the provider used for white-background and scene support images.",
+    )
+    parser.add_argument(
+        "--detail-provider",
+        choices=[PROVIDER_LOVART, PROVIDER_OPENAI_IMAGE],
+        default=None,
+        help="Override the provider used for the final detail image set.",
+    )
     return parser.parse_args(argv)
+
+
+def _routing_with_cli_overrides(routing: GenerationRouting, args) -> GenerationRouting:
+    return GenerationRouting(
+        support_provider=normalize_image_provider(
+            getattr(args, "support_provider", None) or routing.support_provider
+        ),
+        detail_provider=normalize_image_provider(
+            getattr(args, "detail_provider", None) or routing.detail_provider
+        ),
+        detail_page_count=routing.detail_page_count,
+    )
+
+
+def _emit_ui_detail_progress(current, target, completed, failed) -> None:
+    if not _is_ui_mode():
+        return
+    payload = {
+        "current": max(0, int(current)),
+        "target": max(0, int(target)),
+        "completed": max(0, int(completed)),
+        "failed": sorted({max(1, int(index)) for index in failed}),
+    }
+    print(f"[UI_DETAIL_PROGRESS] {json.dumps(payload)}", flush=True)
 
 
 def _apply_lovart_overrides(config: dict, args) -> None:
@@ -1043,6 +1080,7 @@ def _process_products_once(
                     language=product.language,
                     selling_points=product.selling_points,
                     confirmation_advisor=gemini,
+                    progress_callback=_emit_ui_detail_progress,
                 )
             )
             raw_result = dict(detail_result.raw_result or {})
@@ -1588,6 +1626,7 @@ def main(argv=None):
     config = load_config(args.config)
     prompt_settings = get_prompt_settings(config)
     routing = routing_from_config(config, prompt_settings)
+    routing = _routing_with_cli_overrides(routing, args)
     uses_lovart = PROVIDER_LOVART in {
         routing.support_provider,
         routing.detail_provider,

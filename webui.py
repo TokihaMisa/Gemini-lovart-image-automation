@@ -50,7 +50,12 @@ from gemini_browser_session import (
 from lovart_api import AgentSkill, AgentSkillError
 from lovart_bot import LOVART_IMAGE_MODELS, LOVART_MODEL_LABELS, unlimited_model_catalog
 from image_generation import normalize_image_provider
-from openai_image_api import OpenAIImageAPIError, normalize_openai_image_base_url
+from openai_image_api import (
+    OpenAIImageAPI,
+    OpenAIImageAPIConfig,
+    OpenAIImageAPIError,
+    normalize_openai_image_base_url,
+)
 
 
 PROMPT_FORM_FIELDS = (
@@ -797,6 +802,30 @@ def normalize_resolution(resolution) -> str:
     return normalized
 
 
+def test_openai_image_edit(api_key, base_url, model, resolution) -> str:
+    """Run the explicitly requested, potentially billable GPT Image edit probe."""
+    try:
+        config = {
+            "openai_image": {
+                "base_url": base_url,
+                "model": model,
+                "resolution": resolution,
+            }
+        }
+        client = OpenAIImageAPI(
+            OpenAIImageAPIConfig.from_config(config, api_key=api_key),
+            logger=None,
+        )
+        result = client.test_edit(Path("output") / ".api-tests")
+    except (OpenAIImageAPIError, OSError, ValueError) as exc:
+        message = exc.user_message if isinstance(exc, OpenAIImageAPIError) else str(exc)
+        return f"❌ GPT Image 图生图测试失败：{message}"
+    return (
+        f"✅ GPT Image 图生图测试成功：{Path(result.local_path).name}。"
+        "本次测试可能已产生一次图片费用。"
+    )
+
+
 def persist_openai_image_settings(
     config,
     base_url,
@@ -835,6 +864,7 @@ def save_api_settings(
     openai_image_resolution,
     support_provider,
     detail_provider,
+    clear_openai_image_key=False,
     config_path="config.yaml",
     env_path=".env",
 ):
@@ -862,6 +892,7 @@ def save_api_settings(
             lovart_access,
             lovart_secret,
             openai_image_key=openai_image_key,
+            clear_openai_image_key=clear_openai_image_key,
             config_path=target,
             env_path=env_path,
         )
@@ -1084,6 +1115,19 @@ def get_env(key: str) -> str:
     return ""
 
 
+def openai_image_key_status(env_path: str | Path = ".env") -> str:
+    target = Path(env_path)
+    saved = False
+    if target.exists():
+        with target.open("r", encoding="utf-8") as stream:
+            saved = any(
+                line.startswith("OPENAI_IMAGE_API_KEY=")
+                and bool(line.split("=", 1)[1].strip())
+                for line in stream
+            )
+    return "GPT Image 密钥状态：已保存" if saved else "GPT Image 密钥状态：未保存"
+
+
 def run_process(
     excel_file,
     custom_output_dir,
@@ -1097,6 +1141,13 @@ def run_process(
     nvidia_key,
     lovart_access,
     lovart_secret,
+    openai_image_key=None,
+    openai_image_base_url="https://hapiopen.cc/v1",
+    openai_image_model="gpt-image-2",
+    openai_image_resolution="1K",
+    support_provider="lovart",
+    detail_provider="lovart",
+    clear_openai_image_key=False,
     *,
     config_path="config.yaml",
     env_path=".env",
@@ -1123,6 +1174,14 @@ def run_process(
             nvidia_base_url,
             nvidia_model,
         )
+        config = persist_openai_image_settings(
+            config,
+            openai_image_base_url,
+            openai_image_model,
+            openai_image_resolution,
+            support_provider,
+            detail_provider,
+        )
         if "lovart" not in config:
             config["lovart"] = {}
         config["lovart"]["image_model"] = lovart_image_model
@@ -1134,6 +1193,8 @@ def run_process(
             nvidia_key,
             lovart_access,
             lovart_secret,
+            openai_image_key=openai_image_key,
+            clear_openai_image_key=clear_openai_image_key,
             config_path=config_path,
             env_path=env_path,
             snapshots=transaction_snapshots,
@@ -1166,7 +1227,9 @@ def run_process(
         "--prompt-source", prompt_source, 
         "--lovart", lovart_mode,
         "--lovart-model-selection", "prefer",
-        "--lovart-reasoning", "fast"
+        "--lovart-reasoning", "fast",
+        "--support-provider", normalize_image_provider(support_provider),
+        "--detail-provider", normalize_image_provider(detail_provider),
     ]
     if lovart_image_model and lovart_image_model != "auto":
         cmd_args.extend(["--lovart-image-model", lovart_image_model])
@@ -1347,8 +1410,9 @@ def run_process(
         is_uisuccess = clean_line.startswith("[UI_SUCCESS]")
         is_uifail = clean_line.startswith("[UI_FAIL]")
         is_uimodel = clean_line.startswith("[UI_MODEL]")
+        is_uidetail = clean_line.startswith("[UI_DETAIL_PROGRESS]")
         
-        if not is_progress and not is_uiproduct and not is_uisuccess and not is_uifail and not is_uimodel:
+        if not is_progress and not is_uiproduct and not is_uisuccess and not is_uifail and not is_uimodel and not is_uidetail:
             logs.append(clean_line)
             if len(logs) > 30:
                 logs.pop(0)
@@ -1359,7 +1423,22 @@ def run_process(
                 if "INFO" not in clean_line: # ignore basic INFO lines to save space
                     products_dict[current_pid].setdefault("logs", []).append(f"▶ {clean_msg}")
         
-        if is_uimodel:
+        if is_uidetail:
+            try:
+                data = json.loads(clean_line.replace("[UI_DETAIL_PROGRESS]", "", 1).strip())
+                current = max(0, int(data.get("current", 0)))
+                target = max(0, int(data.get("target", 0)))
+                completed = max(0, int(data.get("completed", 0)))
+                failed = [int(index) for index in data.get("failed", [])]
+                failed_text = f"，失败 {failed}" if failed else ""
+                current_status = f"详情图 {current}/{target}，已完成 {completed}{failed_text}"
+                status_color = "#f59e0b" if failed else "#3b82f6"
+                if current_pid and current_pid in products_dict:
+                    products_dict[current_pid]["status"] = current_status
+                    products_dict[current_pid]["color"] = status_color
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        elif is_uimodel:
             try:
                 model_name = clean_line.replace("[UI_MODEL]", "").strip()
                 current_model = model_name
@@ -1803,6 +1882,43 @@ def save_api_settings_from_existing_controls(
     )
 
 
+def save_api_settings_from_ui(
+    gemini_key,
+    nvidia_key,
+    lovart_access,
+    lovart_secret,
+    openai_image_key,
+    gemini_base_url,
+    gemini_model,
+    nvidia_base_url,
+    nvidia_model,
+    openai_image_base_url,
+    openai_image_model,
+    openai_image_resolution,
+    support_provider,
+    detail_provider,
+    clear_openai_image_key,
+):
+    status = save_api_settings(
+        gemini_key,
+        nvidia_key,
+        lovart_access,
+        lovart_secret,
+        openai_image_key,
+        gemini_base_url,
+        gemini_model,
+        nvidia_base_url,
+        nvidia_model,
+        openai_image_base_url,
+        openai_image_model,
+        openai_image_resolution,
+        support_provider,
+        detail_provider,
+        clear_openai_image_key=clear_openai_image_key,
+    )
+    return status, openai_image_key_status()
+
+
 def pick_directory(current_dir):
     import subprocess
     import sys
@@ -1833,6 +1949,12 @@ def build_ui():
     prompt_preview_value = effective_rules_preview(get_prompt_settings(config))
     gemini_config = config.get("gemini_api", {})
     nvidia_config = config.get("nvidia_api", {})
+    openai_image_config = config.get("openai_image", {}) or {}
+    if not isinstance(openai_image_config, dict):
+        openai_image_config = {}
+    image_generation_config = config.get("image_generation", {}) or {}
+    if not isinstance(image_generation_config, dict):
+        image_generation_config = {}
     gemini_saved_model = _configured_provider_model(config, "gemini_api")
     nvidia_saved_model = _configured_provider_model(config, "nvidia")
     gemini_base_url_value = gemini_config.get("base_url", "https://generativelanguage.googleapis.com/v1beta")
@@ -2001,6 +2123,25 @@ def build_ui():
                             label="绘图大模型",
                             elem_classes=["glass-input", "pill-dropdown"]
                         )
+                    with gr.Row():
+                        support_provider = gr.Dropdown(
+                            choices=[
+                                ("Lovart", "lovart"),
+                                ("OpenAI-compatible GPT Image", "openai_image"),
+                            ],
+                            value=image_generation_config.get("support_provider", "lovart"),
+                            label="白底图和场景图来源",
+                            elem_classes=["glass-input", "pill-dropdown"],
+                        )
+                        detail_provider = gr.Dropdown(
+                            choices=[
+                                ("Lovart", "lovart"),
+                                ("OpenAI-compatible GPT Image", "openai_image"),
+                            ],
+                            value=image_generation_config.get("detail_provider", "lovart"),
+                            label="最终套图来源",
+                            elem_classes=["glass-input", "pill-dropdown"],
+                        )
 
                 start_btn = gr.Button("🚀 开始执行自动化任务 (Start Process)", elem_classes="start-btn", size="lg")
                 
@@ -2068,6 +2209,53 @@ def build_ui():
                     gr.Markdown("测试可能产生极少量 API 用量。")
                     nvidia_test_btn = gr.Button("测试 NVIDIA 模型")
                     nvidia_status = gr.Markdown("")
+
+                    gr.Markdown("### OpenAI-compatible GPT Image")
+                    gr.Markdown(
+                        "保存设置不会调用图像 API。只有点击下方的明确付费测试按钮才会发起真实图像编辑请求。"
+                    )
+                    openai_image_key = gr.Textbox(
+                        label="GPT Image API 密钥",
+                        value="",
+                        type="password",
+                        placeholder="留空保留已保存密钥",
+                    )
+                    openai_image_key_indicator = gr.Markdown(openai_image_key_status())
+                    clear_openai_image_key = gr.Checkbox(
+                        label="清除已保存 GPT Image 密钥",
+                        value=False,
+                    )
+                    openai_image_base_url = gr.Textbox(
+                        label="GPT Image API 地址",
+                        value=openai_image_config.get("base_url", "https://hapiopen.cc/v1"),
+                        info="地址必须以 /v1 结尾",
+                    )
+                    with gr.Row():
+                        openai_image_model = gr.Textbox(
+                            label="GPT Image 模型",
+                            value=openai_image_config.get("model", "gpt-image-2"),
+                        )
+                        openai_image_resolution = gr.Radio(
+                            choices=["1K", "2K", "4K"],
+                            value=openai_image_config.get("resolution", "1K"),
+                            label="GPT Image 分辨率",
+                        )
+                    openai_image_test_btn = gr.Button(
+                        "真实图像编辑测试（可能产生一次图片费用）",
+                        variant="stop",
+                    )
+                    openai_image_test_status = gr.Markdown("")
+                    openai_image_test_btn.click(
+                        fn=test_openai_image_edit,
+                        inputs=[
+                            openai_image_key,
+                            openai_image_base_url,
+                            openai_image_model,
+                            openai_image_resolution,
+                        ],
+                        outputs=openai_image_test_status,
+                        api_name="test_openai_image_edit",
+                    )
 
                     lovart_access = gr.Textbox(label="LOVART_ACCESS_KEY", value=get_env("LOVART_ACCESS_KEY"), type="password")
                     lovart_secret = gr.Textbox(label="LOVART_SECRET_KEY", value=get_env("LOVART_SECRET_KEY"), type="password")
@@ -2228,17 +2416,29 @@ def build_ui():
                     save_keys_btn = gr.Button("💾 保存密钥、API 地址和模型", variant="primary")
                     save_status = gr.Markdown("")
                     
-                    key_inputs = [gemini_key, nvidia_key, lovart_access, lovart_secret]
+                    key_inputs = [
+                        gemini_key,
+                        nvidia_key,
+                        lovart_access,
+                        lovart_secret,
+                        openai_image_key,
+                    ]
                     save_keys_btn.click(
-                        fn=save_api_settings_from_existing_controls,
+                        fn=save_api_settings_from_ui,
                         inputs=[
                             *key_inputs,
                             gemini_base_url,
                             gemini_model,
                             nvidia_base_url,
                             nvidia_model,
+                            openai_image_base_url,
+                            openai_image_model,
+                            openai_image_resolution,
+                            support_provider,
+                            detail_provider,
+                            clear_openai_image_key,
                         ],
-                        outputs=save_status,
+                        outputs=[save_status, openai_image_key_indicator],
                         api_name="save_api_settings",
                     )
                     open_gemini_login_btn.click(
@@ -2465,7 +2665,10 @@ def build_ui():
             inputs=[
                 excel_file, custom_output_dir, prompt_source, prompt_model, lovart_mode, lovart_image_model,
                 gemini_base_url, nvidia_base_url,
-                gemini_key, nvidia_key, lovart_access, lovart_secret
+                gemini_key, nvidia_key, lovart_access, lovart_secret,
+                openai_image_key, openai_image_base_url, openai_image_model,
+                openai_image_resolution, support_provider, detail_provider,
+                clear_openai_image_key,
             ],
             outputs=progress_dashboard
         )

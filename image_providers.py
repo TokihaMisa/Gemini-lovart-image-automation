@@ -48,6 +48,7 @@ class DetailSetRequest:
     language: str = ""
     selling_points: str = ""
     confirmation_advisor: Any | None = None
+    progress_callback: Callable[[int, int, int, tuple[int, ...]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -163,11 +164,25 @@ class OpenAIImageProvider:
                 record_detail_checkpoint(
                     request.product_dir, screen.index, "failed", error=str(exc), attempts=attempts
                 )
+                if request.progress_callback:
+                    request.progress_callback(
+                        screen.index,
+                        request.target_count,
+                        len(completed),
+                        tuple(failed),
+                    )
                 continue
             local_path = str(generated.local_path)
             record_detail_checkpoint(request.product_dir, screen.index, "done", local_path, attempts=attempts)
             completed.add(screen.index)
             used_model = str(generated.model) or used_model
+            if request.progress_callback:
+                request.progress_callback(
+                    screen.index,
+                    request.target_count,
+                    len(completed),
+                    tuple(failed),
+                )
 
         local_paths = _completed_paths(request.product_dir, request.target_count)
         completed_count = len(completed)
