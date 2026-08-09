@@ -30,8 +30,15 @@ CORRUPT_PNG_BASE64 = (
 
 
 class FakeResponse:
-    def __init__(self, body: bytes):
+    def __init__(
+        self,
+        body: bytes,
+        status: int = 200,
+        content_type: str = "application/json",
+    ):
         self.body = body
+        self.status = status
+        self.headers = {"Content-Type": content_type}
 
     def __enter__(self):
         return self
@@ -171,10 +178,10 @@ def test_config_rejects_unsupported_resolution_without_disclosing_key():
     assert secret not in repr(ctx.value)
 
 
-@patch("openai_image_api.urllib.request.urlopen")
-def test_generate_edit_posts_multipart_and_saves_b64_png(urlopen, tmp_path):
+@patch("openai_image_api.urllib.request.build_opener")
+def test_generate_edit_posts_multipart_and_saves_b64_png(build_opener, tmp_path):
     """Fails if a standard Images edit request is not multipart or its image is lost."""
-    urlopen.return_value = fake_png_response()
+    build_opener.return_value.open.return_value = fake_png_response()
 
     result = make_client().generate_edit(
         "keep the product exact",
@@ -183,7 +190,7 @@ def test_generate_edit_posts_multipart_and_saves_b64_png(urlopen, tmp_path):
         image_size="4:5",
     )
 
-    request = urlopen.call_args.args[0]
+    request = build_opener.return_value.open.call_args.args[0]
     body = request.data
     assert request.full_url == "https://hapiopen.cc/v1/images/edits"
     assert request.get_header("Authorization") == "Bearer test-key"
@@ -195,31 +202,74 @@ def test_generate_edit_posts_multipart_and_saves_b64_png(urlopen, tmp_path):
     assert result.local_path == str(tmp_path / "out.png")
     with Image.open(tmp_path / "out.png") as output:
         output.verify()
-    assert urlopen.call_args.kwargs == {"timeout": 12.5}
+    assert build_opener.return_value.open.call_args.kwargs == {"timeout": 12.5}
 
 
+@pytest.mark.parametrize(
+    ("status", "content_type", "body"),
+    [
+        (302, "application/json", fake_png_response().body),
+        (200, "text/html", fake_png_response().body),
+        (200, "application/problem+json", b""),
+    ],
+)
+@patch("openai_image_api.urllib.request.build_opener")
+def test_generate_edit_rejects_invalid_api_response_contract(
+    build_opener, status, content_type, body, tmp_path
+):
+    """Fails if an authenticated edit response is parsed without HTTP validation."""
+    build_opener.return_value.open.return_value = FakeResponse(body, status, content_type)
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client().generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+        )
+
+    assert ctx.value.code == "invalid_response"
+    assert "test-key" not in str(ctx.value)
+
+
+@patch("openai_image_api.urllib.request.build_opener")
 @patch("openai_image_api.urllib.request.urlopen")
-def test_generate_edit_retries_429_but_not_401(urlopen, tmp_path):
+def test_generate_edit_uses_redirect_rejecting_transport_for_authenticated_post(
+    urlopen, build_opener, tmp_path
+):
+    """Fails if the credentialed edit POST can use urllib's redirect-following opener."""
+    urlopen.side_effect = AssertionError("authenticated request must not use urlopen")
+    build_opener.return_value.open.return_value = fake_png_response()
+
+    result = make_client().generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+    )
+
+    assert result.local_path == str(tmp_path / "out.png")
+    request = build_opener.return_value.open.call_args.args[0]
+    assert request.get_header("Authorization") == "Bearer test-key"
+    assert build_opener.return_value.open.call_args.kwargs == {"timeout": 12.5}
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_generate_edit_retries_429_but_not_401(build_opener, tmp_path):
     """Fails if permanent authentication failures can create extra paid image jobs."""
     source = make_png(tmp_path / "source.png")
-    urlopen.side_effect = [
+    build_opener.return_value.open.side_effect = [
         HTTPError("https://hapiopen.cc/v1/images/edits", 429, "busy", {}, None),
         fake_png_response(),
     ]
 
     make_client().generate_edit("prompt", [source], tmp_path / "out.png")
 
-    assert urlopen.call_count == 2
+    assert build_opener.return_value.open.call_count == 2
 
-    urlopen.reset_mock()
-    urlopen.side_effect = HTTPError(
+    build_opener.return_value.open.reset_mock()
+    build_opener.return_value.open.side_effect = HTTPError(
         "https://hapiopen.cc/v1/images/edits", 401, "unauthorized", {}, None
     )
     with pytest.raises(OpenAIImageAPIError) as ctx:
         make_client().generate_edit("prompt", [source], tmp_path / "out-401.png")
 
     assert ctx.value.code == "authentication"
-    assert urlopen.call_count == 1
+    assert build_opener.return_value.open.call_count == 1
 
 
 @pytest.mark.parametrize(
@@ -257,34 +307,66 @@ def test_result_url_rejects_hostname_when_any_resolved_address_is_private(getadd
 
 @patch("openai_image_api.socket.getaddrinfo")
 @patch("openai_image_api.urllib.request.build_opener")
-@patch("openai_image_api.urllib.request.urlopen")
 def test_generate_edit_downloads_public_result_url_without_forwarding_api_key(
-    urlopen, build_opener, getaddrinfo, tmp_path
+    build_opener, getaddrinfo, tmp_path
 ):
     """Fails if a safe remote result cannot be saved or inherits API credentials."""
     getaddrinfo.return_value = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
     ]
-    urlopen.side_effect = [
+    build_opener.return_value.open.side_effect = [
         FakeResponse(json.dumps({"created": 1, "data": [
             {"url": "https://images.example.test/generated.png"}
         ]}).encode("utf-8")),
+        FakeResponse(
+            base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64), content_type="image/png"
+        ),
     ]
-    build_opener.return_value.open.return_value = FakeResponse(
-        base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
-    )
 
     result = make_client().generate_edit(
         "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
     )
 
     assert result.local_path == str(tmp_path / "out.png")
-    image_request = build_opener.return_value.open.call_args.args[0]
+    image_request = build_opener.return_value.open.call_args_list[1].args[0]
     assert image_request.full_url == "https://images.example.test/generated.png"
     assert image_request.get_header("Authorization") is None
-    assert build_opener.return_value.open.call_args.kwargs == {"timeout": 12.5}
+    assert build_opener.return_value.open.call_args_list[1].kwargs == {"timeout": 12.5}
     with Image.open(tmp_path / "out.png") as output:
         output.verify()
+
+
+@pytest.mark.parametrize(
+    ("status", "content_type", "body"),
+    [
+        (302, "image/png", base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)),
+        (200, "text/plain", base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)),
+        (200, "image/png", b""),
+    ],
+)
+@patch("openai_image_api.socket.getaddrinfo")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_generate_edit_rejects_invalid_result_download_contract(
+    build_opener, getaddrinfo, status, content_type, body, tmp_path
+):
+    """Fails if provider result bytes skip status, media-type, or empty-body checks."""
+    getaddrinfo.return_value = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+    ]
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(json.dumps({"data": [
+            {"url": "https://images.example.test/generated.png"}
+        ]}).encode("utf-8")),
+        FakeResponse(body, status, content_type),
+    ]
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client().generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+        )
+
+    assert ctx.value.code == "invalid_response"
+    assert "test-key" not in str(ctx.value)
 
 
 @patch("openai_image_api.urllib.request.urlopen")
@@ -313,13 +395,13 @@ def test_generate_edit_rejects_checksum_corrupt_input_before_network_call(urlope
     urlopen.assert_not_called()
 
 
-@patch("openai_image_api.urllib.request.urlopen")
-def test_generate_edit_does_not_replace_existing_output_with_invalid_image(urlopen, tmp_path):
+@patch("openai_image_api.urllib.request.build_opener")
+def test_generate_edit_does_not_replace_existing_output_with_invalid_image(build_opener, tmp_path):
     """Fails if an invalid gateway response overwrites a previously valid output."""
     destination = tmp_path / "out.png"
     original = b"existing-output-must-survive"
     destination.write_bytes(original)
-    urlopen.return_value = FakeResponse(json.dumps({
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
         "created": 1,
         "data": [{"b64_json": base64.b64encode(b"not an image").decode("ascii")}],
     }).encode("utf-8"))
@@ -333,14 +415,14 @@ def test_generate_edit_does_not_replace_existing_output_with_invalid_image(urlop
     assert destination.read_bytes() == original
 
 
-@patch("openai_image_api.urllib.request.urlopen")
-def test_test_edit_uses_a_real_png_fixture_and_returns_saved_image(urlopen, tmp_path):
+@patch("openai_image_api.urllib.request.build_opener")
+def test_test_edit_uses_a_real_png_fixture_and_returns_saved_image(build_opener, tmp_path):
     """Fails if the explicit compatibility probe does not use the normal edit pipeline."""
-    urlopen.return_value = fake_png_response()
+    build_opener.return_value.open.return_value = fake_png_response()
 
     result = make_client().test_edit(tmp_path)
 
     assert Path(result.local_path).parent == tmp_path
     assert Path(result.local_path).is_file()
-    request = urlopen.call_args.args[0]
+    request = build_opener.return_value.open.call_args.args[0]
     assert b'name="image[]"; filename="' in request.data

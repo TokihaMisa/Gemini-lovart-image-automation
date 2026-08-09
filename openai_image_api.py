@@ -222,7 +222,8 @@ class OpenAIImageAPI:
         request.add_header("Accept", "application/json")
         request.add_header("Authorization", f"Bearer {self.config.api_key}")
         request.add_header("Content-Type", content_type)
-        raw_response = self._request_bytes(request)
+        opener = urllib.request.build_opener(_RejectRedirectHandler())
+        raw_response = self._request_bytes(request, opener.open, "json")
         try:
             decoded = json.loads(raw_response.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -239,13 +240,19 @@ class OpenAIImageAPI:
         self,
         request: urllib.request.Request,
         open_request: Callable[..., Any] | None = None,
+        expected_content_type: str | None = None,
     ) -> bytes:
         attempts = max(1, int(self.config.max_attempts))
         request_opener = open_request or urllib.request.urlopen
         for attempt in range(1, attempts + 1):
             try:
                 with request_opener(request, timeout=self.config.timeout) as response:
-                    return response.read()
+                    response_body = response.read()
+                    if expected_content_type is not None:
+                        _validate_response_contract(
+                            response, response_body, expected_content_type
+                        )
+                    return response_body
             except (HTTPError, URLError, TimeoutError, socket.timeout, OSError, http.client.HTTPException) as exc:
                 error = _transport_error(exc)
                 if not error.retryable or attempt >= attempts:
@@ -281,7 +288,7 @@ class OpenAIImageAPI:
         request = urllib.request.Request(remote_url, method="GET")
         request.add_header("Accept", "image/*")
         opener = urllib.request.build_opener(_RejectRedirectHandler())
-        return self._request_bytes(request, opener.open)
+        return self._request_bytes(request, opener.open, "image")
 
 
 def append_aspect_instruction(prompt: str, image_size: str) -> str:
@@ -386,6 +393,31 @@ def atomic_save_validated_image(image_bytes: bytes, target: Path) -> None:
         except FileNotFoundError:
             pass
         raise OpenAIImageAPIError("save_failed", "Could not save the generated image.") from None
+
+
+def _validate_response_contract(
+    response: Any, response_body: bytes, expected_content_type: str
+) -> None:
+    status = getattr(response, "status", None)
+    headers = getattr(response, "headers", None)
+    content_type = headers.get("Content-Type") if headers is not None else None
+    if (
+        not isinstance(status, int)
+        or not 200 <= status < 300
+        or not isinstance(content_type, str)
+        or not _is_expected_content_type(content_type, expected_content_type)
+        or not response_body
+    ):
+        raise OpenAIImageAPIError(
+            "invalid_response", "GPT Image API returned an invalid response."
+        )
+
+
+def _is_expected_content_type(content_type: str, expected: str) -> bool:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if expected == "json":
+        return media_type == "application/json" or media_type.endswith("+json")
+    return media_type.startswith("image/") and len(media_type) > len("image/")
 
 
 def _validated_image_paths(image_paths: Sequence[str | Path]) -> list[Path]:
