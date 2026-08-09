@@ -23,6 +23,18 @@ from excel_reader import read_products
 from failed_retry import FailedRetryPolicy, classify_retry_failure
 from gemini_api import GeminiAPI
 from gemini_bot import GeminiBot
+from image_generation import (
+    GenerationRouting,
+    PROVIDER_LOVART,
+    PROVIDER_OPENAI_IMAGE,
+    routing_from_config,
+)
+from image_providers import (
+    LazyImageProviderRegistry,
+    LovartImageProvider,
+    OpenAIImageProvider,
+    SupportImageRequest,
+)
 from gemini_browser_session import (
     GeminiAuthenticationError,
     GeminiLoginRequiredError,
@@ -42,6 +54,7 @@ from gemini_browser_session import (
 from network_retry import RetryKind, classify_network_error
 from lovart_bot import LOVART_IMAGE_MODELS, LovartBot
 from nvidia_api import NvidiaAPI, resolve_nvidia_model
+from openai_image_api import OpenAIImageAPI, OpenAIImageAPIConfig
 from prompt_settings import get_prompt_settings, normalize_prompt_settings
 from utils import (
     _read_csv_dict_rows_with_fallback,
@@ -338,18 +351,6 @@ def _existing_project_id(status: dict) -> str:
     return status.get("project_id") or _project_id_from_url(status.get("project_url", ""))
 
 
-def _can_reuse_lovart_project(lovart, project_id: str, logger) -> bool:
-    if not project_id:
-        return False
-    if not hasattr(lovart, "validate_project"):
-        return True
-    try:
-        return bool(lovart.validate_project(project_id))
-    except Exception as exc:
-        logger.warning(f"Lovart project validation failed for {project_id}: {exc}")
-        return False
-
-
 def _existing_path(path: str | Path | None) -> str:
     if not path:
         return ""
@@ -357,25 +358,37 @@ def _existing_path(path: str | Path | None) -> str:
     return str(candidate) if candidate.exists() else ""
 
 
-def _find_support_image(product_dir: Path, status: dict, step_name: str, final_index: int) -> str:
-    """Find an already downloaded Lovart support image for resume."""
-    keys = [
-        f"lovart_{step_name}_local_path",
-        f"{step_name}_local_path",
-    ]
-    for key in keys:
-        found = _existing_path(status.get(key))
+def _find_support_image(
+    product_dir: Path,
+    status: dict,
+    step_name: str,
+    final_index: int,
+    include_lovart_legacy: bool = True,
+    provider_name: str = "",
+) -> str:
+    """Find a resumable support image, with optional Lovart legacy fallback."""
+    if include_lovart_legacy:
+        found = _existing_path(status.get(f"lovart_{step_name}_local_path"))
         if found:
             return found
 
-    final_images = status.get("lovart_final_images") or []
-    if isinstance(final_images, list) and len(final_images) > final_index:
-        found = _existing_path(final_images[final_index])
-        if found:
-            return found
+    generic_path = _existing_path(status.get(f"{step_name}_local_path"))
+    saved_provider = str(status.get(f"{step_name}_provider") or "")
+    if generic_path and (
+        saved_provider == provider_name
+        or include_lovart_legacy and not saved_provider
+    ):
+        return generic_path
+
+    if include_lovart_legacy:
+        final_images = status.get("lovart_final_images") or []
+        if isinstance(final_images, list) and len(final_images) > final_index:
+            found = _existing_path(final_images[final_index])
+            if found:
+                return found
 
     step_dir = product_dir / "lovart_steps" / step_name
-    if step_dir.exists():
+    if include_lovart_legacy and step_dir.exists():
         image_exts = {".png", ".jpg", ".jpeg", ".webp"}
         candidates = [
             path for path in step_dir.iterdir()
@@ -386,6 +399,144 @@ def _find_support_image(product_dir: Path, status: dict, step_name: str, final_i
             return str(candidates[0])
 
     return ""
+
+
+class _SupportImageGenerationError(RuntimeError):
+    def __init__(self, step_name: str, result) -> None:
+        self.step_name = step_name
+        self.result = result
+        message = result.error or f"{step_name} support image generation failed"
+        super().__init__(message)
+
+
+def _default_lovart_routing(prompt_settings) -> GenerationRouting:
+    settings = normalize_prompt_settings(prompt_settings)
+    return GenerationRouting(
+        support_provider=PROVIDER_LOVART,
+        detail_provider=PROVIDER_LOVART,
+        detail_page_count=settings["detail_page_count"],
+    )
+
+
+def _build_image_provider_registry(config, logger, lovart=None):
+    def build_lovart_provider():
+        bot = lovart or LovartBot(config, logger)
+        runtime = config.get("_runtime", {})
+        if lovart is None and isinstance(runtime, dict) and "lovart_fast_mode" in runtime:
+            bot.set_fast_mode(bool(runtime["lovart_fast_mode"]))
+        return LovartImageProvider(bot, logger=logger)
+
+    def build_openai_provider():
+        image_config = config.get("openai_image", {})
+        api_key = env_or_config(image_config, "api_key", "OPENAI_IMAGE_API_KEY")
+        api_config = OpenAIImageAPIConfig.from_config(config, api_key=api_key)
+        return OpenAIImageProvider(OpenAIImageAPI(api_config, logger=logger), logger=logger)
+
+    return LazyImageProviderRegistry(build_lovart_provider, build_openai_provider)
+
+
+def _legacy_lovart_registry(lovart, logger):
+    if lovart is None:
+        raise ValueError("A Lovart client is required for legacy image-provider routing")
+    return LazyImageProviderRegistry(
+        lambda: LovartImageProvider(lovart, logger=logger),
+        lambda: (_ for _ in ()).throw(
+            RuntimeError("OpenAI image provider requires an explicit image registry")
+        ),
+    )
+
+
+def _generate_support_images(
+    product,
+    product_dir,
+    provider,
+    prompt_settings,
+    existing_status,
+) -> tuple[str, str]:
+    product_dir = Path(product_dir)
+    image_roles = split_image_roles(product.image_paths)
+    product_image = image_roles["product_image"]
+    restart = False
+    prepare = getattr(provider, "prepare_support_images", None)
+    if callable(prepare):
+        restart = bool(prepare(product, product_dir, existing_status))
+    is_lovart_provider = isinstance(provider, LovartImageProvider)
+    if is_lovart_provider:
+        provider_name = PROVIDER_LOVART
+    elif isinstance(provider, OpenAIImageProvider):
+        provider_name = PROVIDER_OPENAI_IMAGE
+    else:
+        provider_name = str(getattr(provider, "name", "") or "")
+
+    def generate(step_name: str, prompt: str, image_paths: tuple[str, ...], final_index: int) -> str:
+        status = read_status(product_dir)
+        existing_path = _find_support_image(
+            product_dir,
+            status,
+            step_name,
+            final_index,
+            include_lovart_legacy=is_lovart_provider and not restart,
+            provider_name=provider_name,
+        )
+        if existing_path:
+            update_status(
+                product_dir,
+                f"{step_name}_ready",
+                **{
+                    f"{step_name}_local_path": existing_path,
+                    f"{step_name}_provider": provider_name,
+                },
+            )
+            return existing_path
+        result = provider.generate_support_image(
+            SupportImageRequest(
+                product_id=product.id,
+                product_dir=product_dir,
+                step_name=step_name,
+                prompt=prompt,
+                image_paths=image_paths,
+                image_size=getattr(product, "image_size", ""),
+                product_name_cn=product.name_cn,
+                language=product.language,
+                selling_points=product.selling_points,
+                confirmation_advisor=getattr(provider, "confirmation_advisor", None),
+            )
+        )
+        if not result.succeeded or not result.local_paths:
+            raise _SupportImageGenerationError(step_name, result)
+        local_path = result.local_paths[0]
+        update_status(
+            product_dir,
+            f"{step_name}_ready",
+            **{
+                f"{step_name}_local_path": local_path,
+                f"{step_name}_provider": provider_name,
+            },
+        )
+        return local_path
+
+    white_image = generate(
+        "white_bg",
+        build_white_background_prompt(
+            getattr(product, "image_size", ""),
+            prompt_settings=prompt_settings,
+        ),
+        (product_image,),
+        0,
+    )
+    scene_image = generate(
+        "scene",
+        build_scene_prompt(
+            getattr(product, "image_size", ""),
+            prompt_settings=prompt_settings,
+        ),
+        (white_image,),
+        1,
+    )
+    complete = getattr(provider, "complete_support_images", None)
+    if callable(complete):
+        complete(product_dir)
+    return white_image, scene_image
 
 
 def _backfill_result_project_urls(results_path: str | Path = None) -> int:
@@ -468,8 +619,23 @@ def _dry_run_products(products, logger, run_dir, output_dir=None):
     return 0, 0, len(products), 0
 
 
-def _process_products_once(products, gemini, lovart, logger, run_dir, resume=True, prompt_settings=None):
+def _process_products_once(
+    products,
+    gemini,
+    lovart,
+    logger,
+    run_dir,
+    resume=True,
+    prompt_settings=None,
+    image_registry=None,
+    routing=None,
+):
     prompt_settings = normalize_prompt_settings(prompt_settings)
+    registry = image_registry or _legacy_lovart_registry(lovart, logger)
+    effective_routing = routing or _default_lovart_routing(prompt_settings)
+    support_provider = registry.get(effective_routing.support_provider)
+    if hasattr(support_provider, "confirmation_advisor"):
+        support_provider.confirmation_advisor = gemini
     console = Console()
     success = fail = skipped = still_running = 0
     summary_rows = []
@@ -549,164 +715,57 @@ def _process_products_once(products, gemini, lovart, logger, run_dir, resume=Tru
                 reference_images_are_product=getattr(product, "reference_images_are_product", False),
             )
 
-            status = read_status(product_dir)
-            previous_lovart_project_id = _existing_project_id(status)
-            restart_lovart_project = False
-            if previous_lovart_project_id and _can_reuse_lovart_project(lovart, previous_lovart_project_id, logger):
-                lovart_project_id = previous_lovart_project_id
-                update_status(
+            try:
+                white_image, scene_image = _generate_support_images(
+                    product,
                     product_dir,
-                    "lovart_project_reused",
-                    project_id=lovart_project_id,
-                    project_url=_lovart_project_url(lovart_project_id),
+                    support_provider,
+                    prompt_settings,
+                    read_status(product_dir),
                 )
-            else:
-                if previous_lovart_project_id:
-                    restart_lovart_project = True
+            except _SupportImageGenerationError as support_error:
+                raw_result = support_error.result.raw_result or {}
+                final_status = raw_result.get("final_status")
+                status = read_status(product_dir)
+                project_url = _project_url_from_status(status)
+                label = "white-background" if support_error.step_name == "white_bg" else "scene"
+                if final_status == "timeout":
+                    reason = f"Lovart {label} image still running after local wait timeout"
                     logger.warning(
-                        f"Lovart project {previous_lovart_project_id} for '{product.id}' is invalid; restarting product"
+                        f"STILL RUNNING [{idx}/{len(products)}] {product.id} {support_error.step_name}"
                     )
-                    update_status(
-                        product_dir,
-                        "lovart_project_invalid",
-                        previous_project_id=previous_lovart_project_id,
-                        previous_project_url=_lovart_project_url(previous_lovart_project_id),
+                    still_running += 1
+                    outcome = "lovart_still_running"
+                elif final_status == "pending_confirmation":
+                    reason = support_error.result.error or f"Lovart {label} image needs credit confirmation"
+                    logger.warning(
+                        f"NEEDS MANUAL ACTION [{idx}/{len(products)}] "
+                        f"{product.id} {support_error.step_name}"
                     )
-                lovart_project_id = lovart.create_project(product.id, product.name_cn)
-                update_status(
-                    product_dir,
-                    "lovart_project_created",
-                    project_id=lovart_project_id,
-                    project_url=_lovart_project_url(lovart_project_id),
-                )
+                    console.print(Panel(
+                        f"[bold yellow]Manual Action Required for {product.id} "
+                        f"({label})[/bold yellow]\n{reason}\nURL: {project_url}",
+                        border_style="yellow",
+                    ))
+                    fail += 1
+                    outcome = "needs_manual_action"
+                else:
+                    raise
+                _record_failure(product, outcome, reason, project_url)
+                summary_rows.append({
+                    "product_id": product.id,
+                    "product_name": product.name_cn,
+                    "status": outcome,
+                    "project_url": project_url,
+                    "gemini_chars": "",
+                    "artifact_count": "",
+                    "duration_seconds": round(time.time() - started, 2),
+                    "error": reason,
+                })
+                continue
 
             status = read_status(product_dir)
-            white_image = "" if restart_lovart_project else _find_support_image(product_dir, status, "white_bg", 0)
-            if white_image:
-                logger.info(f"Lovart API: reusing white_bg image for '{product.id}'")
-            else:
-                white_result = lovart.create_support_image(
-                    product_id=product.id,
-                    step_name="white_bg",
-                    prompt=build_white_background_prompt(
-                        getattr(product, "image_size", ""),
-                        prompt_settings=prompt_settings,
-                    ),
-                    image_paths=[product_image],
-                    project_id=lovart_project_id,
-                    confirmation_advisor=gemini,
-                    product_name_cn=product.name_cn,
-                    language=product.language,
-                    selling_points=product.selling_points,
-                )
-                white_image = (white_result or {}).get("local_path", "")
-                if not white_image:
-                    if white_result and white_result.get("final_status") == "timeout":
-                        status = read_status(product_dir)
-                        project_url = _project_url_from_status(status)
-                        reason = "Lovart white-background image still running after local wait timeout"
-                        logger.warning(f"STILL RUNNING [{idx}/{len(products)}] {product.id} white_bg")
-                        still_running += 1
-                        _record_failure(product, "lovart_still_running", reason, project_url)
-                        summary_rows.append({
-                            "product_id": product.id,
-                            "product_name": product.name_cn,
-                            "status": "lovart_still_running",
-                            "project_url": project_url,
-                            "gemini_chars": "",
-                            "artifact_count": "",
-                            "duration_seconds": round(time.time() - started, 2),
-                            "error": reason,
-                        })
-                        continue
-                    if white_result and white_result.get("final_status") == "pending_confirmation":
-                        status = read_status(product_dir)
-                        project_url = _project_url_from_status(status)
-                        reason = white_result.get("warning") or "Lovart white-background image needs credit confirmation"
-                        logger.warning(f"NEEDS MANUAL ACTION [{idx}/{len(products)}] {product.id} white_bg")
-                        console.print(Panel(
-                            f"[bold yellow]Manual Action Required for {product.id} (White BG)[/bold yellow]\n{reason}\nURL: {project_url}",
-                            border_style="yellow"
-                        ))
-                        fail += 1
-                        _record_failure(product, "needs_manual_action", reason, project_url)
-                        summary_rows.append({
-                            "product_id": product.id,
-                            "product_name": product.name_cn,
-                            "status": "needs_manual_action",
-                            "project_url": project_url,
-                            "gemini_chars": "",
-                            "artifact_count": "",
-                            "duration_seconds": round(time.time() - started, 2),
-                            "error": reason,
-                        })
-                        continue
-                    error_msg = (white_result or {}).get("warning") or (white_result or {}).get("error") or "Unknown API error"
-                    raise RuntimeError(f"Lovart API 失败: {error_msg}")
-
-            status = read_status(product_dir)
-            scene_image = "" if restart_lovart_project else _find_support_image(product_dir, status, "scene", 1)
-            if scene_image:
-                logger.info(f"Lovart API: reusing scene image for '{product.id}'")
-            else:
-                scene_result = lovart.create_support_image(
-                    product_id=product.id,
-                    step_name="scene",
-                    prompt=build_scene_prompt(
-                        getattr(product, "image_size", ""),
-                        prompt_settings=prompt_settings,
-                    ),
-                    image_paths=[white_image],
-                    project_id=lovart_project_id,
-                    confirmation_advisor=gemini,
-                    product_name_cn=product.name_cn,
-                    language=product.language,
-                    selling_points=product.selling_points,
-                )
-                scene_image = (scene_result or {}).get("local_path", "")
-                if not scene_image:
-                    if scene_result and scene_result.get("final_status") == "timeout":
-                        status = read_status(product_dir)
-                        project_url = _project_url_from_status(status)
-                        reason = "Lovart scene image still running after local wait timeout"
-                        logger.warning(f"STILL RUNNING [{idx}/{len(products)}] {product.id} scene")
-                        still_running += 1
-                        _record_failure(product, "lovart_still_running", reason, project_url)
-                        summary_rows.append({
-                            "product_id": product.id,
-                            "product_name": product.name_cn,
-                            "status": "lovart_still_running",
-                            "project_url": project_url,
-                            "gemini_chars": "",
-                            "artifact_count": "",
-                            "duration_seconds": round(time.time() - started, 2),
-                            "error": reason,
-                        })
-                        continue
-                    if scene_result and scene_result.get("final_status") == "pending_confirmation":
-                        status = read_status(product_dir)
-                        project_url = _project_url_from_status(status)
-                        reason = scene_result.get("warning") or "Lovart scene image needs credit confirmation"
-                        logger.warning(f"NEEDS MANUAL ACTION [{idx}/{len(products)}] {product.id} scene")
-                        console.print(Panel(
-                            f"[bold yellow]Manual Action Required for {product.id} (Scene)[/bold yellow]\n{reason}\nURL: {project_url}",
-                            border_style="yellow"
-                        ))
-                        fail += 1
-                        _record_failure(product, "needs_manual_action", reason, project_url)
-                        summary_rows.append({
-                            "product_id": product.id,
-                            "product_name": product.name_cn,
-                            "status": "needs_manual_action",
-                            "project_url": project_url,
-                            "gemini_chars": "",
-                            "artifact_count": "",
-                            "duration_seconds": round(time.time() - started, 2),
-                            "error": reason,
-                        })
-                        continue
-                    error_msg = (scene_result or {}).get("warning") or (scene_result or {}).get("error") or "Unknown API error"
-                    raise RuntimeError(f"Lovart API 失败: {error_msg}")
+            lovart_project_id = _existing_project_id(status)
 
             gemini_images = [white_image, scene_image]
             if reference_sheet:
@@ -724,16 +783,23 @@ def _process_products_once(products, gemini, lovart, logger, run_dir, resume=Tru
                 has_dimension_image=bool(dimension_image),
                 reference_images_are_product=getattr(product, "reference_images_are_product", False),
             )
-            update_status(
-                product_dir,
-                "lovart_final_images_ready",
-                lovart_final_image_count=len(lovart_images),
-                lovart_final_images=lovart_images,
-                lovart_white_bg_local_path=white_image,
-                lovart_scene_local_path=scene_image,
-                project_id=lovart_project_id,
-                project_url=_lovart_project_url(lovart_project_id),
-            )
+            support_fields = {
+                "white_bg_local_path": white_image,
+                "scene_local_path": scene_image,
+            }
+            if effective_routing.support_provider == PROVIDER_LOVART:
+                support_fields.update(
+                    lovart_final_image_count=len(lovart_images),
+                    lovart_final_images=lovart_images,
+                    lovart_white_bg_local_path=white_image,
+                    lovart_scene_local_path=scene_image,
+                    project_id=lovart_project_id,
+                    project_url=_lovart_project_url(lovart_project_id),
+                )
+                support_stage = "lovart_final_images_ready"
+            else:
+                support_stage = "support_images_ready"
+            update_status(product_dir, support_stage, **support_fields)
 
             prompt = gemini.generate_prompt(
                 product_id=product.id,
@@ -898,7 +964,17 @@ def _wait_before_failed_retry(delay: float) -> bool:
     return False
 
 
-def _process_products(products, gemini, lovart, logger, run_dir, resume=True, prompt_settings=None):
+def _process_products(
+    products,
+    gemini,
+    lovart,
+    logger,
+    run_dir,
+    resume=True,
+    prompt_settings=None,
+    image_registry=None,
+    routing=None,
+):
     policy = getattr(lovart, "failed_retry_policy", FailedRetryPolicy(mode="off"))
     if not isinstance(policy, FailedRetryPolicy) or not policy.enabled:
         return _process_products_once(
@@ -909,6 +985,8 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True, pr
             run_dir,
             resume=resume,
             prompt_settings=prompt_settings,
+            image_registry=image_registry,
+            routing=routing,
         )
 
     product_by_id = {product.id: product for product in products}
@@ -926,6 +1004,8 @@ def _process_products(products, gemini, lovart, logger, run_dir, resume=True, pr
             run_dir,
             resume=resume if completed_retry_rounds == 0 else True,
             prompt_settings=prompt_settings,
+            image_registry=image_registry,
+            routing=routing,
         )
         round_rows = _read_run_summary(run_dir)
         for row in round_rows:
@@ -1043,6 +1123,8 @@ def _run_browser_flow(
     wait_for_ready=True,
     prompt_settings=None,
     config_path: str | Path = Path("config.yaml"),
+    image_registry=None,
+    routing=None,
 ):
     paths = login_runtime_paths(config_path)
     owner = acquire_login_helper_owner(paths)
@@ -1062,6 +1144,8 @@ def _run_browser_flow(
             wait_for_ready=wait_for_ready,
             prompt_settings=prompt_settings,
             config_path=config_path,
+            image_registry=image_registry,
+            routing=routing,
         )
     finally:
         release_login_helper_owner(paths, owner)
@@ -1077,6 +1161,8 @@ def _run_owned_browser_flow(
     wait_for_ready=True,
     prompt_settings=None,
     config_path: str | Path = Path("config.yaml"),
+    image_registry=None,
+    routing=None,
 ):
     browser_cfg = config["browser"]
     interactive_console = wait_for_ready and not _is_ui_mode()
@@ -1137,6 +1223,8 @@ def _run_owned_browser_flow(
                 run_dir,
                 resume=resume,
                 prompt_settings=prompt_settings,
+                image_registry=image_registry,
+                routing=routing,
             )
         finally:
             context.close()
@@ -1163,21 +1251,25 @@ def main(argv=None):
     if args.generate_template:
         _generate_excel_template()
 
-    # Auto-diagnostic: Check required .env keys before doing anything else
-    try:
-        from setup_wizard import missing_or_placeholder_env_keys
-        missing_keys = missing_or_placeholder_env_keys(Path(".env"))
-        if missing_keys:
-            print("\n[!] Auto-Diagnostic Failed: Required environment variables are missing or invalid:")
-            for key in missing_keys:
-                print(f"  - {key}")
-            print("\nPlease fill them in `.env` before running.")
-            sys.exit(1)
-    except ImportError:
-        pass
-
     config = load_config(args.config)
     prompt_settings = get_prompt_settings(config)
+    routing = routing_from_config(config, prompt_settings)
+    uses_lovart = PROVIDER_LOVART in {
+        routing.support_provider,
+        routing.detail_provider,
+    }
+    if uses_lovart:
+        try:
+            from setup_wizard import missing_or_placeholder_env_keys
+            missing_keys = missing_or_placeholder_env_keys(Path(".env"))
+            if missing_keys:
+                print("\n[!] Auto-Diagnostic Failed: Required environment variables are missing or invalid:")
+                for key in missing_keys:
+                    print(f"  - {key}")
+                print("\nPlease fill them in `.env` before running.")
+                sys.exit(1)
+        except ImportError:
+            pass
     logger = setup_logging()
     run_dir = create_run_dir()
     logger.info("Image Automation started")
@@ -1218,18 +1310,24 @@ def main(argv=None):
         return
 
     prompt_source = _choose_prompt_source(config, args)
-    fast_mode = _resolve_lovart_mode(args.lovart)
-    _choose_lovart_tool_options(config, args)
+    if uses_lovart:
+        fast_mode = _resolve_lovart_mode(args.lovart)
+        _choose_lovart_tool_options(config, args)
+        config.setdefault("_runtime", {})["lovart_fast_mode"] = fast_mode
 
-    lovart = LovartBot(config, logger)
-    lovart.set_fast_mode(fast_mode)
-    logger.info(f"Lovart mode: {'fast' if fast_mode else 'unlimited'}")
+    image_registry = _build_image_provider_registry(config, logger)
+    lovart = None
+    if uses_lovart:
+        lovart = image_registry.get(PROVIDER_LOVART).bot
+        logger.info(f"Lovart mode: {'fast' if fast_mode else 'unlimited'}")
 
     signal.signal(signal.SIGINT, _on_sigint)
 
     if prompt_source == "gemini_api":
         gemini = _build_gemini_api(config, logger, prompt_settings=prompt_settings)
-        if (args.prompt_source == "ask" or args.lovart == "ask") and not _is_ui_mode():
+        if (
+            args.prompt_source == "ask" or uses_lovart and args.lovart == "ask"
+        ) and not _is_ui_mode():
             input("\nReady. Press Enter to start...")
         success, fail, skipped, still_running = _process_products(
             products,
@@ -1239,10 +1337,14 @@ def main(argv=None):
             run_dir,
             resume=args.resume,
             prompt_settings=prompt_settings,
+            image_registry=image_registry,
+            routing=routing,
         )
     elif prompt_source == "nvidia":
         prompt_client = _build_nvidia_api(config, logger, prompt_settings=prompt_settings)
-        if (args.prompt_source == "ask" or args.lovart == "ask") and not _is_ui_mode():
+        if (
+            args.prompt_source == "ask" or uses_lovart and args.lovart == "ask"
+        ) and not _is_ui_mode():
             input("\nReady. Press Enter to start...")
         success, fail, skipped, still_running = _process_products(
             products,
@@ -1252,6 +1354,8 @@ def main(argv=None):
             run_dir,
             resume=args.resume,
             prompt_settings=prompt_settings,
+            image_registry=image_registry,
+            routing=routing,
         )
     else:
         success, fail, skipped, still_running = _run_browser_flow(
@@ -1261,9 +1365,13 @@ def main(argv=None):
             logger,
             run_dir,
             resume=args.resume,
-            wait_for_ready=args.prompt_source == "ask" or args.lovart == "ask",
+            wait_for_ready=(
+                args.prompt_source == "ask" or uses_lovart and args.lovart == "ask"
+            ),
             prompt_settings=prompt_settings,
             config_path=args.config,
+            image_registry=image_registry,
+            routing=routing,
         )
 
     print(

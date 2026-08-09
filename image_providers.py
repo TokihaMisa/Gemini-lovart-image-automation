@@ -28,6 +28,10 @@ class SupportImageRequest:
     prompt: str
     image_paths: tuple[str, ...]
     image_size: str = ""
+    product_name_cn: str = ""
+    language: str = ""
+    selling_points: str = ""
+    confirmation_advisor: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -174,17 +178,105 @@ class OpenAIImageProvider:
 class LovartImageProvider:
     """Thin compatibility adapter that leaves Lovart's confirmation flow untouched."""
 
-    def __init__(self, bot: Any) -> None:
+    def __init__(self, bot: Any, logger: Any | None = None) -> None:
         self.bot = bot
+        self.logger = logger
+        self.confirmation_advisor: Any | None = None
+        self._project_ids: dict[str, str] = {}
+
+    def prepare_support_images(
+        self,
+        product: Any,
+        product_dir: str | Path,
+        existing_status: Mapping[str, object],
+    ) -> bool:
+        """Resolve a reusable Lovart project only after Lovart support is selected."""
+        previous_project_id = _existing_project_id(existing_status)
+        restart = bool(existing_status.get("lovart_support_resume_invalidated"))
+        if previous_project_id and self._can_reuse_project(previous_project_id):
+            project_id = previous_project_id
+            update_status(
+                product_dir,
+                "lovart_project_reused",
+                project_id=project_id,
+                project_url=_lovart_project_url(project_id),
+            )
+        else:
+            if previous_project_id:
+                restart = True
+                if self.logger:
+                    self.logger.warning(
+                        f"Lovart project {previous_project_id} for '{product.id}' is invalid; "
+                        "restarting product"
+                    )
+                update_status(
+                    product_dir,
+                    "lovart_project_invalid",
+                    previous_project_id=previous_project_id,
+                    previous_project_url=_lovart_project_url(previous_project_id),
+                    white_bg_local_path="",
+                    scene_local_path="",
+                    white_bg_provider="",
+                    scene_provider="",
+                    lovart_white_bg_local_path="",
+                    lovart_scene_local_path="",
+                    lovart_final_images=[],
+                    lovart_support_resume_invalidated=True,
+                )
+            project_id = self.bot.create_project(product.id, product.name_cn)
+            update_status(
+                product_dir,
+                "lovart_project_created",
+                project_id=project_id,
+                project_url=_lovart_project_url(project_id),
+            )
+        self._project_ids[str(product.id)] = str(project_id)
+        return restart
+
+    def complete_support_images(self, product_dir: str | Path) -> None:
+        update_status(
+            product_dir,
+            "lovart_support_images_ready",
+            lovart_support_resume_invalidated=False,
+        )
+
+    def _can_reuse_project(self, project_id: str) -> bool:
+        if not hasattr(self.bot, "validate_project"):
+            return True
+        try:
+            return bool(self.bot.validate_project(project_id))
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"Lovart project validation failed for {project_id}: {exc}")
+            return False
 
     def generate_support_image(self, request: SupportImageRequest) -> ImageProviderResult:
-        raw = self.bot.create_support_image(
+        kwargs = dict(
             product_id=request.product_id,
             step_name=request.step_name,
             prompt=request.prompt,
             image_paths=list(request.image_paths),
         )
-        return _lovart_result(raw, request.product_dir, 1)
+        project_id = self._project_ids.get(request.product_id, "")
+        if project_id:
+            kwargs.update(
+                project_id=project_id,
+                confirmation_advisor=request.confirmation_advisor,
+                product_name_cn=request.product_name_cn,
+                language=request.language,
+                selling_points=request.selling_points,
+            )
+        raw = self.bot.create_support_image(**kwargs)
+        result = _lovart_result(raw, request.product_dir, 1)
+        if result.succeeded and result.local_paths:
+            local_path = result.local_paths[0]
+            update_status(
+                request.product_dir,
+                f"lovart_{request.step_name}_done",
+                local_path=local_path,
+                **{f"lovart_{request.step_name}_local_path": local_path},
+            )
+        return result
 
     def generate_detail_set(self, request: DetailSetRequest) -> ImageProviderResult:
         prompt = "\n\n".join(screen.prompt for screen in sorted(request.screens, key=lambda item: item.index))
@@ -238,8 +330,16 @@ def _is_valid_image(value: object) -> bool:
 
 def _lovart_result(raw_result: object, product_dir: Path, completed_count: int) -> ImageProviderResult:
     raw = raw_result if isinstance(raw_result, Mapping) else {}
-    succeeded = bool(raw.get("generation_succeeded"))
-    local_paths = _lovart_local_paths(raw, product_dir)
+    generation_succeeded = raw.get("generation_succeeded")
+    local_paths = _lovart_local_paths(
+        raw,
+        product_dir,
+        allow_legacy_status=generation_succeeded is True,
+    )
+    succeeded = bool(
+        generation_succeeded is True
+        or generation_succeeded is None and local_paths
+    )
     error = str(raw.get("warning") or raw.get("error") or "")
     return ImageProviderResult(
         succeeded=succeeded,
@@ -251,7 +351,11 @@ def _lovart_result(raw_result: object, product_dir: Path, completed_count: int) 
     )
 
 
-def _lovart_local_paths(raw: Mapping[str, object], product_dir: Path) -> tuple[str, ...]:
+def _lovart_local_paths(
+    raw: Mapping[str, object],
+    product_dir: Path,
+    allow_legacy_status: bool = True,
+) -> tuple[str, ...]:
     paths: list[str] = []
     for key in ("local_path", "local_paths"):
         value = raw.get(key)
@@ -259,8 +363,23 @@ def _lovart_local_paths(raw: Mapping[str, object], product_dir: Path) -> tuple[s
             paths.append(value)
         elif isinstance(value, (list, tuple)):
             paths.extend(str(item) for item in value if isinstance(item, (str, Path)) and str(item))
-    if not paths:
+    if not paths and allow_legacy_status:
         legacy_paths = read_status(product_dir).get("lovart_final_images", [])
         if isinstance(legacy_paths, (list, tuple)):
             paths.extend(str(item) for item in legacy_paths if isinstance(item, (str, Path)) and str(item))
     return tuple(paths)
+
+
+def _lovart_project_url(project_id: str = "") -> str:
+    return f"https://www.lovart.ai/canvas?projectId={project_id}" if project_id else ""
+
+
+def _existing_project_id(status: Mapping[str, object]) -> str:
+    project_id = str(status.get("project_id") or "").strip()
+    if project_id:
+        return project_id
+    project_url = str(status.get("project_url") or "")
+    marker = "projectId="
+    if marker not in project_url:
+        return ""
+    return project_url.split(marker, 1)[1].split("&", 1)[0].strip()

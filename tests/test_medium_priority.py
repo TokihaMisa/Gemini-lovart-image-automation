@@ -2130,13 +2130,17 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 product_dir.mkdir(parents=True)
                 (product_dir / "image_1.png").write_bytes(b"product")
 
-                result = _process_products([Product()], Gemini(), Lovart(), Logger(), Path("runs") / "run")
+                with patch("main.Console") as console:
+                    result = _process_products(
+                        [Product()], Gemini(), Lovart(), Logger(), Path("runs") / "run"
+                    )
                 with (Path("runs") / "run" / "summary.csv").open(encoding="utf-8", newline="") as fh:
                     rows = list(csv.DictReader(fh))
             finally:
                 os.chdir(cwd)
 
         self.assertEqual(result, (0, 1, 0, 0))
+        self.assertEqual(console.return_value.print.call_count, 2)
         self.assertEqual(rows[0]["status"], "needs_manual_action")
         self.assertIn("credit confirmation", rows[0]["error"])
 
