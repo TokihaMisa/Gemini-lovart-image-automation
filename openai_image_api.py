@@ -311,7 +311,12 @@ class OpenAIImageAPI:
         if not isinstance(remote_url, str) or not remote_url:
             raise OpenAIImageAPIError("invalid_response", "GPT Image API returned no image data.")
         resolved_url = validate_remote_image_url(remote_url)
-        return _download_resolved_image(resolved_url, self.config.timeout)
+        return _download_resolved_image(
+            resolved_url,
+            self.config.timeout,
+            self.config.max_attempts,
+            self._notice_retry,
+        )
 
 
 def append_aspect_instruction(prompt: str, image_size: str) -> str:
@@ -568,12 +573,17 @@ class _PinnedHTTPSConnection(_PinnedHTTPConnection):
 
 
 def _download_resolved_image(
-    resolved_url: _ResolvedResultURL, timeout: float
+    resolved_url: _ResolvedResultURL,
+    timeout: float,
+    max_attempts: int,
+    on_retry: Callable[[int, int], None],
 ) -> bytes:
-    """Fetch once from the prevalidated address set without another resolution."""
+    """Retry only the GET while reusing the original validated address snapshot."""
     tls_context = ssl.create_default_context() if resolved_url.scheme == "https" else None
-    last_error: OpenAIImageAPIError | None = None
-    for address in resolved_url.addresses:
+    attempts = max(1, int(max_attempts))
+    for attempt in range(1, attempts + 1):
+        address = resolved_url.addresses[(attempt - 1) % len(resolved_url.addresses)]
+        failure: OpenAIImageAPIError | None = None
         response: http.client.HTTPResponse | None = None
         if tls_context is None:
             connection: http.client.HTTPConnection = _PinnedHTTPConnection(
@@ -602,21 +612,22 @@ def _download_resolved_image(
             )
             response = connection.getresponse()
             response_body = response.read()
-            _validate_response_contract(response, response_body, "image")
+            _validate_result_download_contract(response, response_body)
             return response_body
-        except OpenAIImageAPIError:
-            raise
+        except OpenAIImageAPIError as exc:
+            failure = exc
         except (TimeoutError, socket.timeout, OSError, http.client.HTTPException) as exc:
-            last_error = _transport_error(exc)
-            if last_error.code == "tls_certificate":
-                raise last_error from None
+            failure = _transport_error(exc)
         finally:
             if response is not None:
                 response.close()
             connection.close()
-    if last_error is not None:
-        raise last_error from None
-    raise OpenAIImageAPIError("network", "Could not reach GPT Image API.")
+        if failure is None:
+            raise RuntimeError("result image attempt ended without a result")
+        if not failure.retryable or attempt >= attempts:
+            raise failure from None
+        on_retry(attempt, attempts)
+    raise RuntimeError("result image retry loop exhausted")
 
 
 def atomic_save_validated_image(image_bytes: bytes, target: Path) -> None:
@@ -642,6 +653,25 @@ def atomic_save_validated_image(image_bytes: bytes, target: Path) -> None:
         except FileNotFoundError:
             pass
         raise OpenAIImageAPIError("save_failed", "Could not save the generated image.") from None
+
+
+def _validate_result_download_contract(response: Any, response_body: bytes) -> None:
+    status = getattr(response, "status", None)
+    if status == 429:
+        raise OpenAIImageAPIError(
+            "rate_limit",
+            "GPT Image API is rate limiting requests.",
+            status,
+            True,
+        )
+    if isinstance(status, int) and 500 <= status < 600:
+        raise OpenAIImageAPIError(
+            "server_error",
+            "GPT Image API is temporarily unavailable.",
+            status,
+            True,
+        )
+    _validate_response_contract(response, response_body, "image")
 
 
 def _validate_response_contract(

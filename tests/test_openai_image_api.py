@@ -149,15 +149,18 @@ def fake_png_response() -> FakeResponse:
     }).encode("utf-8"))
 
 
-def make_client(**overrides) -> OpenAIImageAPI:
+def make_client(*, sleep=None, **overrides) -> OpenAIImageAPI:
+    settings = {
+        "api_key": "test-key",
+        "base_url": "https://hapiopen.cc/v1",
+        "timeout": 12.5,
+        "retry_delays": (0.0,),
+    }
+    settings.update(overrides)
     config = OpenAIImageAPIConfig(
-        api_key="test-key",
-        base_url="https://hapiopen.cc/v1",
-        timeout=12.5,
-        retry_delays=(0.0,),
-        **overrides,
+        **settings,
     )
-    return OpenAIImageAPI(config, sleep=lambda _delay: None)
+    return OpenAIImageAPI(config, sleep=sleep or (lambda _delay: None))
 
 
 @pytest.mark.parametrize(
@@ -542,6 +545,7 @@ def test_result_download_tries_only_prevalidated_addresses_and_closes_failures(
     build_opener, getaddrinfo, socket_constructor, create_default_context, tmp_path
 ):
     """Address fallback stays inside one DNS snapshot and cleans each connection."""
+    sleep_calls = []
     png = base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
     first_socket = FakeConnectedSocket(
         b"", "93.184.216.34", ConnectionRefusedError("first address unavailable")
@@ -559,15 +563,197 @@ def test_result_download_tries_only_prevalidated_addresses_and_closes_failures(
         "data": [{"url": "https://images.example.test/generated.png"}],
     }).encode("utf-8"))
 
-    make_client().generate_edit(
+    make_client(
+        sleep=sleep_calls.append,
+        max_attempts=3,
+        retry_delays=(0.25, 0.5),
+    ).generate_edit(
         "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
     )
 
     assert getaddrinfo.call_count == 1
+    assert build_opener.return_value.open.call_count == 1
+    assert sleep_calls == [0.25]
     assert first_socket.connected_to == ("93.184.216.34", 443)
     assert second_socket.connected_to == ("93.184.216.35", 443)
     assert first_socket.was_closed
     assert second_socket.was_closed
+
+
+@patch("openai_image_api.ssl.create_default_context")
+@patch("openai_image_api.socket.socket")
+@patch("openai_image_api.socket.getaddrinfo")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_result_download_retries_timeout_without_repeating_edit_or_dns(
+    build_opener, getaddrinfo, socket_constructor, create_default_context, tmp_path
+):
+    """A transient pinned connect timeout retries only the result GET."""
+    sleep_calls = []
+    png = base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
+    timed_out_socket = FakeConnectedSocket(
+        b"", "93.184.216.34", socket.timeout("injected timeout")
+    )
+    successful_socket = FakeConnectedSocket(
+        raw_http_response(png), "93.184.216.34"
+    )
+    socket_constructor.side_effect = FakeSocketFactory(
+        [timed_out_socket, successful_socket]
+    )
+    create_default_context.return_value = FakeDefaultSSLContext()
+    getaddrinfo.return_value = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+    ]
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
+        "data": [{"url": "https://images.example.test/generated.png"}],
+    }).encode("utf-8"))
+
+    make_client(
+        sleep=sleep_calls.append,
+        max_attempts=3,
+        retry_delays=(0.25, 0.5),
+    ).generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+    )
+
+    assert build_opener.return_value.open.call_count == 1
+    assert getaddrinfo.call_count == 1
+    assert sleep_calls == [0.25]
+    assert timed_out_socket.connected_to == ("93.184.216.34", 443)
+    assert successful_socket.connected_to == ("93.184.216.34", 443)
+    assert timed_out_socket.was_closed
+    assert successful_socket.was_closed
+
+
+@patch("openai_image_api.ssl.create_default_context")
+@patch("openai_image_api.socket.socket")
+@patch("openai_image_api.socket.getaddrinfo")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_result_download_retries_429_then_succeeds_without_repeating_edit(
+    build_opener, getaddrinfo, socket_constructor, create_default_context, tmp_path
+):
+    """A result-host 429 is retried without repeating the paid edit POST."""
+    sleep_calls = []
+    png = base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
+    rate_limited_socket = FakeConnectedSocket(
+        raw_http_response(b"busy", status=429, content_type="text/plain"),
+        "93.184.216.34",
+    )
+    successful_socket = FakeConnectedSocket(
+        raw_http_response(png), "93.184.216.34"
+    )
+    socket_constructor.side_effect = FakeSocketFactory(
+        [rate_limited_socket, successful_socket]
+    )
+    create_default_context.return_value = FakeDefaultSSLContext()
+    getaddrinfo.return_value = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+    ]
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
+        "data": [{"url": "https://images.example.test/generated.png"}],
+    }).encode("utf-8"))
+
+    make_client(
+        sleep=sleep_calls.append,
+        max_attempts=3,
+        retry_delays=(0.25, 0.5),
+    ).generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+    )
+
+    assert build_opener.return_value.open.call_count == 1
+    assert getaddrinfo.call_count == 1
+    assert sleep_calls == [0.25]
+    assert rate_limited_socket.was_closed
+    assert rate_limited_socket.response_file.was_closed
+    assert successful_socket.was_closed
+
+
+@patch("openai_image_api.ssl.create_default_context")
+@patch("openai_image_api.socket.socket")
+@patch("openai_image_api.socket.getaddrinfo")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_result_download_exhausts_recoverable_5xx_with_exact_policy(
+    build_opener, getaddrinfo, socket_constructor, create_default_context, tmp_path
+):
+    """Recoverable result-host failures stop exactly at the configured bound."""
+    sleep_calls = []
+    response_sockets = [
+        FakeConnectedSocket(
+            raw_http_response(b"unavailable", status=status, content_type="text/plain"),
+            "93.184.216.34",
+        )
+        for status in (500, 503, 502)
+    ]
+    socket_constructor.side_effect = FakeSocketFactory(response_sockets)
+    create_default_context.return_value = FakeDefaultSSLContext()
+    getaddrinfo.return_value = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+    ]
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
+        "data": [{"url": "https://images.example.test/generated.png"}],
+    }).encode("utf-8"))
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client(
+            sleep=sleep_calls.append,
+            max_attempts=3,
+            retry_delays=(0.25, 0.5),
+        ).generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+        )
+
+    assert ctx.value.code == "server_error"
+    assert ctx.value.status_code == 502
+    assert build_opener.return_value.open.call_count == 1
+    assert getaddrinfo.call_count == 1
+    assert sleep_calls == [0.25, 0.5]
+    assert all(sock.was_closed for sock in response_sockets)
+    assert all(sock.response_file.was_closed for sock in response_sockets)
+
+
+@pytest.mark.parametrize("status", [302, 400, 401, 403, 404])
+@patch("openai_image_api.ssl.create_default_context")
+@patch("openai_image_api.socket.socket")
+@patch("openai_image_api.socket.getaddrinfo")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_result_download_does_not_retry_permanent_http_status(
+    build_opener,
+    getaddrinfo,
+    socket_constructor,
+    create_default_context,
+    status,
+    tmp_path,
+):
+    """Redirects and permanent result-host statuses receive one pinned attempt."""
+    sleep_calls = []
+    failed_socket = FakeConnectedSocket(
+        raw_http_response(b"failure", status=status, content_type="text/plain"),
+        "93.184.216.34",
+    )
+    socket_constructor.side_effect = FakeSocketFactory([failed_socket])
+    create_default_context.return_value = FakeDefaultSSLContext()
+    getaddrinfo.return_value = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+    ]
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
+        "data": [{"url": "https://images.example.test/generated.png"}],
+    }).encode("utf-8"))
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client(
+            sleep=sleep_calls.append,
+            max_attempts=3,
+            retry_delays=(0.25, 0.5),
+        ).generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+        )
+
+    assert ctx.value.code == "invalid_response"
+    assert build_opener.return_value.open.call_count == 1
+    assert getaddrinfo.call_count == 1
+    assert sleep_calls == []
+    assert failed_socket.was_closed
+    assert failed_socket.response_file.was_closed
 
 
 @patch("openai_image_api.ssl.create_default_context")
