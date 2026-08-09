@@ -532,8 +532,7 @@ def test_lovart_detail_execution_settings_match_selected_tool_and_mode():
         "mode": "thinking",
         "tool_names": ["generate_image_nano_banana_pro"],
         "run_mode": "fast",
-        "configured_unlimited_models": ["nano_banana_2", "gpt_image_2"],
-        "configured_unlimited_models_selected": True,
+        "configured_unlimited_models_selected": False,
     }
 
 

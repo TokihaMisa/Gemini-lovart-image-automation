@@ -447,6 +447,56 @@ def test_lovart_unlimited_model_order_change_invalidates_detail_reuse(tmp_path):
     assert read_status(reordered.product_dir)["detail_input_fingerprint"] != first_fingerprint
 
 
+def test_lovart_fast_mode_ignores_configured_unlimited_model_order(tmp_path):
+    def fast_lovart_with_unlimited_models(models):
+        bot = Mock()
+        bot.tool_config = {
+            "image_model": "nano_banana_pro",
+            "image_models": ["nano_banana_pro"],
+            "model_selection": "force",
+            "prefer_models": None,
+            "include_tools": ["generate_image_nano_banana_pro"],
+            "mode": "thinking",
+            "tool_names": ["generate_image_nano_banana_pro"],
+        }
+        bot._fast_mode = True
+        bot._configured_unlimited_models = tuple(models)
+        bot.create_and_generate.return_value = {
+            "generation_succeeded": True,
+            "project_id": "detail-project",
+            "used_model": "nano_banana_pro",
+        }
+        return bot
+
+    first_bot = fast_lovart_with_unlimited_models(
+        ["nano_banana_2", "gpt_image_2"]
+    )
+    first = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "lovart",
+        detail_count=2,
+        lovart=first_bot,
+    )
+    first_fingerprint = read_status(first.product_dir)["detail_input_fingerprint"]
+
+    reordered_bot = fast_lovart_with_unlimited_models(
+        ["gpt_image_2", "nano_banana_2"]
+    )
+    reordered = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "lovart",
+        detail_count=2,
+        lovart=reordered_bot,
+    )
+
+    assert (reordered.success, reordered.skipped) == (0, 1)
+    reordered_bot.create_and_generate.assert_not_called()
+    reordered.gemini.generate_prompt.assert_not_called()
+    assert read_status(reordered.product_dir)["detail_input_fingerprint"] == first_fingerprint
+
+
 def test_deleted_detail_prompt_reuses_only_identically_regenerated_screen_prompts(tmp_path):
     first = run_product_pipeline(
         tmp_path, "openai_image", "openai_image", detail_count=2

@@ -324,11 +324,17 @@ class LovartImageProvider:
         if isinstance(fast_mode, bool):
             settings["run_mode"] = "fast" if fast_mode else "unlimited"
         configured_models = getattr(self.bot, "_configured_unlimited_models", None)
-        if isinstance(configured_models, (list, tuple)):
-            settings["configured_unlimited_models"] = [
-                str(model) for model in configured_models
-            ]
-            settings["configured_unlimited_models_selected"] = bool(configured_models)
+        if isinstance(fast_mode, bool):
+            configured_selected = bool(
+                not fast_mode
+                and isinstance(configured_models, (list, tuple))
+                and configured_models
+            )
+            settings["configured_unlimited_models_selected"] = configured_selected
+            if configured_selected:
+                settings["configured_unlimited_models"] = [
+                    str(model) for model in configured_models
+                ]
         return settings
 
     def validate_completed_support(

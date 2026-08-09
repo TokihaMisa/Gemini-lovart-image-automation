@@ -243,3 +243,43 @@ Full suite GREEN:
 - Lovart serialization remains allowlisted: only existing selected tool/model/mode fields, ordered configured unlimited models, the configured-selection boolean, and run mode are included. No bot/config dump or secret access was added.
 - `py_compile` passed for the modified provider and two modified test modules; `git diff --check` passed.
 - No other behavior or Final Fix 2/3 concern was changed. No known functional concerns remain in this review scope.
+
+## Review round 3: mode-accurate Lovart unlimited settings
+
+### Status
+
+Implemented the isolated review round 3 correction on top of commit `4635e7b586e996a9b07dbabd3c80a33d8c9015bf`.
+
+- Fast mode now emits `configured_unlimited_models_selected=false` and omits the configured unlimited model list entirely because that list does not participate in fast-mode execution.
+- Unlimited mode emits the ordered configured list only when it is nonempty and actually selected; in that case `configured_unlimited_models_selected=true`.
+- Unlimited mode with no configured list emits `selected=false` and omits the list, leaving the existing actual fallback/tool settings to describe execution.
+
+### Strict TDD evidence
+
+RED command:
+
+```text
+.\.venv\Scripts\python.exe -m pytest tests/test_image_providers.py tests/test_image_provider_routing.py -q
+```
+
+Observed before production changes:
+
+```text
+2 failed, 67 passed in 19.27s
+```
+
+Both failures proved that fast-mode fingerprints incorrectly included and reacted to reordered unlimited-only configuration.
+
+Focused GREEN:
+
+```text
+69 passed in 17.89s
+```
+
+The existing unlimited-mode regression remains in the focused suite and proves that a nonempty ordered configured list still invalidates reuse when reordered. The new fast-mode regression proves the same reorder leaves the fingerprint stable, skips the completed product, and makes neither prompt nor Lovart generation calls.
+
+### Verification and scope
+
+- `py_compile` passed for the provider and two focused test modules.
+- `git diff --check` passed.
+- Per the review instruction, the full suite was not rerun because round 2 completed `518 passed, 118 subtests` and this change is isolated to the Lovart settings projection. No known concerns remain.
