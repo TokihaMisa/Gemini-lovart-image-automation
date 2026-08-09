@@ -143,6 +143,27 @@ def test_openai_detail_count_uses_snapshot_not_default_12(tmp_path):
     assert run.generated_indexes == (1, 2, 3)
 
 
+def test_single_detail_screen_snapshot_prevents_extra_generation_on_resume(tmp_path):
+    first = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=1
+    )
+
+    assert (first.success, first.fail, first.skipped) == (1, 0, 0)
+    assert first.generated_indexes == (1,)
+    assert read_status(first.product_dir)["detail_page_count_snapshot"] == 1
+
+    second = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=9
+    )
+
+    assert (second.success, second.fail, second.skipped) == (0, 0, 1)
+    assert second.generated_indexes == ()
+    status = read_status(second.product_dir)
+    assert status["detail_page_count_snapshot"] == 1
+    assert status["detail_completed_count"] == 1
+    assert len(status["detail_images"]) == 1
+
+
 def test_screen_count_mismatch_makes_no_paid_image_calls(tmp_path):
     api = Mock()
 

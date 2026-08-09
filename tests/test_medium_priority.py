@@ -37,6 +37,7 @@ from main import (
     _backfill_result_project_urls,
     _choose_lovart_tool_options,
     _choose_prompt_source,
+    _find_support_image,
     _process_products,
     _resolve_lovart_mode,
     _resolve_browser_executable_for_run,
@@ -105,6 +106,24 @@ def run_formal_flow_for_test(*, wait_for_ready=False):
 
 
 class MediumPriorityBehaviorTests(unittest.TestCase):
+    def test_legacy_lovart_status_reuses_support_images_in_provider_neutral_pipeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            product_dir = Path(tmp)
+            white = product_dir / "lovart_steps" / "white_bg" / "old-white.png"
+            scene = product_dir / "lovart_steps" / "scene" / "old-scene.png"
+            white.parent.mkdir(parents=True, exist_ok=True)
+            scene.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (1, 1), "white").save(white)
+            Image.new("RGB", (1, 1), "green").save(scene)
+            legacy = {
+                "lovart_white_bg_local_path": str(white),
+                "lovart_scene_local_path": str(scene),
+                "lovart_final_images": [str(white), str(scene)],
+            }
+
+            self.assertEqual(_find_support_image(product_dir, legacy, "white_bg", 0), str(white))
+            self.assertEqual(_find_support_image(product_dir, legacy, "scene", 1), str(scene))
+
     def test_gemini_diagnostic_error_kind_aligns_auth_and_not_found_domains(self):
         cases = (
             (GeminiAuthenticationError(), "auth"),

@@ -55,16 +55,19 @@ nvidia_api:
     kimi: "moonshotai/kimi-k2.5"
 
 openai_image:
-  # Set OPENAI_IMAGE_API_KEY in your environment or .env.
+  # Keep OPENAI_IMAGE_API_KEY only in local .env. The endpoint must end in exactly one /v1.
   base_url: "https://hapiopen.cc/v1"
   model: gpt-image-2
+  # The gateway-supported options are 1K, 2K, and 4K.
   resolution: 1K
 
 image_generation:
+  # Support and final-detail providers are independent; failures never auto-fallback.
   support_provider: lovart
   detail_provider: lovart
 
 prompt_settings:
+  # This is snapshotted per product when detail generation begins; resume keeps the snapshot.
   detail_page_count: 12
   design_style: "温馨感、高级感"
   required_sections: ["主标题", "副标题", "信息布局", "排版形式"]

@@ -10,6 +10,7 @@ This project reads product data and images from an Excel workbook, sends the pro
 - **Auto Folder Picker**: Directly browse your local PC for output folders using a native dialog window (no typing required!).
 - **Multi-Model Support**: Automatically choose between `gemini_api`, `gemini_browser`, and `nvidia` for prompt generation.
 - **Lovart Automation**: Submit generated prompts directly to Lovart's image generation engines with real-time tracking.
+- **Independent image routes**: Choose Lovart or an OpenAI-compatible GPT Image gateway independently for support images and the final detail-image set.
 - **Smart Data Handling**: Upload your `.xlsx` task tables directly via the web interface.
 
 ## First-Time Setup
@@ -74,9 +75,20 @@ GEMINI_API_KEY=your_gemini_api_key
 NVIDIA_API_KEY=your_nvidia_api_key
 LOVART_ACCESS_KEY=your_lovart_access_key
 LOVART_SECRET_KEY=your_lovart_secret_key
+OPENAI_IMAGE_API_KEY=your_openai_image_api_key
 ```
 
 You can also input and save these keys directly via the **"⚙️ 系统设置" (System Settings)** tab in the WebUI.
+
+## GPT Image setup and migration
+
+GPT Image is an optional image-generation provider; it does not replace Gemini/NVIDIA prompt generation. Keep `OPENAI_IMAGE_API_KEY` only in your local `.env` (or save it through System Settings, which writes the local `.env`); never put it in `config.yaml` or commit it.
+
+Set `openai_image.base_url` to your HAPI/OpenAI-compatible gateway URL ending in exactly one `/v1` (for example, the default `https://hapiopen.cc/v1`). The default model is `gpt-image-2`; choose `1K`, `2K`, or `4K` as the gateway-supported resolution. In the WebUI, **白底图和场景图来源** and **最终套图来源** are independent selectors, so either route may use Lovart or `openai_image`.
+
+The saved detail-page count controls how many final GPT Image screens are requested. That target is snapshotted when a product starts, so changing the setting later does not alter an in-progress or resumed product. Completed detail screens are retained and a resume generates only missing screens. Provider failures stop on the selected provider: there is no automatic switch to the other provider.
+
+The **真实图像编辑测试（可能产生一次图片费用）** button is deliberately billable. It sends one real compatibility request to the standard `/images/edits` endpoint; saving configuration, opening the UI, dry-runs, and automated tests do not call the image API.
 
 ## Prompt-model and prompt-settings workflow
 

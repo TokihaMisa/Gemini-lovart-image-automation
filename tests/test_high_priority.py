@@ -23,6 +23,23 @@ from utils import (
 
 
 class HighPriorityBehaviorTests(unittest.TestCase):
+    def test_repository_examples_contain_no_real_api_keys(self):
+        examples = [
+            Path("config.example.yaml"),
+            Path(".env.example"),
+            Path("README.md"),
+            Path("PROJECT_OVERVIEW.md"),
+        ]
+        for path in examples:
+            self.assertNotIn("sk-", path.read_text(encoding="utf-8"))
+
+        self.assertIn(
+            "OPENAI_IMAGE_API_KEY=your_openai_image_api_key",
+            Path(".env.example").read_text(encoding="utf-8"),
+        )
+        self.assertIn("GPT Image", Path("README.md").read_text(encoding="utf-8"))
+        self.assertIn("/images/edits", Path("PROJECT_OVERVIEW.md").read_text(encoding="utf-8"))
+
     def test_env_or_config_prefers_environment(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": "from-env"}):
             value = env_or_config({"api_key": "from-config"}, "api_key", "GEMINI_API_KEY")
