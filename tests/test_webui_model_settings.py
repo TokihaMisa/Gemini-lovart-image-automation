@@ -75,6 +75,19 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertIn("**gradio_launch_kwargs()", app_source)
         self.assertIn("**gradio_launch_kwargs()", webui_source)
 
+    @patch("webui.load_config", return_value={})
+    def test_build_ui_keeps_api_save_callback_arity_valid_before_gpt_image_controls_exist(self, _load_config):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            build_ui()
+
+        arity_warnings = [
+            str(item.message)
+            for item in caught
+            if "Expected at least" in str(item.message)
+        ]
+        self.assertEqual(arity_warnings, [])
+
     def test_example_and_embedded_defaults_expose_prompt_settings_and_direct_models(self):
         example = Path("config.example.yaml").read_text(encoding="utf-8")
         webui = Path("webui.py").read_text(encoding="utf-8")
@@ -87,6 +100,100 @@ class WebUIModelSettingsTests(unittest.TestCase):
             self.assertIn("failed_retry_mode: finite", text)
             self.assertIn("failed_retry_error_types:", text)
             self.assertIn("unlimited_models: []", text)
+
+    def test_example_defaults_include_image_routing_and_openai_image(self):
+        config = yaml.safe_load(Path("config.example.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(
+            config["image_generation"],
+            {"support_provider": "lovart", "detail_provider": "lovart"},
+        )
+        self.assertEqual(config["openai_image"]["base_url"], "https://hapiopen.cc/v1")
+        self.assertEqual(config["openai_image"]["model"], "gpt-image-2")
+
+    def test_blank_openai_image_key_preserves_existing_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text("OPENAI_IMAGE_API_KEY=existing\n", encoding="utf-8")
+
+            save_env("", "", "", "", openai_image_key="", env_path=env_path)
+
+            self.assertIn("OPENAI_IMAGE_API_KEY=existing", env_path.read_text(encoding="utf-8"))
+
+    def test_clear_openai_image_key_removes_existing_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text("# local credential\r\nOPENAI_IMAGE_API_KEY=existing\r\nOTHER=value\r\n", encoding="utf-8", newline="")
+
+            save_env("", "", "", "", clear_openai_image_key=True, env_path=env_path)
+
+            self.assertEqual(env_path.read_bytes(), b"# local credential\r\nOTHER=value\r\nGEMINI_API_KEY=\r\nNVIDIA_API_KEY=\r\nLOVART_ACCESS_KEY=\r\nLOVART_SECRET_KEY=\r\n")
+
+    def test_explicit_openai_image_key_clear_wins_over_a_submitted_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text("OPENAI_IMAGE_API_KEY=existing\n", encoding="utf-8")
+
+            save_env(
+                "", "", "", "",
+                openai_image_key="stale-value",
+                clear_openai_image_key=True,
+                env_path=env_path,
+            )
+
+            self.assertNotIn("OPENAI_IMAGE_API_KEY=", env_path.read_text(encoding="utf-8"))
+
+    def test_persist_openai_image_settings_normalizes_config_without_mutating_input(self):
+        original = {"other": {"keep": True}}
+
+        updated = webui.persist_openai_image_settings(
+            original,
+            "https://hapiopen.cc/", " custom-image ", "2k",
+            "openai_image", "lovart",
+        )
+
+        self.assertEqual(original, {"other": {"keep": True}})
+        self.assertEqual(updated["openai_image"], {
+            "base_url": "https://hapiopen.cc/v1",
+            "model": "custom-image",
+            "resolution": "2K",
+        })
+        self.assertEqual(updated["image_generation"], {
+            "support_provider": "openai_image",
+            "detail_provider": "lovart",
+        })
+
+    def test_transaction_rolls_back_config_and_openai_image_key_on_second_replace_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path, env_path = Path(tmp) / "config.yaml", Path(tmp) / ".env"
+            config_path.write_text(
+                "gemini_api:\n  base_url: https://gemini.test/v1beta\n  model: gemini-test\n"
+                "nvidia_api:\n  base_url: https://nvidia.test/v1\n  model: nvidia-test\n",
+                encoding="utf-8",
+            )
+            env_path.write_text("OPENAI_IMAGE_API_KEY=old-key\n", encoding="utf-8")
+            original_config, original_env = config_path.read_bytes(), env_path.read_bytes()
+            real_replace, call_count = os.replace, 0
+
+            def fail_second_replace(source, destination):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 2:
+                    raise OSError("injected env replace failure")
+                return real_replace(source, destination)
+
+            with patch("webui.os.replace", side_effect=fail_second_replace):
+                status = save_api_settings(
+                    "", "", "", "", "new-key",
+                    "https://gemini.test/v1beta", "gemini-test",
+                    "https://nvidia.test/v1", "nvidia-test",
+                    "https://hapiopen.cc/v1", "gpt-image-2", "1K",
+                    "openai_image", "openai_image",
+                    config_path=config_path, env_path=env_path,
+                )
+
+            self.assertIn("\u5931\u8d25", status)
+            self.assertEqual(config_path.read_bytes(), original_config)
+            self.assertEqual(env_path.read_bytes(), original_env)
 
     @patch("webui.AgentSkill")
     def test_detect_lovart_unlimited_models_returns_only_enabled_supported_models(self, skill_cls):
@@ -584,9 +691,10 @@ class WebUIModelSettingsTests(unittest.TestCase):
             path = Path(tmp) / "config.yaml"
             path.write_text("other:\n  keep: true\n", encoding="utf-8")
             status = save_api_settings(
-                "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                "gemini-key", "nvidia-key", "lovart-access", "lovart-secret", "",
                 "https://gemini.proxy.test/v1beta", "gemini-custom",
                 "https://nvidia.proxy.test/v1", "nvidia/custom",
+                "https://hapiopen.cc/v1", "gpt-image-2", "1K", "lovart", "lovart",
                 config_path=path,
             )
             saved = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -604,9 +712,10 @@ class WebUIModelSettingsTests(unittest.TestCase):
             path.write_text("original: true\n", encoding="utf-8")
             before = path.read_bytes()
             status = save_api_settings(
-                "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                "gemini-key", "nvidia-key", "lovart-access", "lovart-secret", "",
                 "not-a-url", "gemini-custom",
                 "https://nvidia.proxy.test/v1", "nvidia/custom",
+                "https://hapiopen.cc/v1", "gpt-image-2", "1K", "lovart", "lovart",
                 config_path=path,
             )
             self.assertEqual(path.read_bytes(), before)
@@ -832,9 +941,10 @@ class WebUIModelSettingsTests(unittest.TestCase):
 
                 with patch("webui.os.replace", side_effect=fail_second_replace):
                     status = save_api_settings(
-                        "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                        "gemini-key", "nvidia-key", "lovart-access", "lovart-secret", "",
                         "https://gemini.test/v1beta", "gemini-model",
                         "https://nvidia.test/v1", "nvidia-model",
+                        "https://hapiopen.cc/v1", "gpt-image-2", "1K", "lovart", "lovart",
                     )
 
                 self.assertIn("second target failed", status)
@@ -899,9 +1009,10 @@ class WebUIModelSettingsTests(unittest.TestCase):
 
                 with patch("webui.os.replace", side_effect=fail_second_replace):
                     status = save_api_settings(
-                        "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                        "gemini-key", "nvidia-key", "lovart-access", "lovart-secret", "",
                         "https://gemini.test/v1beta", "gemini-model",
                         "https://nvidia.test/v1", "nvidia-model",
+                        "https://hapiopen.cc/v1", "gpt-image-2", "1K", "lovart", "lovart",
                     )
 
                 self.assertIn("second target failed", status)
@@ -964,9 +1075,10 @@ class WebUIModelSettingsTests(unittest.TestCase):
 
                 with patch("webui.os.replace", side_effect=fail_second_save_and_first_restore):
                     status = save_api_settings(
-                        "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                        "gemini-key", "nvidia-key", "lovart-access", "lovart-secret", "",
                         "https://gemini.test/v1beta", "gemini-model",
                         "https://nvidia.test/v1", "nvidia-model",
+                        "https://hapiopen.cc/v1", "gpt-image-2", "1K", "lovart", "lovart",
                     )
                 self.assertTrue(rollback_path.exists())
                 self.assertEqual(rollback_path.read_bytes(), original_config)

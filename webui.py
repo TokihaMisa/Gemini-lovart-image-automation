@@ -49,6 +49,8 @@ from gemini_browser_session import (
 )
 from lovart_api import AgentSkill, AgentSkillError
 from lovart_bot import LOVART_IMAGE_MODELS, LOVART_MODEL_LABELS, unlimited_model_catalog
+from image_generation import normalize_image_provider
+from openai_image_api import OpenAIImageAPIError, normalize_openai_image_base_url
 
 
 PROMPT_FORM_FIELDS = (
@@ -394,6 +396,13 @@ nvidia_api:
   send_images: true
   models:
     kimi: moonshotai/kimi-k2.5
+openai_image:
+  base_url: https://hapiopen.cc/v1
+  model: gpt-image-2
+  resolution: 1K
+image_generation:
+  support_provider: lovart
+  detail_provider: lovart
 prompt_settings:
   detail_page_count: 12
   design_style: "温馨感、高级感"
@@ -496,6 +505,8 @@ def _save_config_and_env_transaction(
     nvidia_key,
     lovart_access,
     lovart_secret,
+    openai_image_key=None,
+    clear_openai_image_key=False,
     config_path="config.yaml",
     env_path=".env",
     snapshots=None,
@@ -508,7 +519,15 @@ def _save_config_and_env_transaction(
         }
     try:
         save_config(config_data, config_path)
-        save_env(gemini_key, nvidia_key, lovart_access, lovart_secret, env_path=env_path)
+        save_env(
+            gemini_key,
+            nvidia_key,
+            lovart_access,
+            lovart_secret,
+            openai_image_key=openai_image_key,
+            clear_openai_image_key=clear_openai_image_key,
+            env_path=env_path,
+        )
     except Exception as primary:
         restore_errors = _restore_file_snapshots(snapshots)
         message = str(primary)
@@ -771,15 +790,50 @@ def persist_provider_settings(
     return updated
 
 
+def normalize_resolution(resolution) -> str:
+    normalized = str(resolution or "1K").strip().upper() or "1K"
+    if normalized not in {"1K", "2K", "4K"}:
+        raise ValueError("GPT Image 分辨率必须是 1K、2K 或 4K")
+    return normalized
+
+
+def persist_openai_image_settings(
+    config,
+    base_url,
+    model,
+    resolution,
+    support_provider,
+    detail_provider,
+):
+    updated = deepcopy(config)
+    updated["openai_image"] = {
+        **updated.get("openai_image", {}),
+        "base_url": normalize_openai_image_base_url(base_url),
+        "model": str(model or "gpt-image-2").strip() or "gpt-image-2",
+        "resolution": normalize_resolution(resolution),
+    }
+    updated["image_generation"] = {
+        "support_provider": normalize_image_provider(support_provider),
+        "detail_provider": normalize_image_provider(detail_provider),
+    }
+    return updated
+
+
 def save_api_settings(
     gemini_key,
     nvidia_key,
     lovart_access,
     lovart_secret,
+    openai_image_key,
     gemini_base_url,
     gemini_model,
     nvidia_base_url,
     nvidia_model,
+    openai_image_base_url,
+    openai_image_model,
+    openai_image_resolution,
+    support_provider,
+    detail_provider,
     config_path="config.yaml",
     env_path=".env",
 ):
@@ -792,16 +846,25 @@ def save_api_settings(
         updated = persist_provider_settings(
             current, gemini_base_url, gemini_model, nvidia_base_url, nvidia_model
         )
+        updated = persist_openai_image_settings(
+            updated,
+            openai_image_base_url,
+            openai_image_model,
+            openai_image_resolution,
+            support_provider,
+            detail_provider,
+        )
         _save_config_and_env_transaction(
             updated,
             gemini_key,
             nvidia_key,
             lovart_access,
             lovart_secret,
+            openai_image_key=openai_image_key,
             config_path=target,
             env_path=env_path,
         )
-    except (ModelProviderError, OSError, ValueError, yaml.YAMLError) as exc:
+    except (ModelProviderError, OpenAIImageAPIError, OSError, ValueError, yaml.YAMLError) as exc:
         message = exc.user_message if isinstance(exc, ModelProviderError) else str(exc)
         return f"❌ API 与模型设置保存失败，原配置未被部分覆盖：{message}"
     return "✅ 密钥、API 地址和模型已保存"
@@ -973,26 +1036,38 @@ def save_env(
     nvidia_key: str,
     lovart_access: str,
     lovart_secret: str,
+    openai_image_key: str | None = None,
+    clear_openai_image_key: bool = False,
     env_path: str | Path = ".env",
 ):
     target = Path(env_path)
     lines = []
+    openai_key_provided = bool(str(openai_image_key or "").strip())
+    newline = "\n"
     if target.exists():
-        with target.open("r", encoding="utf-8") as f:
+        with target.open("r", encoding="utf-8", newline="") as f:
             for line in f.readlines():
+                if line.endswith("\r\n"):
+                    newline = "\r\n"
                 if any(line.startswith(k) for k in ["GEMINI_API_KEY=", "NVIDIA_API_KEY=", "LOVART_ACCESS_KEY=", "LOVART_SECRET_KEY="]):
                     continue
+                if line.startswith("OPENAI_IMAGE_API_KEY=") and (clear_openai_image_key or openai_key_provided):
+                    continue
                 lines.append(line)
-    
-    lines.append(f"GEMINI_API_KEY={gemini_key}\n")
-    lines.append(f"NVIDIA_API_KEY={nvidia_key}\n")
-    lines.append(f"LOVART_ACCESS_KEY={lovart_access}\n")
-    lines.append(f"LOVART_SECRET_KEY={lovart_secret}\n")
+
+    if lines and not lines[-1].endswith(("\n", "\r")):
+        lines.append(newline)
+    lines.append(f"GEMINI_API_KEY={gemini_key}{newline}")
+    lines.append(f"NVIDIA_API_KEY={nvidia_key}{newline}")
+    lines.append(f"LOVART_ACCESS_KEY={lovart_access}{newline}")
+    lines.append(f"LOVART_SECRET_KEY={lovart_secret}{newline}")
+    if openai_key_provided and not clear_openai_image_key:
+        lines.append(f"OPENAI_IMAGE_API_KEY={str(openai_image_key).strip()}{newline}")
     
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_name(f".{target.name}.tmp")
     try:
-        temp.write_text("".join(lines), encoding="utf-8")
+        temp.write_text("".join(lines), encoding="utf-8", newline="")
         os.replace(temp, target)
     finally:
         if temp.exists():
@@ -1688,6 +1763,45 @@ def manual_save_keys(gemini, nvidia, access, secret):
     return "✅ 密钥已成功保存到 .env 文件中"
 
 
+def save_api_settings_from_existing_controls(
+    gemini_key,
+    nvidia_key,
+    lovart_access,
+    lovart_secret,
+    gemini_base_url,
+    gemini_model,
+    nvidia_base_url,
+    nvidia_model,
+):
+    """Save existing provider controls while Task 8 owns GPT Image UI inputs."""
+    try:
+        current = load_config()
+        openai_image = current.get("openai_image", {}) if isinstance(current, dict) else {}
+        image_generation = current.get("image_generation", {}) if isinstance(current, dict) else {}
+        if not isinstance(openai_image, dict):
+            openai_image = {}
+        if not isinstance(image_generation, dict):
+            image_generation = {}
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        return f"API settings save failed: {exc}"
+    return save_api_settings(
+        gemini_key,
+        nvidia_key,
+        lovart_access,
+        lovart_secret,
+        None,
+        gemini_base_url,
+        gemini_model,
+        nvidia_base_url,
+        nvidia_model,
+        openai_image.get("base_url", "https://hapiopen.cc/v1"),
+        openai_image.get("model", "gpt-image-2"),
+        openai_image.get("resolution", "1K"),
+        image_generation.get("support_provider", "lovart"),
+        image_generation.get("detail_provider", "lovart"),
+    )
+
+
 def pick_directory(current_dir):
     import subprocess
     import sys
@@ -2115,7 +2229,7 @@ def build_ui():
                     
                     key_inputs = [gemini_key, nvidia_key, lovart_access, lovart_secret]
                     save_keys_btn.click(
-                        fn=save_api_settings,
+                        fn=save_api_settings_from_existing_controls,
                         inputs=[
                             *key_inputs,
                             gemini_base_url,
@@ -2124,6 +2238,7 @@ def build_ui():
                             nvidia_model,
                         ],
                         outputs=save_status,
+                        api_name="save_api_settings",
                     )
                     open_gemini_login_btn.click(
                         fn=open_gemini_login_browser,

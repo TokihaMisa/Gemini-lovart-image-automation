@@ -54,6 +54,16 @@ nvidia_api:
     # Kimi K2.5 supports image input and thinking mode by default.
     kimi: "moonshotai/kimi-k2.5"
 
+openai_image:
+  # Set OPENAI_IMAGE_API_KEY in your environment or .env.
+  base_url: "https://hapiopen.cc/v1"
+  model: gpt-image-2
+  resolution: 1K
+
+image_generation:
+  support_provider: lovart
+  detail_provider: lovart
+
 prompt_settings:
   detail_page_count: 12
   design_style: "温馨感、高级感"
