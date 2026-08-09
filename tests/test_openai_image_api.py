@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import socket
+import ssl
 from dataclasses import asdict
 from pathlib import Path
 from urllib.error import HTTPError
@@ -48,6 +49,89 @@ class FakeResponse:
 
     def read(self) -> bytes:
         return self.body
+
+
+class TrackingBytesIO(io.BytesIO):
+    def __init__(self, value: bytes):
+        super().__init__(value)
+        self.was_closed = False
+
+    def close(self) -> None:
+        self.was_closed = True
+        super().close()
+
+
+class FakeConnectedSocket:
+    def __init__(self, response: bytes, peer_address: str, connect_error=None):
+        self.response_file = TrackingBytesIO(response)
+        self.peer_address = peer_address
+        self.connect_error = connect_error
+        self.timeout = None
+        self.connected_to = None
+        self.sent = bytearray()
+        self.was_closed = False
+
+    def settimeout(self, timeout) -> None:
+        self.timeout = timeout
+
+    def connect(self, address) -> None:
+        self.connected_to = address
+        if self.connect_error is not None:
+            raise self.connect_error
+
+    def getpeername(self):
+        if ":" in self.peer_address:
+            return (self.peer_address, self.connected_to[1], 0, 0)
+        return (self.peer_address, self.connected_to[1])
+
+    def sendall(self, data: bytes) -> None:
+        self.sent.extend(data)
+
+    def makefile(self, mode: str):
+        assert mode == "rb"
+        return self.response_file
+
+    def close(self) -> None:
+        self.was_closed = True
+
+
+class FakeSocketFactory:
+    def __init__(self, sockets):
+        self.sockets = list(sockets)
+        self.calls = []
+
+    def __call__(self, family, sock_type):
+        self.calls.append((family, sock_type))
+        return self.sockets.pop(0)
+
+
+class FakeDefaultSSLContext:
+    def __init__(self):
+        self.check_hostname = True
+        self.verify_mode = ssl.CERT_REQUIRED
+        self.wrap_calls = []
+
+    def wrap_socket(self, connected_socket, *, server_hostname):
+        self.wrap_calls.append((connected_socket, server_hostname))
+        return connected_socket
+
+
+def raw_http_response(
+    body: bytes,
+    *,
+    status: int = 200,
+    content_type: str = "image/png",
+    extra_headers: bytes = b"",
+) -> bytes:
+    reason = b"OK" if status == 200 else b"Found"
+    return b"".join((
+        b"HTTP/1.1 " + str(status).encode("ascii") + b" " + reason + b"\r\n",
+        b"Content-Type: " + content_type.encode("ascii") + b"\r\n",
+        b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n",
+        extra_headers,
+        b"Connection: close\r\n\r\n",
+        body,
+    ))
 
 
 def make_png(path: Path) -> Path:
@@ -306,60 +390,199 @@ def test_result_url_rejects_hostname_when_any_resolved_address_is_private(getadd
     assert ctx.value.code == "unsafe_result_url"
 
 
+@patch("openai_image_api.ssl.create_default_context")
+@patch("openai_image_api.socket.socket")
 @patch("openai_image_api.socket.getaddrinfo")
 @patch("openai_image_api.urllib.request.build_opener")
-def test_generate_edit_downloads_public_result_url_without_forwarding_api_key(
-    build_opener, getaddrinfo, tmp_path
+def test_generate_edit_pins_public_result_connection_and_preserves_https_identity(
+    build_opener, getaddrinfo, socket_constructor, create_default_context, tmp_path
 ):
-    """Fails if a safe remote result cannot be saved or inherits API credentials."""
+    """The validated address must be the address used with verified TLS and no key."""
+    png = base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
+    connected_socket = FakeConnectedSocket(
+        raw_http_response(png), "93.184.216.34"
+    )
+    socket_factory = FakeSocketFactory([connected_socket])
+    socket_constructor.side_effect = socket_factory
+    tls_context = FakeDefaultSSLContext()
+    create_default_context.return_value = tls_context
     getaddrinfo.return_value = [
-        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 8443)),
     ]
-    build_opener.return_value.open.side_effect = [
-        FakeResponse(json.dumps({"created": 1, "data": [
-            {"url": "https://images.example.test/generated.png"}
-        ]}).encode("utf-8")),
-        FakeResponse(
-            base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64), content_type="image/png"
-        ),
-    ]
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
+        "created": 1,
+        "data": [{"url": "https://images.example.test:8443/generated.png?sig=opaque"}],
+    }).encode("utf-8"))
 
     result = make_client().generate_edit(
         "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
     )
 
     assert result.local_path == str(tmp_path / "out.png")
-    image_request = build_opener.return_value.open.call_args_list[1].args[0]
-    assert image_request.full_url == "https://images.example.test/generated.png"
-    assert image_request.get_header("Authorization") is None
-    assert build_opener.return_value.open.call_args_list[1].kwargs == {"timeout": 12.5}
+    getaddrinfo.assert_called_once_with(
+        "images.example.test", 8443, type=socket.SOCK_STREAM
+    )
+    assert socket_factory.calls == [(socket.AF_INET, socket.SOCK_STREAM)]
+    assert connected_socket.connected_to == ("93.184.216.34", 8443)
+    assert connected_socket.timeout == 12.5
+    assert tls_context.wrap_calls == [(connected_socket, "images.example.test")]
+    assert tls_context.check_hostname is True
+    assert tls_context.verify_mode == ssl.CERT_REQUIRED
+    assert b"GET /generated.png?sig=opaque HTTP/1.1\r\n" in connected_socket.sent
+    assert b"Host: images.example.test:8443\r\n" in connected_socket.sent
+    assert b"Authorization:" not in connected_socket.sent
+    assert connected_socket.was_closed
+    assert connected_socket.response_file.was_closed
     with Image.open(tmp_path / "out.png") as output:
         output.verify()
 
 
-@pytest.mark.parametrize(
-    ("status", "content_type", "body"),
-    [
-        (302, "image/png", base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)),
-        (200, "text/plain", base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)),
-        (200, "image/png", b""),
-    ],
-)
+@patch("openai_image_api.ssl.create_default_context")
+@patch("openai_image_api.socket.socket")
 @patch("openai_image_api.socket.getaddrinfo")
 @patch("openai_image_api.urllib.request.build_opener")
-def test_generate_edit_rejects_invalid_result_download_contract(
-    build_opener, getaddrinfo, status, content_type, body, tmp_path
+def test_result_download_does_not_follow_changed_dns_answer_to_private_address(
+    build_opener, getaddrinfo, socket_constructor, create_default_context, tmp_path
 ):
-    """Fails if provider result bytes skip status, media-type, or empty-body checks."""
+    """A second DNS answer cannot replace the public address selected by validation."""
+    png = base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
+    connected_socket = FakeConnectedSocket(
+        raw_http_response(png), "93.184.216.34"
+    )
+    socket_constructor.side_effect = FakeSocketFactory([connected_socket])
+    create_default_context.return_value = FakeDefaultSSLContext()
+    getaddrinfo.side_effect = [
+        [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+        [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))],
+    ]
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
+        "data": [{"url": "https://images.example.test/generated.png"}],
+    }).encode("utf-8"))
+
+    make_client().generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+    )
+
+    assert getaddrinfo.call_count == 1
+    assert connected_socket.connected_to == ("93.184.216.34", 443)
+    assert b"Host: images.example.test\r\n" in connected_socket.sent
+    assert b"Host: images.example.test:443\r\n" not in connected_socket.sent
+
+
+@patch("openai_image_api.ssl.create_default_context")
+@patch("openai_image_api.socket.socket")
+@patch("openai_image_api.socket.getaddrinfo")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_result_download_tries_only_prevalidated_addresses_and_closes_failures(
+    build_opener, getaddrinfo, socket_constructor, create_default_context, tmp_path
+):
+    """Address fallback stays inside one DNS snapshot and cleans each connection."""
+    png = base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
+    first_socket = FakeConnectedSocket(
+        b"", "93.184.216.34", ConnectionRefusedError("first address unavailable")
+    )
+    second_socket = FakeConnectedSocket(
+        raw_http_response(png), "93.184.216.35"
+    )
+    socket_constructor.side_effect = FakeSocketFactory([first_socket, second_socket])
+    create_default_context.return_value = FakeDefaultSSLContext()
+    getaddrinfo.return_value = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.35", 443)),
+    ]
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
+        "data": [{"url": "https://images.example.test/generated.png"}],
+    }).encode("utf-8"))
+
+    make_client().generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+    )
+
+    assert getaddrinfo.call_count == 1
+    assert first_socket.connected_to == ("93.184.216.34", 443)
+    assert second_socket.connected_to == ("93.184.216.35", 443)
+    assert first_socket.was_closed
+    assert second_socket.was_closed
+
+
+@patch("openai_image_api.ssl.create_default_context")
+@patch("openai_image_api.socket.socket")
+@patch("openai_image_api.socket.getaddrinfo")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_result_download_rejects_peer_mismatch_and_closes_connection(
+    build_opener, getaddrinfo, socket_constructor, create_default_context, tmp_path
+):
+    """Response bytes are never accepted from a peer other than the pinned address."""
+    connected_socket = FakeConnectedSocket(
+        raw_http_response(base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)),
+        "127.0.0.1",
+    )
+    socket_constructor.side_effect = FakeSocketFactory([connected_socket])
+    create_default_context.return_value = FakeDefaultSSLContext()
     getaddrinfo.return_value = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
     ]
-    build_opener.return_value.open.side_effect = [
-        FakeResponse(json.dumps({"data": [
-            {"url": "https://images.example.test/generated.png"}
-        ]}).encode("utf-8")),
-        FakeResponse(body, status, content_type),
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
+        "data": [{"url": "https://images.example.test/generated.png"}],
+    }).encode("utf-8"))
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client().generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+        )
+
+    assert ctx.value.code == "unsafe_result_url"
+    assert connected_socket.was_closed
+    assert not connected_socket.sent
+    assert not (tmp_path / "out.png").exists()
+
+
+@pytest.mark.parametrize(
+    ("status", "content_type", "body", "extra_headers"),
+    [
+        (
+            302,
+            "image/png",
+            base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64),
+            b"Location: http://127.0.0.1/private.png\r\n",
+        ),
+        (200, "text/plain", base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64), b""),
+        (200, "image/png", b"", b""),
+    ],
+)
+@patch("openai_image_api.ssl.create_default_context")
+@patch("openai_image_api.socket.socket")
+@patch("openai_image_api.socket.getaddrinfo")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_generate_edit_rejects_invalid_result_download_contract(
+    build_opener,
+    getaddrinfo,
+    socket_constructor,
+    create_default_context,
+    status,
+    content_type,
+    body,
+    extra_headers,
+    tmp_path,
+):
+    """Fails if provider result bytes skip status, media-type, or empty-body checks."""
+    connected_socket = FakeConnectedSocket(
+        raw_http_response(
+            body,
+            status=status,
+            content_type=content_type,
+            extra_headers=extra_headers,
+        ),
+        "93.184.216.34",
+    )
+    socket_constructor.side_effect = FakeSocketFactory([connected_socket])
+    create_default_context.return_value = FakeDefaultSSLContext()
+    getaddrinfo.return_value = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
     ]
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
+        "data": [{"url": "https://images.example.test/generated.png"}],
+    }).encode("utf-8"))
 
     with pytest.raises(OpenAIImageAPIError) as ctx:
         make_client().generate_edit(
@@ -368,6 +591,47 @@ def test_generate_edit_rejects_invalid_result_download_contract(
 
     assert ctx.value.code == "invalid_response"
     assert "test-key" not in str(ctx.value)
+    assert connected_socket.was_closed
+    assert connected_socket.response_file.was_closed
+
+
+@patch("openai_image_api.socket.socket")
+@patch("openai_image_api.socket.getaddrinfo")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_http_ipv6_result_uses_pinned_literal_and_original_idna_authority(
+    build_opener, getaddrinfo, socket_constructor, tmp_path
+):
+    """IPv6 and IDNA URLs retain the public hostname while connecting by literal."""
+    png = base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
+    connected_socket = FakeConnectedSocket(
+        raw_http_response(png), "2606:2800:220:1:248:1893:25c8:1946"
+    )
+    socket_factory = FakeSocketFactory([connected_socket])
+    socket_constructor.side_effect = socket_factory
+    getaddrinfo.return_value = [(
+        socket.AF_INET6,
+        socket.SOCK_STREAM,
+        6,
+        "",
+        ("2606:2800:220:1:248:1893:25c8:1946", 8080, 0, 0),
+    )]
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
+        "data": [{"url": "http://b\u00fccher.example:8080/generated.png"}],
+    }).encode("utf-8"))
+
+    make_client().generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+    )
+
+    getaddrinfo.assert_called_once_with("xn--bcher-kva.example", 8080, type=socket.SOCK_STREAM)
+    assert socket_factory.calls == [(socket.AF_INET6, socket.SOCK_STREAM)]
+    assert connected_socket.connected_to == (
+        "2606:2800:220:1:248:1893:25c8:1946",
+        8080,
+        0,
+        0,
+    )
+    assert b"Host: xn--bcher-kva.example:8080\r\n" in connected_socket.sent
 
 
 @patch("openai_image_api.urllib.request.build_opener")

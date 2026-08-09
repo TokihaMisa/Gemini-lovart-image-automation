@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import ssl
 import tempfile
 import time
 from typing import Any, Callable, Final, Sequence
@@ -56,6 +57,23 @@ class OpenAIImageAPIError(Exception):
 class GeneratedImage:
     local_path: str
     model: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedAddress:
+    family: int
+    ip_literal: str
+    socket_address: tuple[Any, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedResultURL:
+    scheme: str
+    hostname: str
+    port: int
+    authority: str
+    request_target: str
+    addresses: tuple[_ResolvedAddress, ...]
 
 
 class _OpenAIImageAPIKeyAccess:
@@ -284,11 +302,8 @@ class OpenAIImageAPI:
         remote_url = first.get("url")
         if not isinstance(remote_url, str) or not remote_url:
             raise OpenAIImageAPIError("invalid_response", "GPT Image API returned no image data.")
-        validate_remote_image_url(remote_url)
-        request = urllib.request.Request(remote_url, method="GET")
-        request.add_header("Accept", "image/*")
-        opener = urllib.request.build_opener(_RejectRedirectHandler())
-        return self._request_bytes(request, opener.open, "image")
+        resolved_url = validate_remote_image_url(remote_url)
+        return _download_resolved_image(resolved_url, self.config.timeout)
 
 
 def append_aspect_instruction(prompt: str, image_size: str) -> str:
@@ -330,8 +345,8 @@ def encode_multipart(
     return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
 
-def validate_remote_image_url(url: str) -> None:
-    """Reject result URLs that could target local or non-public network addresses."""
+def validate_remote_image_url(url: str) -> _ResolvedResultURL:
+    """Resolve one public address set and retain it for the eventual connection."""
     raw_url = str(url or "")
     if "\r" in raw_url or "\n" in raw_url:
         _raise_unsafe_result_url()
@@ -347,27 +362,217 @@ def validate_remote_image_url(url: str) -> None:
         or parsed.username is not None
         or parsed.password is not None
         or parsed.fragment
+        or any(character.isspace() for character in parsed.netloc)
+        or "\\" in parsed.netloc
+        or parsed.netloc.endswith(":")
         or hostname.rstrip(".").lower() == "localhost"
         or port is not None and not 0 < port <= 65535
     ):
         _raise_unsafe_result_url()
+
+    scheme = parsed.scheme.lower()
+    resolved_port = port or (443 if scheme == "https" else 80)
+    ascii_hostname = _ascii_result_hostname(hostname)
+    request_target = parsed.path or "/"
+    if parsed.query:
+        request_target = f"{request_target}?{parsed.query}"
+    try:
+        request_target.encode("ascii")
+    except UnicodeEncodeError:
+        _raise_unsafe_result_url()
+
     try:
         resolved = socket.getaddrinfo(
-            hostname,
-            port or (443 if parsed.scheme.lower() == "https" else 80),
+            ascii_hostname,
+            resolved_port,
             type=socket.SOCK_STREAM,
         )
     except (OSError, ValueError):
         _raise_unsafe_result_url()
     if not resolved:
         _raise_unsafe_result_url()
+
+    addresses: list[_ResolvedAddress] = []
+    seen_addresses: set[tuple[int, str]] = set()
     for entry in resolved:
         try:
-            address = ipaddress.ip_address(entry[4][0])
-        except (ValueError, IndexError):
+            family = entry[0]
+            ip_literal = entry[4][0]
+            address = ipaddress.ip_address(ip_literal)
+        except (TypeError, ValueError, IndexError):
             _raise_unsafe_result_url()
-        if not address.is_global:
+        if family not in {socket.AF_INET, socket.AF_INET6} or not address.is_global:
             _raise_unsafe_result_url()
+        key = (family, str(address))
+        if key in seen_addresses:
+            continue
+        seen_addresses.add(key)
+        if family == socket.AF_INET:
+            socket_address: tuple[Any, ...] = (str(address), resolved_port)
+        else:
+            socket_address = (str(address), resolved_port, 0, 0)
+        addresses.append(_ResolvedAddress(family, str(address), socket_address))
+
+    if not addresses:
+        _raise_unsafe_result_url()
+    host_for_authority = (
+        f"[{ascii_hostname}]"
+        if _is_ipv6_literal(ascii_hostname)
+        else ascii_hostname
+    )
+    authority = (
+        f"{host_for_authority}:{resolved_port}"
+        if port is not None
+        else host_for_authority
+    )
+    return _ResolvedResultURL(
+        scheme=scheme,
+        hostname=ascii_hostname,
+        port=resolved_port,
+        authority=authority,
+        request_target=request_target,
+        addresses=tuple(addresses),
+    )
+
+
+def _ascii_result_hostname(hostname: str) -> str:
+    candidate = hostname.rstrip(".")
+    if not candidate:
+        _raise_unsafe_result_url()
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        pass
+    try:
+        ascii_hostname = candidate.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        _raise_unsafe_result_url()
+    if not ascii_hostname or len(ascii_hostname) > 253:
+        _raise_unsafe_result_url()
+    return ascii_hostname
+
+
+def _is_ipv6_literal(hostname: str) -> bool:
+    try:
+        return ipaddress.ip_address(hostname).version == 6
+    except ValueError:
+        return False
+
+
+def _connect_validated_address(
+    address: _ResolvedAddress, timeout: float
+) -> socket.socket:
+    connected_socket = socket.socket(address.family, socket.SOCK_STREAM)
+    try:
+        connected_socket.settimeout(timeout)
+        connected_socket.connect(address.socket_address)
+        try:
+            peer = ipaddress.ip_address(connected_socket.getpeername()[0])
+            expected = ipaddress.ip_address(address.ip_literal)
+        except (OSError, TypeError, ValueError, IndexError):
+            _raise_unsafe_result_url()
+        if peer != expected:
+            _raise_unsafe_result_url()
+        return connected_socket
+    except BaseException:
+        connected_socket.close()
+        raise
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """An HTTP connection whose socket target is an already-verified IP literal."""
+
+    def __init__(
+        self,
+        hostname: str,
+        port: int,
+        address: _ResolvedAddress,
+        timeout: float,
+    ) -> None:
+        super().__init__(hostname, port=port, timeout=timeout)
+        self._validated_address = address
+
+    def connect(self) -> None:
+        self.sock = _connect_validated_address(self._validated_address, self.timeout)
+
+
+class _PinnedHTTPSConnection(_PinnedHTTPConnection):
+    """A pinned TCP connection that still authenticates the original TLS host."""
+
+    def __init__(
+        self,
+        hostname: str,
+        port: int,
+        address: _ResolvedAddress,
+        timeout: float,
+        context: ssl.SSLContext,
+    ) -> None:
+        super().__init__(hostname, port, address, timeout)
+        self._context = context
+
+    def connect(self) -> None:
+        connected_socket = _connect_validated_address(
+            self._validated_address, self.timeout
+        )
+        try:
+            self.sock = self._context.wrap_socket(
+                connected_socket, server_hostname=self.host
+            )
+        except BaseException:
+            connected_socket.close()
+            raise
+
+
+def _download_resolved_image(
+    resolved_url: _ResolvedResultURL, timeout: float
+) -> bytes:
+    """Fetch once from the prevalidated address set without another resolution."""
+    tls_context = ssl.create_default_context() if resolved_url.scheme == "https" else None
+    last_error: OpenAIImageAPIError | None = None
+    for address in resolved_url.addresses:
+        response: http.client.HTTPResponse | None = None
+        if tls_context is None:
+            connection: http.client.HTTPConnection = _PinnedHTTPConnection(
+                resolved_url.hostname,
+                resolved_url.port,
+                address,
+                timeout,
+            )
+        else:
+            connection = _PinnedHTTPSConnection(
+                resolved_url.hostname,
+                resolved_url.port,
+                address,
+                timeout,
+                tls_context,
+            )
+        try:
+            connection.request(
+                "GET",
+                resolved_url.request_target,
+                headers={
+                    "Accept": "image/*",
+                    "Host": resolved_url.authority,
+                },
+                encode_chunked=False,
+            )
+            response = connection.getresponse()
+            response_body = response.read()
+            _validate_response_contract(response, response_body, "image")
+            return response_body
+        except OpenAIImageAPIError:
+            raise
+        except (TimeoutError, socket.timeout, OSError, http.client.HTTPException) as exc:
+            last_error = _transport_error(exc)
+            if last_error.code == "tls_certificate":
+                raise last_error from None
+        finally:
+            if response is not None:
+                response.close()
+            connection.close()
+    if last_error is not None:
+        raise last_error from None
+    raise OpenAIImageAPIError("network", "Could not reach GPT Image API.")
 
 
 def atomic_save_validated_image(image_bytes: bytes, target: Path) -> None:
