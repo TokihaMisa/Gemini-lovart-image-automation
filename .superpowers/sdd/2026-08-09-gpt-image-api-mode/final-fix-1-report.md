@@ -183,3 +183,63 @@ Full suite GREEN:
 - Missing or unparsable GPT prompt files deliberately prevent completed-product skip but do not immediately discard checkpoints; exact hashes after regeneration determine safe reuse.
 - `py_compile` passed for all modified production/test Python files, and `git diff --check` passed.
 - No Final Fix 2/3 concerns were changed. No known functional concerns remain in this review scope.
+
+## Review round 2: stale canonical crash boundary and Lovart unlimited order
+
+### Status
+
+Implemented review round 2 as a separate strict-TDD change on top of commit `598e34a2d4e41122ff01f0e0b32bff1288c1c580`.
+
+- Before publishing a new current-identity `running` checkpoint, GPT detail generation now removes the canonical `gpt_image/detail/NN.png` when the prior checkpoint's upstream fingerprint or paid-prompt hash differs.
+- `resume=False` always removes an existing canonical output before writing the new `running` checkpoint.
+- The enforced order is: inspect prior checkpoint identity, remove stale canonical output, write current `running`, then call the paid API. A crash after `running` but before a new API output therefore cannot reconcile the old image.
+- Lovart's explicit non-secret execution settings now include the ordered `_configured_unlimited_models` values and a boolean indicating whether that configured selection is active. The existing `run_mode` field remains the directly coupled fast/unlimited selector.
+
+### Strict TDD evidence
+
+RED command:
+
+```text
+.\.venv\Scripts\python.exe -m pytest tests/test_image_providers.py tests/test_image_provider_routing.py -q
+```
+
+Observed before production changes:
+
+```text
+4 failed, 64 passed in 18.72s
+```
+
+The failures proved both wrong-upstream-fingerprint and wrong-prompt-hash crash windows retained a stale canonical image, while Lovart settings omitted the ordered configured unlimited model list and reordering that list did not invalidate completion.
+
+After the production change, three older provider fixtures failed because they returned a path without performing the real API contract's canonical write after the new pre-call unlink. Those fixtures were corrected to write valid images during the mocked successful call; this was a test realism correction, not a production behavior relaxation.
+
+Final focused GREEN:
+
+```text
+68 passed in 19.81s
+```
+
+Expanded Lovart/OpenAI/retry GREEN:
+
+```text
+.\.venv\Scripts\python.exe -m pytest tests/test_lovart_unlimited_guard.py tests/test_openai_image_api.py tests/test_failed_retry_queue.py -q
+54 passed in 1.29s
+```
+
+Full suite GREEN:
+
+```text
+.\.venv\Scripts\python.exe -m pytest -q
+518 passed, 118 subtests passed in 143.72s (0:02:23)
+```
+
+### Review-round regressions and self-review
+
+- Wrong upstream fingerprint: a valid stale canonical and mismatched `running` checkpoint are replaced by a current `running`; an injected pre-output crash leaves no canonical, and the next resume calls the API.
+- Wrong paid-prompt hash: the same crash-boundary proof applies when only the prompt hash differs.
+- The post-save/pre-done success path remains intact: a matching current `running` checkpoint with a newly saved valid canonical image still reconciles without a duplicate paid call.
+- No-resume uses the same pre-checkpoint canonical removal unconditionally.
+- Reordering otherwise identical Lovart unlimited models changes the upstream detail fingerprint and forces prompt/detail regeneration.
+- Lovart serialization remains allowlisted: only existing selected tool/model/mode fields, ordered configured unlimited models, the configured-selection boolean, and run mode are included. No bot/config dump or secret access was added.
+- `py_compile` passed for the modified provider and two modified test modules; `git diff --check` passed.
+- No other behavior or Final Fix 2/3 concern was changed. No known functional concerns remain in this review scope.

@@ -1,6 +1,7 @@
 from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
 from PIL import Image
 
 from image_generation import DetailScreen
@@ -55,8 +56,13 @@ def test_openai_detail_set_skips_valid_completed_indexes(tmp_path: Path):
         prompt_hash=detail_screen_prompt_hash(screens[0], 2, "1:1"),
     )
     api = Mock()
-    second_path = write_valid_png(tmp_path / "gpt_image" / "detail" / "02.png")
-    api.generate_edit.return_value = GeneratedImage(second_path, "gpt-image-2")
+    second_path = str(tmp_path / "gpt_image" / "detail" / "02.png")
+
+    def generate_second(*, output_path, **_kwargs):
+        path = write_valid_png(Path(output_path))
+        return GeneratedImage(path, "gpt-image-2")
+
+    api.generate_edit.side_effect = generate_second
     provider = OpenAIImageProvider(api, logger=Mock())
     request = DetailSetRequest(
         product_id="P1",
@@ -114,12 +120,16 @@ def test_openai_detail_set_regenerates_a_header_valid_truncated_checkpoint(tmp_p
 def test_openai_detail_set_keeps_paid_success_when_later_screen_fails(tmp_path: Path):
     from image_providers import DetailSetRequest, OpenAIImageProvider, read_completed_detail_indexes
 
-    first_path = write_valid_png(tmp_path / "gpt_image" / "detail" / "01.png")
+    first_path = str(tmp_path / "gpt_image" / "detail" / "01.png")
     api = Mock()
-    api.generate_edit.side_effect = [
-        GeneratedImage(first_path, "gpt-image-2"),
-        RuntimeError("temporary upstream failure"),
-    ]
+
+    def generate_until_failure(*, output_path, **_kwargs):
+        if Path(output_path).stem == "01":
+            path = write_valid_png(Path(output_path))
+            return GeneratedImage(path, "gpt-image-2")
+        raise RuntimeError("temporary upstream failure")
+
+    api.generate_edit.side_effect = generate_until_failure
     provider = OpenAIImageProvider(api, logger=Mock())
     request = DetailSetRequest(
         product_id="P1",
@@ -144,13 +154,19 @@ def test_openai_detail_set_stops_after_first_exhausted_screen_and_resumes_in_ord
     from image_providers import DetailSetRequest, OpenAIImageProvider
 
     reference = write_valid_png(tmp_path / "reference.png")
-    first_path = write_valid_png(tmp_path / "gpt_image" / "detail" / "01.png")
+    first_path = str(tmp_path / "gpt_image" / "detail" / "01.png")
     first_api = Mock()
-    first_api.generate_edit.side_effect = [
-        GeneratedImage(first_path, "gpt-image-2"),
-        RuntimeError("screen 2 exhausted retries"),
-        AssertionError("screen 3 must not be called in the failed run"),
-    ]
+
+    def generate_until_exhaustion(*, output_path, **_kwargs):
+        index = int(Path(output_path).stem)
+        if index == 1:
+            path = write_valid_png(Path(output_path))
+            return GeneratedImage(path, "gpt-image-2")
+        if index == 2:
+            raise RuntimeError("screen 2 exhausted retries")
+        raise AssertionError("screen 3 must not be called in the failed run")
+
+    first_api.generate_edit.side_effect = generate_until_exhaustion
     request = DetailSetRequest(
         product_id="P1",
         product_dir=tmp_path,
@@ -309,6 +325,78 @@ def test_openai_detail_set_reconciles_only_matching_running_canonical_output(
     wrong_api.generate_edit.assert_called_once()
 
 
+@pytest.mark.parametrize("mismatch_kind", ["input_fingerprint", "prompt_hash"])
+def test_new_running_checkpoint_cannot_reconcile_stale_canonical_after_crash(
+    tmp_path: Path,
+    mismatch_kind: str,
+):
+    from image_providers import (
+        DetailSetRequest,
+        OpenAIImageProvider,
+        detail_screen_prompt_hash,
+        record_detail_checkpoint,
+    )
+    from utils import read_status
+
+    screen = DetailScreen(1, "current paid prompt")
+    current_fingerprint = "current-inputs"
+    current_prompt_hash = detail_screen_prompt_hash(screen, 1, "1:1")
+    prior_fingerprint = (
+        "stale-inputs" if mismatch_kind == "input_fingerprint" else current_fingerprint
+    )
+    prior_prompt_hash = (
+        detail_screen_prompt_hash(DetailScreen(1, "stale paid prompt"), 1, "1:1")
+        if mismatch_kind == "prompt_hash"
+        else current_prompt_hash
+    )
+    canonical = Path(
+        write_valid_png(tmp_path / "gpt_image" / "detail" / "01.png")
+    )
+    record_detail_checkpoint(
+        tmp_path,
+        1,
+        "running",
+        str(canonical),
+        attempts=1,
+        input_fingerprint=prior_fingerprint,
+        prompt_hash=prior_prompt_hash,
+    )
+    request = DetailSetRequest(
+        product_id="P1",
+        product_dir=tmp_path,
+        screens=(screen,),
+        image_paths=(write_valid_png(tmp_path / "reference.png"),),
+        image_size="1:1",
+        target_count=1,
+        input_fingerprint=current_fingerprint,
+        resume=True,
+    )
+    crashing_api = Mock()
+    crashing_api.generate_edit.side_effect = KeyboardInterrupt("crash before API output")
+
+    with pytest.raises(KeyboardInterrupt, match="crash before API output"):
+        OpenAIImageProvider(crashing_api).generate_detail_set(request)
+
+    assert not canonical.exists()
+    running = read_status(tmp_path)["detail_checkpoints"]["1"]
+    assert running["state"] == "running"
+    assert running["input_fingerprint"] == current_fingerprint
+    assert running["prompt_hash"] == current_prompt_hash
+
+    resumed_api = Mock()
+
+    def save_current(*, output_path, **_kwargs):
+        path = write_valid_png(Path(output_path))
+        return GeneratedImage(path, "gpt-image-2")
+
+    resumed_api.generate_edit.side_effect = save_current
+
+    resumed = OpenAIImageProvider(resumed_api).generate_detail_set(request)
+
+    resumed_api.generate_edit.assert_called_once()
+    assert resumed.succeeded is True
+
+
 def test_openai_detail_set_regenerates_legacy_done_checkpoint_without_prompt_hash(
     tmp_path: Path,
 ):
@@ -431,6 +519,7 @@ def test_lovart_detail_execution_settings_match_selected_tool_and_mode():
         "tool_names": ["generate_image_nano_banana_pro"],
     }
     bot._fast_mode = True
+    bot._configured_unlimited_models = ("nano_banana_2", "gpt_image_2")
 
     settings = LovartImageProvider(bot).detail_execution_settings()
 
@@ -443,6 +532,8 @@ def test_lovart_detail_execution_settings_match_selected_tool_and_mode():
         "mode": "thinking",
         "tool_names": ["generate_image_nano_banana_pro"],
         "run_mode": "fast",
+        "configured_unlimited_models": ["nano_banana_2", "gpt_image_2"],
+        "configured_unlimited_models_selected": True,
     }
 
 

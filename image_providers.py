@@ -207,6 +207,20 @@ class OpenAIImageProvider:
             if screen.index in completed:
                 continue
             attempts = _checkpoint_attempts(request.product_dir, screen.index) + 1
+            output_path = request.product_dir / "gpt_image" / "detail" / f"{screen.index:02d}.png"
+            if (
+                not request.resume
+                or not _checkpoint_identity_matches(
+                    request.product_dir,
+                    screen.index,
+                    request.input_fingerprint,
+                    prompt_hashes[screen.index],
+                )
+            ):
+                try:
+                    output_path.unlink()
+                except FileNotFoundError:
+                    pass
             record_detail_checkpoint(
                 request.product_dir,
                 screen.index,
@@ -215,7 +229,6 @@ class OpenAIImageProvider:
                 input_fingerprint=request.input_fingerprint,
                 prompt_hash=prompt_hashes[screen.index],
             )
-            output_path = request.product_dir / "gpt_image" / "detail" / f"{screen.index:02d}.png"
             try:
                 generated = self.api.generate_edit(
                     prompt=screen.prompt,
@@ -310,6 +323,12 @@ class LovartImageProvider:
         fast_mode = getattr(self.bot, "_fast_mode", None)
         if isinstance(fast_mode, bool):
             settings["run_mode"] = "fast" if fast_mode else "unlimited"
+        configured_models = getattr(self.bot, "_configured_unlimited_models", None)
+        if isinstance(configured_models, (list, tuple)):
+            settings["configured_unlimited_models"] = [
+                str(model) for model in configured_models
+            ]
+            settings["configured_unlimited_models_selected"] = bool(configured_models)
         return settings
 
     def validate_completed_support(
@@ -460,6 +479,24 @@ def _checkpoint_matches_fingerprint(
 ) -> bool:
     expected = str(input_fingerprint or "")
     return not expected or str(checkpoint.get("input_fingerprint") or "") == expected
+
+
+def _checkpoint_identity_matches(
+    product_dir: str | Path,
+    index: int,
+    input_fingerprint: str,
+    prompt_hash: str,
+) -> bool:
+    checkpoints = read_status(product_dir).get(_CHECKPOINT_FIELD, {})
+    if not isinstance(checkpoints, Mapping):
+        return False
+    checkpoint = _checkpoint_for_index(checkpoints, index)
+    return bool(
+        isinstance(checkpoint, Mapping)
+        and str(checkpoint.get("input_fingerprint") or "")
+        == str(input_fingerprint or "")
+        and str(checkpoint.get("prompt_hash") or "") == str(prompt_hash or "")
+    )
 
 
 def detail_screen_prompt_hash(

@@ -397,6 +397,56 @@ def test_lovart_detail_model_setting_change_invalidates_prompt_and_completion(tm
     assert read_status(changed.product_dir)["detail_input_fingerprint"] != first_fingerprint
 
 
+def test_lovart_unlimited_model_order_change_invalidates_detail_reuse(tmp_path):
+    def lovart_with_unlimited_models(models):
+        bot = Mock()
+        bot.tool_config = {
+            "image_model": "auto",
+            "image_models": [],
+            "model_selection": "prefer",
+            "prefer_models": None,
+            "include_tools": None,
+            "mode": None,
+            "tool_names": [],
+        }
+        bot._fast_mode = False
+        bot._configured_unlimited_models = tuple(models)
+        bot.create_and_generate.return_value = {
+            "generation_succeeded": True,
+            "project_id": "detail-project",
+            "used_model": models[0],
+        }
+        return bot
+
+    first_bot = lovart_with_unlimited_models(
+        ["nano_banana_2", "gpt_image_2"]
+    )
+    first = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "lovart",
+        detail_count=2,
+        lovart=first_bot,
+    )
+    first_fingerprint = read_status(first.product_dir)["detail_input_fingerprint"]
+
+    reordered_bot = lovart_with_unlimited_models(
+        ["gpt_image_2", "nano_banana_2"]
+    )
+    reordered = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "lovart",
+        detail_count=2,
+        lovart=reordered_bot,
+    )
+
+    assert (reordered.success, reordered.skipped) == (1, 0)
+    reordered_bot.create_and_generate.assert_called_once()
+    reordered.gemini.generate_prompt.assert_called_once()
+    assert read_status(reordered.product_dir)["detail_input_fingerprint"] != first_fingerprint
+
+
 def test_deleted_detail_prompt_reuses_only_identically_regenerated_screen_prompts(tmp_path):
     first = run_product_pipeline(
         tmp_path, "openai_image", "openai_image", detail_count=2
