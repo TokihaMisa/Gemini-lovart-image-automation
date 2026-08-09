@@ -416,6 +416,9 @@ def build_design_prompt(
         f"{question_rule}\n"
         f"产品信息/卖点：\n{selling_points}\n"
         f"{extra_block}\n"
+        "请严格按以下稳定分隔格式输出全部逐屏提示词；每一屏都必须使用其对应编号的开始和结束标记，不得省略、改写或合并标记：\n"
+        "[[SCREEN 01]]\n第 1 屏的文字设计提示词\n[[/SCREEN 01]]\n"
+        f"一直输出到 [[SCREEN {settings['detail_page_count']:02d}]] 和 [[/SCREEN {settings['detail_page_count']:02d}]]。\n"
         f"【锁定规则】\n{locked_rules_text()}\n"
     )
 

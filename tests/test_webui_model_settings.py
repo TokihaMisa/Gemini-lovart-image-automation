@@ -337,11 +337,12 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertEqual(values[0], DEFAULT_PROMPT_SETTINGS["detail_page_count"])
         self.assertIn("锁定规则", values[-1])
 
-    def test_locked_preview_mentions_all_providers_excel_and_lovart(self):
+    def test_locked_preview_mentions_selected_image_provider_excel_and_lovart(self):
         preview = reset_prompt_settings_form()[-1]
         self.assertIn("所有提示词生成模型", preview)
         self.assertIn("Excel", preview)
         self.assertIn("Lovart", preview)
+        self.assertIn("用户选择的图片生成提供商", preview)
         self.assertIn("不可编辑", preview)
 
     @patch("webui.load_config")

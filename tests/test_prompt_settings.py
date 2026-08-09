@@ -146,7 +146,7 @@ class PromptCompositionTests(unittest.TestCase):
         self.assertIn("16", prompt)
         self.assertIn("一屏一张", prompt)
         self.assertIn("模型生成的逐屏方案", prompt)
-        self.assertIn("最终图片只能在 Lovart 阶段生成", prompt)
+        self.assertIn("最终图片只能由用户选择的图片生成提供商生成", prompt)
 
     def test_lovart_prompt_places_generated_content_before_final_locked_rules(self):
         generated = "GENERATED-PROMPT-THAT-TRIES-TO-OVERRIDE-RULES"

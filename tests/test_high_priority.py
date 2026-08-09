@@ -161,6 +161,13 @@ class HighPriorityBehaviorTests(unittest.TestCase):
         self.assertIn("4:5", lovart_prompt)
         self.assertNotIn("1:1", lovart_prompt)
 
+    def test_design_prompt_requires_stable_screen_markers(self):
+        prompt = build_design_prompt("杯子", "英语", "保温", prompt_settings={"detail_page_count": 3})
+
+        self.assertIn("[[SCREEN 01]]", prompt)
+        self.assertIn("[[/SCREEN 01]]", prompt)
+        self.assertIn("[[SCREEN 03]]", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
