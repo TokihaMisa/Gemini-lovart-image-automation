@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -16,21 +18,189 @@ from utils import is_product_completed, read_status, update_status
 
 
 @pytest.mark.parametrize(
-    ("support", "detail", "expected_support"),
+    ("support", "detail"),
     [
-        ("lovart", "lovart", "lovart"),
-        ("openai_image", "lovart", "openai_image"),
-        ("lovart", "openai_image", "lovart"),
-        ("openai_image", "openai_image", "openai_image"),
+        ("lovart", "lovart"),
+        ("openai_image", "lovart"),
+        ("lovart", "openai_image"),
+        ("openai_image", "openai_image"),
     ],
 )
 def test_pipeline_routes_support_stage_independently_of_detail_choice(
-    tmp_path, support, detail, expected_support
+    tmp_path, support, detail
 ):
     run = run_product_pipeline(tmp_path, support, detail)
 
     assert run.success == 1
-    assert run.registry.get_calls == [expected_support]
+    assert run.registry.get_calls == [support, detail]
+
+
+def test_openai_detail_count_uses_snapshot_not_default_12(tmp_path):
+    run = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=3
+    )
+
+    assert run.success == 1
+    status = read_status(run.product_dir)
+    assert status["detail_page_count_snapshot"] == 3
+    assert status["detail_completed_count"] == 3
+    assert status["detail_generation_complete"] is True
+    assert status["partial_complete"] is False
+    assert status["artifact_count"] == 3
+    assert len(status["detail_images"]) == 3
+    assert run.generated_indexes == (1, 2, 3)
+
+
+def test_screen_count_mismatch_makes_no_paid_image_calls(tmp_path):
+    api = Mock()
+
+    run = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=4,
+        prompt_screen_count=3,
+        openai_api=api,
+    )
+
+    assert (run.success, run.fail) == (0, 1)
+    api.generate_edit.assert_not_called()
+    status = read_status(run.product_dir)
+    assert status["detail_page_count_snapshot"] == 4
+    assert status.get("detail_completed_count", 0) == 0
+
+
+def test_partial_detail_failure_keeps_completed_images_and_resumes_only_missing(tmp_path):
+    first = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=3,
+        fail_indexes={2},
+    )
+
+    assert (first.success, first.fail) == (0, 1)
+    first_status = read_status(first.product_dir)
+    assert first_status["partial_complete"] is True
+    assert first_status["detail_generation_complete"] is False
+    assert first_status["detail_completed_count"] == 2
+    assert first_status["detail_failed_indexes"] == [2]
+    assert first_status["artifact_count"] == 2
+    assert len(first_status["detail_images"]) == 2
+
+    second = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=9,
+        fail_indexes=set(),
+    )
+
+    assert second.generated_indexes == (2,)
+    second_status = read_status(second.product_dir)
+    assert second_status["detail_page_count_snapshot"] == 3
+    assert second_status["detail_generation_complete"] is True
+    assert second_status["partial_complete"] is False
+    assert second_status["detail_completed_count"] == 3
+    assert second_status["detail_failed_indexes"] == []
+    assert second_status["artifact_count"] == 3
+    assert second_status["failed"] is False
+    assert second_status["reason"] == ""
+    assert [Path(path).stem for path in second_status["detail_images"]] == ["01", "02", "03"]
+
+
+def test_completed_openai_detail_set_regenerates_only_corrupt_screen(tmp_path):
+    first = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=3
+    )
+    corrupt_path = Path(read_status(first.product_dir)["detail_images"][1])
+    write_truncated_png(corrupt_path)
+
+    second = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=8
+    )
+
+    assert (second.success, second.skipped) == (1, 0)
+    assert second.generated_indexes == (2,)
+    status = read_status(second.product_dir)
+    assert status["detail_page_count_snapshot"] == 3
+    assert status["detail_completed_count"] == 3
+    assert status["detail_generation_complete"] is True
+
+
+@pytest.mark.parametrize(
+    ("raw_result", "expected_counts", "expected_status"),
+    [
+        (
+            {
+                "generation_succeeded": False,
+                "final_status": "pending_confirmation",
+                "project_id": "detail-project",
+                "warning": "confirmation required",
+            },
+            (0, 1, 0, 0),
+            "needs_manual_action",
+        ),
+        (
+            {
+                "generation_succeeded": False,
+                "final_status": "timeout",
+                "project_id": "detail-project",
+            },
+            (0, 0, 0, 1),
+            "lovart_still_running",
+        ),
+    ],
+)
+def test_lovart_detail_keeps_prompt_and_terminal_state_compatibility(
+    tmp_path, raw_result, expected_counts, expected_status
+):
+    lovart = Mock()
+    lovart.create_and_generate.return_value = raw_result
+
+    run = run_product_pipeline(
+        tmp_path, "openai_image", "lovart", detail_count=2, lovart=lovart
+    )
+
+    assert (run.success, run.fail, run.skipped, run.still_running) == expected_counts
+    assert (run.product_dir / "detail_prompt.txt").exists()
+    assert (run.product_dir / "lovart_prompt.txt").exists()
+    assert lovart.create_and_generate.call_args.kwargs["prompt"] == (
+        run.product_dir / "lovart_prompt.txt"
+    ).read_text(encoding="utf-8")
+    status = read_status(run.product_dir)
+    assert status[expected_status] is True
+    assert status["project_url"].endswith("projectId=detail-project")
+
+
+def test_openai_detail_writes_only_provider_neutral_prompt_file_and_summary_model(tmp_path):
+    run = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=2
+    )
+
+    assert (run.product_dir / "detail_prompt.txt").exists()
+    assert not (run.product_dir / "lovart_prompt.txt").exists()
+    summary = json.loads((tmp_path / "run" / "summary.json").read_text(encoding="utf-8"))
+    assert summary[0]["artifact_count"] == 2
+    assert summary[0]["used_model"] == "gpt-image-2"
+
+
+def test_openai_detail_success_clears_stale_lovart_project_link(tmp_path):
+    product_dir = tmp_path / "products" / "SKU-ROUTING"
+    update_status(
+        product_dir,
+        "failed",
+        project_id="stale-project",
+        project_url="https://www.lovart.ai/canvas?projectId=stale-project",
+    )
+
+    run = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=2
+    )
+
+    status = read_status(run.product_dir)
+    assert status["project_id"] == ""
+    assert status["project_url"] == ""
 
 
 def test_openai_support_never_validates_or_creates_lovart_project(tmp_path):
@@ -128,7 +298,10 @@ def test_completed_lovart_product_with_invalid_project_is_reprocessed(tmp_path):
         reference_images_are_product=False,
     )
     gemini = Mock()
-    gemini.generate_prompt.return_value = "generated prompt"
+    gemini.generate_prompt.return_value = (
+        "[[SCREEN 01]]\nHero\n[[/SCREEN 01]]\n"
+        "[[SCREEN 02]]\nFeature\n[[/SCREEN 02]]"
+    )
     bot = Mock()
     bot.validate_project.return_value = False
     bot.create_project.return_value = "new-project"
@@ -153,6 +326,7 @@ def test_completed_lovart_product_with_invalid_project_is_reprocessed(tmp_path):
             bot,
             Mock(),
             tmp_path / "run",
+            prompt_settings={"detail_page_count": 2},
         )
 
     assert (success, fail, skipped, still_running) == (1, 0, 0, 0)

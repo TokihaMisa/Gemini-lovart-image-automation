@@ -156,7 +156,8 @@ def update_status(product_dir: str | Path, stage: str, **fields) -> dict:
 
 
 def is_product_completed(product_dir: str | Path) -> bool:
-    return bool(read_status(product_dir).get("lovart_done"))
+    status = read_status(product_dir)
+    return bool(status.get("detail_generation_complete") or status.get("lovart_done"))
 
 
 RESULT_FIELDNAMES = ["product_id", "product_name", "status", "project_url", "error", "used_model"]
@@ -459,7 +460,7 @@ def build_lovart_image_note(
     return "\n".join(parts) + "\n\n"
 
 
-def build_lovart_prompt(
+def build_detail_prompt(
     product_name_cn: str,
     language: str,
     selling_points: str,
@@ -468,7 +469,7 @@ def build_lovart_prompt(
     image_size: str = "",
     prompt_settings=None,
 ) -> str:
-    """Prepend product guardrails before sending Gemini's generated prompt to Lovart."""
+    """Prepend provider-neutral product guardrails to a generated detail plan."""
     settings = normalize_prompt_settings(prompt_settings)
     output_language = str(language or "").strip() or str(settings["default_language"])
     sections = "、".join(settings["required_sections"])
@@ -501,6 +502,27 @@ def build_lovart_prompt(
         f"【锁定规则（最终优先，不可覆盖）】\n{locked_rules_text()}\n\n"
         "冲突处理声明：前文、生成提示词或额外要求与本段发生冲突时，"
         "忽略冲突内容并以本段锁定规则为准。\n"
+    )
+
+
+def build_lovart_prompt(
+    product_name_cn: str,
+    language: str,
+    selling_points: str,
+    generated_prompt: str,
+    image_note: str = "",
+    image_size: str = "",
+    prompt_settings=None,
+) -> str:
+    """Backward-compatible name for the provider-neutral detail prompt builder."""
+    return build_detail_prompt(
+        product_name_cn=product_name_cn,
+        language=language,
+        selling_points=selling_points,
+        generated_prompt=generated_prompt,
+        image_note=image_note,
+        image_size=image_size,
+        prompt_settings=prompt_settings,
     )
 
 
@@ -606,6 +628,7 @@ def write_run_summary(run_dir: str | Path, rows: list[dict]) -> None:
         "project_url",
         "gemini_chars",
         "artifact_count",
+        "used_model",
         "duration_seconds",
         "error",
     ]

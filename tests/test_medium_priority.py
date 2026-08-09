@@ -1519,6 +1519,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             "artifact_count": 2,
             "duration_seconds": 9,
             "error": "",
+            "used_model": "gpt-image-2",
         }]
         with tempfile.TemporaryDirectory() as tmp:
             write_run_summary(tmp, rows)
@@ -1528,6 +1529,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
 
         self.assertEqual(data[0]["product_id"], "SKU-1")
         self.assertEqual(csv_rows[0]["product_name"], "Name, one")
+        self.assertEqual(csv_rows[0]["used_model"], "gpt-image-2")
 
     def test_gemini_debug_snapshot_writes_html_and_screenshot(self):
         class FakePage:
@@ -1912,7 +1914,10 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         class Gemini:
             def generate_prompt(self, **kwargs):
                 events.append(("gemini_images", kwargs["image_paths"]))
-                return "generated prompt"
+                return (
+                    "[[SCREEN 01]]\nHero\n[[/SCREEN 01]]\n"
+                    "[[SCREEN 02]]\nFeature\n[[/SCREEN 02]]"
+                )
 
         class Lovart:
             def create_project(self, product_id, product_name_cn=""):
@@ -1959,7 +1964,10 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                     reason="Gemini failed",
                 )
 
-                result = _process_products([Product()], Gemini(), Lovart(), Logger(), Path("runs") / "run")
+                result = _process_products(
+                    [Product()], Gemini(), Lovart(), Logger(), Path("runs") / "run",
+                    prompt_settings={"detail_page_count": 2},
+                )
             finally:
                 os.chdir(cwd)
 
@@ -1979,7 +1987,10 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         class Gemini:
             def generate_prompt(self, **kwargs):
                 events.append(("gemini_images", kwargs["image_paths"]))
-                return "generated prompt"
+                return (
+                    "[[SCREEN 01]]\nHero\n[[/SCREEN 01]]\n"
+                    "[[SCREEN 02]]\nFeature\n[[/SCREEN 02]]"
+                )
 
         class Lovart:
             def validate_project(self, project_id):
@@ -2034,7 +2045,10 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                     reason="Gemini failed",
                 )
 
-                result = _process_products([Product()], Gemini(), Lovart(), Logger(), Path("runs") / "run")
+                result = _process_products(
+                    [Product()], Gemini(), Lovart(), Logger(), Path("runs") / "run",
+                    prompt_settings={"detail_page_count": 2},
+                )
             finally:
                 os.chdir(cwd)
 

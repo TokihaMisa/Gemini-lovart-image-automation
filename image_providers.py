@@ -42,6 +42,12 @@ class DetailSetRequest:
     image_paths: tuple[str, ...]
     image_size: str
     target_count: int
+    prompt: str = ""
+    project_id: str = ""
+    product_name_cn: str = ""
+    language: str = ""
+    selling_points: str = ""
+    confirmation_advisor: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -305,11 +311,19 @@ class LovartImageProvider:
         return result
 
     def generate_detail_set(self, request: DetailSetRequest) -> ImageProviderResult:
-        prompt = "\n\n".join(screen.prompt for screen in sorted(request.screens, key=lambda item: item.index))
+        prompt = request.prompt or "\n\n".join(
+            screen.prompt for screen in sorted(request.screens, key=lambda item: item.index)
+        )
+        project_id = request.project_id or self._project_ids.get(request.product_id, "")
         raw = self.bot.create_and_generate(
             product_id=request.product_id,
             prompt=prompt,
             image_paths=list(request.image_paths),
+            project_id=project_id,
+            confirmation_advisor=request.confirmation_advisor or self.confirmation_advisor,
+            product_name_cn=request.product_name_cn,
+            language=request.language,
+            selling_points=request.selling_points,
         )
         return _lovart_result(raw, request.product_dir, request.target_count)
 

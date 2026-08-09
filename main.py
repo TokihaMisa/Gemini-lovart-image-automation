@@ -24,17 +24,23 @@ from failed_retry import FailedRetryPolicy, classify_retry_failure
 from gemini_api import GeminiAPI
 from gemini_bot import GeminiBot
 from image_generation import (
+    DetailScreen,
     GenerationRouting,
     PROVIDER_LOVART,
     PROVIDER_OPENAI_IMAGE,
+    compose_detail_image_prompt,
+    ensure_detail_page_count_snapshot,
     routing_from_config,
+    split_detail_screens,
 )
 from image_providers import (
+    DetailSetRequest,
     LazyImageProviderRegistry,
     LovartImageProvider,
     OpenAIImageProvider,
     SupportImageRequest,
     is_valid_image_file,
+    read_completed_detail_indexes,
 )
 from gemini_browser_session import (
     GeminiAuthenticationError,
@@ -63,7 +69,7 @@ from utils import (
     build_final_lovart_images,
     build_scene_prompt,
     build_white_background_prompt,
-    build_lovart_prompt,
+    build_detail_prompt,
     build_lovart_image_note,
     create_run_dir,
     env_or_config,
@@ -427,6 +433,37 @@ def _is_completed_for_support_provider(
     )
 
 
+def _is_completed_for_detail_provider(
+    product_dir: Path,
+    status: dict,
+    provider_name: str,
+) -> bool:
+    if provider_name == PROVIDER_LOVART and status.get("lovart_done"):
+        return True
+    if not status.get("detail_generation_complete"):
+        return False
+    if status.get("detail_provider") != provider_name:
+        return False
+    if provider_name != PROVIDER_OPENAI_IMAGE:
+        return True
+    try:
+        target_count = int(status["detail_page_count_snapshot"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    completed_count = len(read_completed_detail_indexes(product_dir, target_count))
+    if completed_count == target_count:
+        return True
+    update_status(
+        product_dir,
+        "detail_completion_invalid",
+        detail_generation_complete=False,
+        partial_complete=completed_count > 0,
+        detail_completed_count=completed_count,
+        artifact_count=completed_count,
+    )
+    return False
+
+
 class _SupportImageGenerationError(RuntimeError):
     def __init__(self, step_name: str, result) -> None:
         self.step_name = step_name
@@ -660,6 +697,7 @@ def _process_products_once(
     registry = image_registry or _legacy_lovart_registry(lovart, logger)
     effective_routing = routing or _default_lovart_routing(prompt_settings)
     support_provider = registry.get(effective_routing.support_provider)
+    detail_provider = None
     if hasattr(support_provider, "confirmation_advisor"):
         support_provider.confirmation_advisor = gemini
     console = Console()
@@ -695,11 +733,23 @@ def _process_products_once(
             if callable(validate_completed_support):
                 validate_completed_support(product, product_dir, status)
                 status = read_status(product_dir)
-        if resume and _is_completed_for_support_provider(
+        support_complete = resume and _is_completed_for_support_provider(
             product_dir,
             status,
             effective_routing.support_provider,
-        ):
+        )
+        detail_complete = False
+        if support_complete:
+            if detail_provider is None:
+                detail_provider = registry.get(effective_routing.detail_provider)
+                if hasattr(detail_provider, "confirmation_advisor"):
+                    detail_provider.confirmation_advisor = gemini
+            detail_complete = _is_completed_for_detail_provider(
+                product_dir,
+                status,
+                effective_routing.detail_provider,
+            )
+        if support_complete and detail_complete:
             skipped += 1
             project_url = status.get("project_url", "")
             from utils import get_output_dir
@@ -805,6 +855,10 @@ def _process_products_once(
 
             status = read_status(product_dir)
             lovart_project_id = _existing_project_id(status)
+            if detail_provider is None:
+                detail_provider = registry.get(effective_routing.detail_provider)
+                if hasattr(detail_provider, "confirmation_advisor"):
+                    detail_provider.confirmation_advisor = gemini
 
             gemini_images = [white_image, scene_image]
             if reference_sheet:
@@ -840,53 +894,187 @@ def _process_products_once(
                 support_stage = "support_images_ready"
             update_status(product_dir, support_stage, **support_fields)
 
-            prompt = gemini.generate_prompt(
-                product_id=product.id,
-                product_name_cn=product.name_cn,
-                language=product.language,
-                selling_points=product.selling_points,
-                image_paths=gemini_images,
-                image_size=getattr(product, "image_size", ""),
+            target_count = ensure_detail_page_count_snapshot(
+                product_dir, effective_routing.detail_page_count
             )
-            logger.info(f"Gemini done ({len(prompt)} chars)")
-            if _shutdown_requested:
-                break
+            detail_prompt_path = product_dir / "detail_prompt.txt"
+            detail_prompt = ""
+            screens = []
+            gemini_chars = 0
+            if resume and detail_prompt_path.exists():
+                try:
+                    detail_prompt = detail_prompt_path.read_text(encoding="utf-8")
+                    screens = split_detail_screens(detail_prompt, target_count)
+                    gemini_chars = int(read_status(product_dir).get("gemini_chars") or 0)
+                    logger.info(f"Detail prompt resumed ({len(detail_prompt)} chars)")
+                except (OSError, TypeError, ValueError):
+                    detail_prompt = ""
+                    screens = []
 
-            lovart_prompt = build_lovart_prompt(
-                product_name_cn=product.name_cn,
-                language=product.language,
-                selling_points=product.selling_points,
-                generated_prompt=prompt,
-                image_note=image_note,
-                image_size=getattr(product, "image_size", ""),
-                prompt_settings=prompt_settings,
+            if not screens:
+                prompt = gemini.generate_prompt(
+                    product_id=product.id,
+                    product_name_cn=product.name_cn,
+                    language=product.language,
+                    selling_points=product.selling_points,
+                    image_paths=gemini_images,
+                    image_size=getattr(product, "image_size", ""),
+                )
+                logger.info(f"Gemini done ({len(prompt)} chars)")
+                if _shutdown_requested:
+                    break
+                screens = split_detail_screens(prompt, target_count)
+                detail_prompt_settings = dict(prompt_settings)
+                detail_prompt_settings["detail_page_count"] = target_count
+                detail_prompt = build_detail_prompt(
+                    product_name_cn=product.name_cn,
+                    language=product.language,
+                    selling_points=product.selling_points,
+                    generated_prompt=prompt,
+                    image_note=image_note,
+                    image_size=getattr(product, "image_size", ""),
+                    prompt_settings=detail_prompt_settings,
+                )
+                gemini_chars = len(prompt)
+
+            detail_prompt_path.write_text(detail_prompt, encoding="utf-8")
+            update_status(
+                product_dir,
+                "detail_prompt_ready",
+                detail_prompt_chars=len(detail_prompt),
+                gemini_chars=gemini_chars,
             )
-            (product_dir / "lovart_prompt.txt").write_text(lovart_prompt, encoding="utf-8")
-            update_status(product_dir, "lovart_prompt_ready", lovart_prompt_chars=len(lovart_prompt))
-            logger.info(f"Lovart prompt ready ({len(lovart_prompt)} chars)")
+            if effective_routing.detail_provider == PROVIDER_LOVART:
+                (product_dir / "lovart_prompt.txt").write_text(
+                    detail_prompt, encoding="utf-8"
+                )
+                update_status(
+                    product_dir,
+                    "lovart_prompt_ready",
+                    lovart_prompt_chars=len(detail_prompt),
+                )
+            logger.info(f"Detail prompt ready ({len(detail_prompt)} chars)")
 
             if os.environ.get("UI_MODE") == "1":
-                print(f"[UI_MODEL] {lovart.tool_config.get('image_model', 'auto')}", flush=True)
+                if effective_routing.detail_provider == PROVIDER_LOVART:
+                    tool_config = getattr(lovart, "tool_config", {}) or {}
+                    selected_model = tool_config.get("image_model", "auto")
+                else:
+                    selected_model = PROVIDER_OPENAI_IMAGE
+                print(f"[UI_MODEL] {selected_model}", flush=True)
 
-            result = lovart.create_and_generate(
-                product_id=product.id,
-                prompt=lovart_prompt,
-                image_paths=lovart_images,
-                project_id=lovart_project_id,
-                confirmation_advisor=gemini,
-                product_name_cn=product.name_cn,
-                language=product.language,
-                selling_points=product.selling_points,
+            request_screens = tuple(screens)
+            if effective_routing.detail_provider == PROVIDER_OPENAI_IMAGE:
+                compose_settings = dict(prompt_settings)
+                compose_settings["detail_page_count"] = target_count
+                request_screens = tuple(
+                    DetailScreen(
+                        screen.index,
+                        compose_detail_image_prompt(
+                            screen=screen,
+                            product_name_cn=product.name_cn,
+                            language=product.language,
+                            selling_points=product.selling_points,
+                            image_note=image_note,
+                            image_size=getattr(product, "image_size", ""),
+                            prompt_settings=compose_settings,
+                        ),
+                    )
+                    for screen in screens
+                )
+            detail_result = detail_provider.generate_detail_set(
+                DetailSetRequest(
+                    product_id=product.id,
+                    product_dir=product_dir,
+                    screens=request_screens,
+                    image_paths=tuple(lovart_images),
+                    image_size=getattr(product, "image_size", ""),
+                    target_count=target_count,
+                    prompt=detail_prompt,
+                    project_id=lovart_project_id,
+                    product_name_cn=product.name_cn,
+                    language=product.language,
+                    selling_points=product.selling_points,
+                    confirmation_advisor=gemini,
+                )
+            )
+            raw_result = dict(detail_result.raw_result or {})
+            status = read_status(product_dir)
+            completed_count = max(0, int(detail_result.completed_count))
+            detail_images = list(detail_result.local_paths)
+            used_model = str(
+                detail_result.used_model
+                or raw_result.get("used_model")
+                or status.get("used_model")
+                or ""
+            )
+            if effective_routing.detail_provider == PROVIDER_OPENAI_IMAGE:
+                detail_complete = bool(
+                    detail_result.succeeded
+                    and completed_count == target_count
+                    and len(detail_images) == target_count
+                    and all(is_valid_image_file(path) for path in detail_images)
+                )
+                artifact_count = completed_count
+            else:
+                detail_complete = bool(detail_result.succeeded)
+                artifact_count = status.get(
+                    "artifact_count",
+                    raw_result.get("artifact_count", completed_count),
+                )
+            partial_complete = bool(
+                not detail_complete
+                and (detail_result.partial_complete or 0 < completed_count < target_count)
+            )
+            if effective_routing.detail_provider == PROVIDER_LOVART:
+                project_id = str(
+                    raw_result.get("project_id")
+                    or status.get("project_id")
+                    or lovart_project_id
+                )
+                project_url = str(
+                    raw_result.get("project_url")
+                    or status.get("project_url")
+                    or _lovart_project_url(project_id)
+                )
+            else:
+                project_id = ""
+                project_url = ""
+            update_status(
+                product_dir,
+                "detail_result_recorded",
+                detail_provider=effective_routing.detail_provider,
+                detail_images=detail_images,
+                detail_completed_count=completed_count,
+                detail_failed_indexes=list(detail_result.failed_indexes),
+                detail_generation_complete=detail_complete,
+                partial_complete=partial_complete,
+                artifact_count=artifact_count,
+                used_model=used_model,
+                project_id=project_id,
+                project_url=project_url,
+                reason=detail_result.error,
             )
 
-            if result and result.get("generation_succeeded"):
+            if detail_complete:
+                update_status(
+                    product_dir,
+                    "detail_generation_done",
+                    detail_generation_complete=True,
+                    partial_complete=False,
+                    failed=False,
+                    needs_manual_action=False,
+                    lovart_still_running=False,
+                    reason="",
+                )
+                result = dict(raw_result)
+                result.update(project_id=project_id, used_model=used_model)
                 url = _record_success(product, result)
                 logger.info(f"OK [{idx}/{len(products)}] {product.id} completed")
                 if url:
                     print(f"\n  >>> {url}")
                 if os.environ.get("UI_MODE") == "1":
-                    import json
-                    print(f"[UI_SUCCESS] {json.dumps({'id': product.id, 'url': url or '', 'used_model': result.get('used_model', 'unknown')})}")
+                    print(f"[UI_SUCCESS] {json.dumps({'id': product.id, 'url': url or '', 'used_model': used_model or 'unknown'})}")
                 success += 1
                 status = read_status(product_dir)
                 summary_rows.append({
@@ -894,31 +1082,40 @@ def _process_products_once(
                     "product_name": product.name_cn,
                     "status": "success",
                     "project_url": url,
-                    "gemini_chars": len(prompt),
-                    "artifact_count": status.get("artifact_count", ""),
+                    "gemini_chars": gemini_chars,
+                    "artifact_count": artifact_count,
                     "duration_seconds": round(time.time() - started, 2),
                     "error": "",
-                    "used_model": result.get("used_model", "unknown")
+                    "used_model": used_model or "unknown",
                 })
-            elif result and result.get("final_status") == "pending_confirmation":
+            elif raw_result.get("final_status") == "pending_confirmation":
                 logger.warning(f"NEEDS MANUAL ACTION [{idx}/{len(products)}] {product.id}")
                 fail += 1
-                status = read_status(product_dir)
-                project_url = _project_url_from_status(status)
-                _record_failure(product, "needs_manual_action", "Lovart pending confirmation on all fallback models", project_url)
+                reason = detail_result.error or "Lovart pending confirmation on all fallback models"
+                update_status(
+                    product_dir,
+                    "needs_manual_action",
+                    detail_generation_complete=False,
+                    partial_complete=partial_complete,
+                    failed=False,
+                    needs_manual_action=True,
+                    lovart_still_running=False,
+                    reason=reason,
+                    project_url=project_url,
+                )
+                _record_failure(product, "needs_manual_action", reason, project_url)
                 summary_rows.append({
                     "product_id": product.id,
                     "product_name": product.name_cn,
                     "status": "needs_manual_action",
                     "project_url": project_url,
-                    "gemini_chars": len(prompt),
-                    "artifact_count": "",
+                    "gemini_chars": gemini_chars,
+                    "artifact_count": artifact_count,
                     "duration_seconds": round(time.time() - started, 2),
-                    "error": "Lovart pending confirmation on all fallback models",
+                    "error": reason,
+                    "used_model": used_model,
                 })
-            elif result and result.get("final_status") == "timeout":
-                status = read_status(product_dir)
-                project_url = status.get("project_url", "")
+            elif raw_result.get("final_status") == "timeout":
                 logger.warning(f"STILL RUNNING [{idx}/{len(products)}] {product.id}")
                 still_running += 1
                 if project_url:
@@ -929,35 +1126,60 @@ def _process_products_once(
                     "Lovart still running after local wait timeout",
                     project_url,
                 )
+                update_status(
+                    product_dir,
+                    "lovart_still_running",
+                    detail_generation_complete=False,
+                    partial_complete=partial_complete,
+                    failed=False,
+                    needs_manual_action=False,
+                    reason="Lovart still running after local wait timeout",
+                    project_url=project_url,
+                )
                 summary_rows.append({
                     "product_id": product.id,
                     "product_name": product.name_cn,
                     "status": "lovart_still_running",
                     "project_url": project_url,
-                    "gemini_chars": len(prompt),
-                    "artifact_count": "",
+                    "gemini_chars": gemini_chars,
+                    "artifact_count": artifact_count,
                     "duration_seconds": round(time.time() - started, 2),
                     "error": "Lovart still running after local wait timeout",
+                    "used_model": used_model,
                 })
             else:
                 logger.warning(f"WARN [{idx}/{len(products)}] {product.id} failed")
                 fail += 1
-                reason = ""
-                if result:
-                    reason = result.get("warning") or result.get("final_status") or ""
-                status = read_status(product_dir)
-                project_url = _project_url_from_status(status)
-                update_status(product_dir, "failed", reason=reason, project_url=project_url)
+                reason = str(
+                    detail_result.error
+                    or raw_result.get("warning")
+                    or raw_result.get("final_status")
+                    or "Detail image generation failed"
+                )
+                update_status(
+                    product_dir,
+                    "failed",
+                    reason=reason,
+                    project_url=project_url,
+                    detail_generation_complete=False,
+                    partial_complete=partial_complete,
+                    needs_manual_action=False,
+                    lovart_still_running=False,
+                )
                 _record_failure(product, "failed", reason, project_url)
                 summary_rows.append({
                     "product_id": product.id,
                     "product_name": product.name_cn,
                     "status": "failed",
                     "project_url": project_url,
-                    "gemini_chars": len(prompt),
-                    "artifact_count": "",
+                    "gemini_chars": gemini_chars,
+                    "artifact_count": artifact_count,
                     "duration_seconds": round(time.time() - started, 2),
                     "error": reason,
+                    "used_model": used_model,
+                    "partial_complete": partial_complete,
+                    "detail_completed_count": completed_count,
+                    "detail_failed_indexes": list(detail_result.failed_indexes),
                 })
         except Exception as exc:
             status = read_status(product_dir)

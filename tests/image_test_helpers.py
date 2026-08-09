@@ -6,7 +6,8 @@ from unittest.mock import Mock, patch
 
 import main
 from image_generation import GenerationRouting
-from image_providers import ImageProviderResult
+from image_providers import ImageProviderResult, LovartImageProvider, OpenAIImageProvider
+from utils import read_status
 
 
 VALID_PNG_BASE64 = (
@@ -82,6 +83,35 @@ class RecordingRegistry:
         return self.providers[name]
 
 
+class RecordingOpenAIAPI:
+    def __init__(self, fail_indexes=frozenset()) -> None:
+        self.fail_indexes = frozenset(fail_indexes)
+        self.generated_indexes: list[int] = []
+
+    def generate_edit(self, *, output_path, **_kwargs):
+        output_path = Path(output_path)
+        index = int(output_path.stem)
+        if index in self.fail_indexes:
+            raise RuntimeError(f"screen {index} failed")
+        self.generated_indexes.append(index)
+        write_valid_png(output_path)
+        return SimpleNamespace(local_path=str(output_path), model="gpt-image-2")
+
+
+class PipelineOpenAIProvider:
+    name = "openai_image"
+
+    def __init__(self, api) -> None:
+        self.support = RecordingImageProvider(self.name)
+        self.detail = OpenAIImageProvider(api)
+
+    def generate_support_image(self, request):
+        return self.support.generate_support_image(request)
+
+    def generate_detail_set(self, request):
+        return self.detail.generate_detail_set(request)
+
+
 @dataclass(frozen=True)
 class PipelineRunResult:
     success: int
@@ -103,7 +133,6 @@ def run_product_pipeline(
     lovart=None,
     openai_api=None,
 ):
-    del openai_api
     product_dir = Path(tmp_path) / "products" / "SKU-ROUTING"
     product_image = write_valid_png(product_dir / "product.png")
     product = SimpleNamespace(
@@ -115,7 +144,12 @@ def run_product_pipeline(
         image_paths=[product_image],
         reference_images_are_product=False,
     )
-    screen_count = detail_count if prompt_screen_count is None else prompt_screen_count
+    saved_target = read_status(product_dir).get("detail_page_count_snapshot")
+    screen_count = (
+        int(saved_target) if prompt_screen_count is None and saved_target is not None
+        else detail_count if prompt_screen_count is None
+        else prompt_screen_count
+    )
     marked_prompt = "\n\n".join(
         f"[[SCREEN {index:02d}]]\nScreen {index}\n[[/SCREEN {index:02d}]]"
         for index in range(1, screen_count + 1)
@@ -123,16 +157,28 @@ def run_product_pipeline(
     gemini = Mock()
     gemini.generate_prompt.return_value = marked_prompt
 
-    if lovart is None:
+    supplied_lovart = lovart is not None
+    if not supplied_lovart:
         lovart = Mock()
-    lovart.create_project.return_value = "project-routing"
-    lovart.create_and_generate.return_value = {
-        "generation_succeeded": True,
-        "project_id": "project-routing",
-        "used_model": "lovart",
-    }
-    lovart_provider = RecordingImageProvider("lovart", fail_indexes=fail_indexes)
-    openai_provider = RecordingImageProvider("openai_image", fail_indexes=fail_indexes)
+        lovart.create_project.return_value = "project-routing"
+        lovart.validate_project.return_value = True
+        lovart.create_support_image.side_effect = lambda **kwargs: {
+            "generation_succeeded": True,
+            "project_id": kwargs.get("project_id", "project-routing"),
+            "local_path": write_valid_png(
+                product_dir / "lovart_steps" / kwargs["step_name"] / f"{kwargs['step_name']}.png"
+            ),
+            "used_model": "lovart",
+        }
+        lovart.create_and_generate.return_value = {
+            "generation_succeeded": True,
+            "project_id": "project-routing",
+            "used_model": "lovart",
+        }
+    if openai_api is None:
+        openai_api = RecordingOpenAIAPI(fail_indexes=fail_indexes)
+    lovart_provider = LovartImageProvider(lovart)
+    openai_provider = PipelineOpenAIProvider(openai_api)
     registry = RecordingRegistry(lovart_provider, openai_provider)
     routing = GenerationRouting(support_provider, detail_provider, detail_count)
     run_dir = Path(tmp_path) / "run"
@@ -154,5 +200,8 @@ def run_product_pipeline(
             routing=routing,
         )
 
-    generated_indexes = tuple(openai_provider.generated_indexes)
+    recorded_indexes = getattr(openai_api, "generated_indexes", ())
+    generated_indexes = tuple(
+        recorded_indexes if isinstance(recorded_indexes, (list, tuple)) else ()
+    )
     return PipelineRunResult(*counters, product_dir, registry, generated_indexes)

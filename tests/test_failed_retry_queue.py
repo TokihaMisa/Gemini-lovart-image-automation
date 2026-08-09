@@ -146,6 +146,50 @@ class FailedRetryQueueTests(unittest.TestCase):
             self.assertEqual(calls, [1])
             self.assertEqual(result, (0, 1, 0, 0))
 
+    def test_partial_detail_failure_is_retried_and_replaced_by_complete_summary(self):
+        product = _Product("SKU-PARTIAL")
+        calls = []
+
+        def process_once(_current, _gemini, _lovart, _logger, run_dir, **_kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                row = {
+                    "product_id": product.id,
+                    "status": "failed",
+                    "error": "screen 2: temporary upstream failure",
+                    "artifact_count": 2,
+                    "partial_complete": True,
+                }
+            else:
+                row = {
+                    "product_id": product.id,
+                    "status": "success",
+                    "error": "",
+                    "artifact_count": 3,
+                    "partial_complete": False,
+                }
+            write_run_summary(run_dir, [row])
+            return 0, 0, 0, 0
+
+        policy = FailedRetryPolicy(
+            mode=RETRY_MODE_FINITE,
+            rounds=1,
+            delay=0,
+            error_types=("other",),
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "main._process_products_once", side_effect=process_once
+        ):
+            result = main._process_products(
+                [product], object(), _Lovart(policy), _Logger(), Path(tmp)
+            )
+            final_rows = main._read_run_summary(Path(tmp))
+
+        self.assertEqual(calls, [1, 1])
+        self.assertEqual(result, (1, 0, 0, 0))
+        self.assertEqual(final_rows[0]["status"], "success")
+        self.assertEqual(final_rows[0]["artifact_count"], 3)
+
     def test_permanent_failure_never_falls_into_other_category(self):
         self.assertIsNone(classify_retry_failure({
             "status": "failed",
