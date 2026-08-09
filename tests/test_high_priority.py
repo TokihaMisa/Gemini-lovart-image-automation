@@ -37,8 +37,15 @@ class HighPriorityBehaviorTests(unittest.TestCase):
             "OPENAI_IMAGE_API_KEY=your_openai_image_api_key",
             Path(".env.example").read_text(encoding="utf-8"),
         )
+        self.assertIn(
+            "Copy this tracked example to your local untracked .env",
+            Path(".env.example").read_text(encoding="utf-8"),
+        )
         self.assertIn("GPT Image", Path("README.md").read_text(encoding="utf-8"))
-        self.assertIn("/images/edits", Path("PROJECT_OVERVIEW.md").read_text(encoding="utf-8"))
+        overview = Path("PROJECT_OVERVIEW.md").read_text(encoding="utf-8")
+        self.assertIn("/images/edits", overview)
+        self.assertIn("detail_page_count_snapshot", overview)
+        self.assertNotIn("生成 12 屏详情页提示词", overview)
 
     def test_env_or_config_prefers_environment(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": "from-env"}):
