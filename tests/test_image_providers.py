@@ -157,3 +157,62 @@ def test_lovart_adapter_preserves_pending_confirmation_result(tmp_path: Path):
         "prompt": "plain white background",
         "image_paths": ["product.png"],
     }
+
+
+def test_lovart_detail_result_never_falls_back_to_uploaded_support_images(tmp_path: Path):
+    from image_providers import DetailSetRequest, LovartImageProvider
+    from utils import update_status
+
+    white = write_valid_png(tmp_path / "support" / "white.png")
+    scene = write_valid_png(tmp_path / "support" / "scene.png")
+    update_status(tmp_path, "lovart_final_images_ready", lovart_final_images=[white, scene])
+    bot = Mock()
+    bot.create_and_generate.return_value = {
+        "generation_succeeded": True,
+        "project_id": "project-1",
+        "used_model": "nano_banana_2",
+    }
+    request = DetailSetRequest(
+        product_id="P1",
+        product_dir=tmp_path,
+        screens=(DetailScreen(1, "hero"), DetailScreen(2, "feature")),
+        image_paths=(white, scene),
+        image_size="1:1",
+        target_count=2,
+    )
+
+    result = LovartImageProvider(bot).generate_detail_set(request)
+
+    assert result.succeeded is True
+    assert result.local_paths == ()
+    assert result.artifact_count == 0
+
+
+def test_lovart_detail_adapter_returns_only_downloaded_detail_artifact_paths(tmp_path: Path):
+    from image_providers import DetailSetRequest, LovartImageProvider
+
+    detail = write_valid_png(tmp_path / "lovart" / "detail.png")
+    bot = Mock()
+    bot.create_and_generate.return_value = {
+        "generation_succeeded": True,
+        "project_id": "project-1",
+        "used_model": "nano_banana_2",
+        "artifact_count": 1,
+        "downloaded": [
+            {"type": "image", "local_path": detail},
+            {"type": "video", "local_path": str(tmp_path / "preview.mp4")},
+        ],
+    }
+    request = DetailSetRequest(
+        product_id="P1",
+        product_dir=tmp_path,
+        screens=(DetailScreen(1, "hero"),),
+        image_paths=(write_valid_png(tmp_path / "support.png"),),
+        image_size="1:1",
+        target_count=1,
+    )
+
+    result = LovartImageProvider(bot).generate_detail_set(request)
+
+    assert result.local_paths == (detail,)
+    assert result.artifact_count == 1

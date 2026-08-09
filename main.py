@@ -330,9 +330,23 @@ def _record_success(product, result: dict) -> str:
     return project_url
 
 
-def _record_failure(product, status: str, error: str = "", project_url: str = "") -> None:
+def _record_failure(
+    product,
+    status: str,
+    error: str = "",
+    project_url: str = "",
+    used_model: str = "",
+) -> None:
     from utils import get_output_dir
-    append_result(f"{get_output_dir()}/results.csv", product.id, product.name_cn, project_url, status=status, error=error)
+    append_result(
+        f"{get_output_dir()}/results.csv",
+        product.id,
+        product.name_cn,
+        project_url,
+        status=status,
+        error=error,
+        used_model=used_model,
+    )
     if os.environ.get("UI_MODE") == "1":
         import json
         is_manual = (status == "needs_manual_action")
@@ -437,12 +451,36 @@ def _is_completed_for_detail_provider(
     product_dir: Path,
     status: dict,
     provider_name: str,
+    configured_count: int,
 ) -> bool:
-    if provider_name == PROVIDER_LOVART and status.get("lovart_done"):
-        return True
-    if not status.get("detail_generation_complete"):
+    saved_provider = str(status.get("detail_provider") or "")
+    snapshot = status.get("detail_page_count_snapshot")
+    if (
+        provider_name == PROVIDER_LOVART
+        and status.get("lovart_done")
+        and saved_provider in {"", PROVIDER_LOVART}
+        and snapshot is None
+    ):
+        snapshot = ensure_detail_page_count_snapshot(product_dir, configured_count)
+        status = update_status(
+            product_dir,
+            "legacy_lovart_completion_migrated",
+            detail_provider=PROVIDER_LOVART,
+            detail_generation_complete=True,
+            detail_page_count_snapshot=snapshot,
+        )
+        saved_provider = PROVIDER_LOVART
+    elif provider_name == PROVIDER_LOVART and status.get("lovart_done") and not saved_provider:
+        status = update_status(
+            product_dir,
+            "legacy_lovart_completion_migrated",
+            detail_provider=PROVIDER_LOVART,
+            detail_generation_complete=True,
+        )
+        saved_provider = PROVIDER_LOVART
+    if saved_provider != provider_name or snapshot is None:
         return False
-    if status.get("detail_provider") != provider_name:
+    if not status.get("detail_generation_complete"):
         return False
     if provider_name != PROVIDER_OPENAI_IMAGE:
         return True
@@ -748,12 +786,20 @@ def _process_products_once(
                 product_dir,
                 status,
                 effective_routing.detail_provider,
+                effective_routing.detail_page_count,
             )
         if support_complete and detail_complete:
             skipped += 1
             project_url = status.get("project_url", "")
             from utils import get_output_dir
-            append_result(f"{get_output_dir()}/results.csv", product.id, product.name_cn, project_url, status="success")
+            append_result(
+                f"{get_output_dir()}/results.csv",
+                product.id,
+                product.name_cn,
+                project_url,
+                status="success",
+                used_model=str(status.get("used_model") or ""),
+            )
             logger.info(f"SKIP [{idx}/{len(products)}] {product.id} already completed")
             if project_url:
                 console.print(f"  [green]SKIP[/green] {product.id} already completed: [link={project_url}]{project_url}[/link]")
@@ -766,6 +812,7 @@ def _process_products_once(
                 "artifact_count": status.get("artifact_count", ""),
                 "duration_seconds": 0,
                 "error": "",
+                "used_model": status.get("used_model", ""),
             })
             continue
 
@@ -1002,10 +1049,15 @@ def _process_products_once(
             status = read_status(product_dir)
             completed_count = max(0, int(detail_result.completed_count))
             detail_images = list(detail_result.local_paths)
+            previous_detail_provider = str(status.get("detail_provider") or "")
             used_model = str(
                 detail_result.used_model
                 or raw_result.get("used_model")
-                or status.get("used_model")
+                or (
+                    status.get("used_model")
+                    if previous_detail_provider == effective_routing.detail_provider
+                    else ""
+                )
                 or ""
             )
             if effective_routing.detail_provider == PROVIDER_OPENAI_IMAGE:
@@ -1018,10 +1070,7 @@ def _process_products_once(
                 artifact_count = completed_count
             else:
                 detail_complete = bool(detail_result.succeeded)
-                artifact_count = status.get(
-                    "artifact_count",
-                    raw_result.get("artifact_count", completed_count),
-                )
+                artifact_count = max(0, int(detail_result.artifact_count))
             partial_complete = bool(
                 not detail_complete
                 and (detail_result.partial_complete or 0 < completed_count < target_count)
@@ -1051,6 +1100,11 @@ def _process_products_once(
                 partial_complete=partial_complete,
                 artifact_count=artifact_count,
                 used_model=used_model,
+                lovart_done=(
+                    detail_complete
+                    if effective_routing.detail_provider == PROVIDER_LOVART
+                    else False
+                ),
                 project_id=project_id,
                 project_url=project_url,
                 reason=detail_result.error,
@@ -1103,7 +1157,13 @@ def _process_products_once(
                     reason=reason,
                     project_url=project_url,
                 )
-                _record_failure(product, "needs_manual_action", reason, project_url)
+                _record_failure(
+                    product,
+                    "needs_manual_action",
+                    reason,
+                    project_url,
+                    used_model=used_model,
+                )
                 summary_rows.append({
                     "product_id": product.id,
                     "product_name": product.name_cn,
@@ -1125,6 +1185,7 @@ def _process_products_once(
                     "lovart_still_running",
                     "Lovart still running after local wait timeout",
                     project_url,
+                    used_model=used_model,
                 )
                 update_status(
                     product_dir,
@@ -1166,7 +1227,13 @@ def _process_products_once(
                     needs_manual_action=False,
                     lovart_still_running=False,
                 )
-                _record_failure(product, "failed", reason, project_url)
+                _record_failure(
+                    product,
+                    "failed",
+                    reason,
+                    project_url,
+                    used_model=used_model,
+                )
                 summary_rows.append({
                     "product_id": product.id,
                     "product_name": product.name_cn,
@@ -1187,7 +1254,13 @@ def _process_products_once(
             update_status(product_dir, "failed", reason=str(exc), project_url=project_url)
             logger.error(f"FAIL [{idx}/{len(products)}] {product.id}: {exc}")
             fail += 1
-            _record_failure(product, "failed", str(exc), project_url)
+            _record_failure(
+                product,
+                "failed",
+                str(exc),
+                project_url,
+                used_model=str(status.get("used_model") or ""),
+            )
             summary_rows.append({
                 "product_id": product.id,
                 "product_name": product.name_cn,

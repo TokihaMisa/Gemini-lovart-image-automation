@@ -56,6 +56,7 @@ class ImageProviderResult:
     local_paths: tuple[str, ...] = ()
     used_model: str = ""
     completed_count: int = 0
+    artifact_count: int = 0
     failed_indexes: tuple[int, ...] = ()
     partial_complete: bool = False
     error: str = ""
@@ -372,11 +373,11 @@ def is_valid_image_file(value: object) -> bool:
 def _lovart_result(raw_result: object, product_dir: Path, completed_count: int) -> ImageProviderResult:
     raw = raw_result if isinstance(raw_result, Mapping) else {}
     generation_succeeded = raw.get("generation_succeeded")
-    local_paths = _lovart_local_paths(
-        raw,
-        product_dir,
-        allow_legacy_status=generation_succeeded is True,
-    )
+    local_paths = _lovart_local_paths(raw)
+    try:
+        artifact_count = max(0, int(raw.get("artifact_count", len(local_paths))))
+    except (TypeError, ValueError):
+        artifact_count = len(local_paths)
     succeeded = bool(
         generation_succeeded is True
         or generation_succeeded is None and local_paths
@@ -387,6 +388,7 @@ def _lovart_result(raw_result: object, product_dir: Path, completed_count: int) 
         local_paths=local_paths,
         used_model=str(raw.get("used_model") or ""),
         completed_count=completed_count if succeeded else 0,
+        artifact_count=artifact_count,
         error=error,
         raw_result=raw_result if isinstance(raw_result, Mapping) else None,
     )
@@ -394,8 +396,6 @@ def _lovart_result(raw_result: object, product_dir: Path, completed_count: int) 
 
 def _lovart_local_paths(
     raw: Mapping[str, object],
-    product_dir: Path,
-    allow_legacy_status: bool = True,
 ) -> tuple[str, ...]:
     paths: list[str] = []
     for key in ("local_path", "local_paths"):
@@ -404,11 +404,17 @@ def _lovart_local_paths(
             paths.append(value)
         elif isinstance(value, (list, tuple)):
             paths.extend(str(item) for item in value if isinstance(item, (str, Path)) and str(item))
-    if not paths and allow_legacy_status:
-        legacy_paths = read_status(product_dir).get("lovart_final_images", [])
-        if isinstance(legacy_paths, (list, tuple)):
-            paths.extend(str(item) for item in legacy_paths if isinstance(item, (str, Path)) and str(item))
-    return tuple(paths)
+    downloaded = raw.get("downloaded", [])
+    if isinstance(downloaded, (list, tuple)):
+        paths.extend(
+            str(item["local_path"])
+            for item in downloaded
+            if isinstance(item, Mapping)
+            and item.get("type") in {"image", "unknown", None}
+            and isinstance(item.get("local_path"), (str, Path))
+            and str(item["local_path"])
+        )
+    return tuple(dict.fromkeys(paths))
 
 
 def _lovart_project_url(project_id: str = "") -> str:

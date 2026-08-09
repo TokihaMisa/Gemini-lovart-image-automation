@@ -121,6 +121,7 @@ class PipelineRunResult:
     product_dir: Path
     registry: RecordingRegistry
     generated_indexes: tuple[int, ...]
+    append_result: Mock
 
 
 def run_product_pipeline(
@@ -183,11 +184,12 @@ def run_product_pipeline(
     routing = GenerationRouting(support_provider, detail_provider, detail_count)
     run_dir = Path(tmp_path) / "run"
     logger = Mock()
+    append_result = Mock()
 
     with (
         patch("main.product_output_dir", return_value=product_dir),
         patch("main._backfill_result_project_urls", return_value=0),
-        patch("main.append_result"),
+        patch("main.append_result", append_result),
         patch("utils.organize_output_folders"),
     ):
         counters = main._process_products_once(
@@ -204,4 +206,6 @@ def run_product_pipeline(
     generated_indexes = tuple(
         recorded_indexes if isinstance(recorded_indexes, (list, tuple)) else ()
     )
-    return PipelineRunResult(*counters, product_dir, registry, generated_indexes)
+    return PipelineRunResult(
+        *counters, product_dir, registry, generated_indexes, append_result
+    )

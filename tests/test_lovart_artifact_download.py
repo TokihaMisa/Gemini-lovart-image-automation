@@ -113,6 +113,53 @@ class LovartArtifactDownloadTests(unittest.TestCase):
         self.assertIn("Clash", returned["warning"])
         self.assertNotIn("token=secret", returned["warning"])
 
+    def test_detail_generation_returns_downloaded_local_artifact_paths(self):
+        bot = LovartBot.__new__(LovartBot)
+        bot.cfg = {}
+        bot.logger = _Logger()
+        bot.tool_config = {"image_model": "nano_banana_2"}
+        bot._execute_with_fallback = lambda *_args, **_kwargs: (
+            {
+                "generation_succeeded": True,
+                "final_status": "done",
+                "used_model": "nano_banana_2",
+            },
+            "project-id",
+            "thread-id",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            detail_path = Path(tmp) / "lovart" / "detail.png"
+            detail_path.parent.mkdir(parents=True)
+            detail_path.write_bytes(b"generated-detail")
+
+            class Skill:
+                @staticmethod
+                def download_artifacts(_result, _output_dir, prefix="lovart"):
+                    return [
+                        {
+                            "type": "image",
+                            "url": "https://a.lovart.ai/detail.png",
+                            "local_path": str(detail_path),
+                            "new": True,
+                        }
+                    ]
+
+            bot.skill = Skill()
+            with patch("lovart_bot.product_output_dir", return_value=Path(tmp)), patch(
+                "lovart_bot.update_status"
+            ), patch.object(bot, "_rename_project"):
+                returned = bot.create_and_generate(
+                    product_id="SKU-1",
+                    prompt="prompt",
+                    image_paths=["support.png"],
+                    project_id="project-id",
+                )
+
+        self.assertEqual(returned["local_paths"], [str(detail_path)])
+        self.assertEqual(returned["artifact_count"], 1)
+        self.assertEqual(returned["downloaded"][0]["type"], "image")
+
     def test_support_step_reuses_completed_thread_after_download_failure(self):
         bot = LovartBot.__new__(LovartBot)
         bot.cfg = {}

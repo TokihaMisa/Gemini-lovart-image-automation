@@ -457,6 +457,14 @@ class LovartBot:
                 out_dir.mkdir(parents=True, exist_ok=True)
                 downloaded = self.skill.download_artifacts(result, str(out_dir))
                 artifact_count = len([item for item in downloaded if item.get("local_path")])
+                detail_paths = [
+                    item.get("local_path")
+                    for item in downloaded
+                    if item.get("local_path") and item.get("type") in {"image", "unknown"}
+                ]
+                result["downloaded"] = downloaded
+                result["local_paths"] = detail_paths
+                result["artifact_count"] = artifact_count
                 project_url = f"https://www.lovart.ai/canvas?projectId={project_id}"
                 download_warning = _artifact_download_failure_message(downloaded)
                 if artifact_count == 0 and download_warning:

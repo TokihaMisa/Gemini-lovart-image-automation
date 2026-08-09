@@ -88,6 +88,31 @@ class HighPriorityBehaviorTests(unittest.TestCase):
         self.assertEqual(rows[1]["product_id"], "SKU-NEW")
         self.assertEqual(rows[1]["project_url"], "https://example.test/new")
 
+    def test_append_result_keeps_existing_model_when_status_update_has_no_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "results.csv"
+            append_result(
+                path,
+                "SKU-MODEL",
+                "Product",
+                status="success",
+                used_model="gpt-image-2",
+            )
+
+            append_result(
+                path,
+                "SKU-MODEL",
+                "Product",
+                status="failed",
+                error="temporary failure",
+            )
+
+            with path.open("r", encoding="utf-8", newline="") as fh:
+                row = next(csv.DictReader(fh))
+
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["used_model"], "gpt-image-2")
+
     def test_split_image_roles_preserves_empty_accessory_and_dimension_slots(self):
         roles = split_image_roles(["product.png", "", "", "ref1.png", "", "ref2.png"])
 

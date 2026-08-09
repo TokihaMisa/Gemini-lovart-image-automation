@@ -198,6 +198,8 @@ def append_result(
 
     if product_id not in by_id:
         order.append(product_id)
+    elif not new_row["used_model"]:
+        new_row["used_model"] = by_id[product_id].get("used_model", "")
     by_id[product_id] = new_row
 
     temp_path = path.with_suffix(".csv.tmp")

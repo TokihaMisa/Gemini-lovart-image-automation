@@ -87,6 +87,7 @@ def test_partial_detail_failure_keeps_completed_images_and_resumes_only_missing(
     assert first_status["detail_failed_indexes"] == [2]
     assert first_status["artifact_count"] == 2
     assert len(first_status["detail_images"]) == 2
+    assert first.append_result.call_args.kwargs["used_model"] == "gpt-image-2"
 
     second = run_product_pipeline(
         tmp_path,
@@ -107,6 +108,17 @@ def test_partial_detail_failure_keeps_completed_images_and_resumes_only_missing(
     assert second_status["failed"] is False
     assert second_status["reason"] == ""
     assert [Path(path).stem for path in second_status["detail_images"]] == ["01", "02", "03"]
+
+    skipped = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=7,
+    )
+    assert (skipped.success, skipped.skipped) == (0, 1)
+    assert skipped.append_result.call_args.kwargs["used_model"] == "gpt-image-2"
+    summary = json.loads((tmp_path / "run" / "summary.json").read_text(encoding="utf-8"))
+    assert summary[0]["used_model"] == "gpt-image-2"
 
 
 def test_completed_openai_detail_set_regenerates_only_corrupt_screen(tmp_path):
@@ -201,6 +213,91 @@ def test_openai_detail_success_clears_stale_lovart_project_link(tmp_path):
     status = read_status(run.product_dir)
     assert status["project_id"] == ""
     assert status["project_url"] == ""
+
+
+def test_legacy_lovart_completion_is_migrated_with_provider_and_snapshot(tmp_path):
+    product_dir = tmp_path / "products" / "SKU-ROUTING"
+    white = write_valid_png(product_dir / "lovart_steps" / "white_bg" / "white.png")
+    scene = write_valid_png(product_dir / "lovart_steps" / "scene" / "scene.png")
+    update_status(
+        product_dir,
+        "lovart_done",
+        project_id="legacy-project",
+        lovart_white_bg_local_path=white,
+        lovart_scene_local_path=scene,
+        lovart_final_images=[white, scene],
+        used_model="nano_banana_2",
+    )
+
+    run = run_product_pipeline(tmp_path, "lovart", "lovart", detail_count=4)
+
+    assert (run.success, run.skipped) == (0, 1)
+    status = read_status(product_dir)
+    assert status["detail_provider"] == "lovart"
+    assert status["detail_page_count_snapshot"] == 4
+    assert status["detail_generation_complete"] is True
+    assert run.append_result.call_args.kwargs["used_model"] == "nano_banana_2"
+
+
+def test_lovart_openai_lovart_switch_does_not_reuse_stale_lovart_done(tmp_path):
+    product_dir = tmp_path / "products" / "SKU-ROUTING"
+    white = write_valid_png(product_dir / "lovart_steps" / "white_bg" / "white.png")
+    scene = write_valid_png(product_dir / "lovart_steps" / "scene" / "scene.png")
+    update_status(
+        product_dir,
+        "lovart_done",
+        project_id="legacy-project",
+        lovart_white_bg_local_path=white,
+        lovart_scene_local_path=scene,
+        lovart_final_images=[white, scene],
+    )
+
+    openai = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=2
+    )
+    assert openai.success == 1
+    assert read_status(product_dir)["lovart_done"] is False
+
+    lovart = run_product_pipeline(tmp_path, "lovart", "lovart", detail_count=9)
+
+    assert (lovart.success, lovart.skipped) == (1, 0)
+    lovart_bot = lovart.registry.providers["lovart"].bot
+    lovart_bot.create_and_generate.assert_called_once()
+    status = read_status(product_dir)
+    assert status["detail_provider"] == "lovart"
+    assert status["detail_page_count_snapshot"] == 2
+
+
+def test_provider_change_to_pending_lovart_clears_openai_artifacts_and_reports_model(tmp_path):
+    first = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=2
+    )
+    assert first.success == 1
+
+    lovart = Mock()
+    lovart.create_and_generate.return_value = {
+        "generation_succeeded": False,
+        "final_status": "pending_confirmation",
+        "project_id": "lovart-project",
+        "used_model": "nano_banana_2",
+        "warning": "confirmation required",
+    }
+    pending = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "lovart",
+        detail_count=8,
+        lovart=lovart,
+    )
+
+    assert (pending.success, pending.fail) == (0, 1)
+    status = read_status(pending.product_dir)
+    assert status["detail_completed_count"] == 0
+    assert status["detail_images"] == []
+    assert status["artifact_count"] == 0
+    assert status["partial_complete"] is False
+    assert status["used_model"] == "nano_banana_2"
+    assert pending.append_result.call_args.kwargs["used_model"] == "nano_banana_2"
 
 
 def test_openai_support_never_validates_or_creates_lovart_project(tmp_path):
