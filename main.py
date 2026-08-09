@@ -34,6 +34,7 @@ from image_providers import (
     LovartImageProvider,
     OpenAIImageProvider,
     SupportImageRequest,
+    is_valid_image_file,
 )
 from gemini_browser_session import (
     GeminiAuthenticationError,
@@ -355,7 +356,7 @@ def _existing_path(path: str | Path | None) -> str:
     if not path:
         return ""
     candidate = Path(path)
-    return str(candidate) if candidate.exists() else ""
+    return str(candidate) if is_valid_image_file(candidate) else ""
 
 
 def _find_support_image(
@@ -392,13 +393,38 @@ def _find_support_image(
         image_exts = {".png", ".jpg", ".jpeg", ".webp"}
         candidates = [
             path for path in step_dir.iterdir()
-            if path.is_file() and path.suffix.lower() in image_exts and path.stat().st_size > 0
+            if path.is_file()
+            and path.suffix.lower() in image_exts
+            and is_valid_image_file(path)
         ]
         if candidates:
             candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
             return str(candidates[0])
 
     return ""
+
+
+def _is_completed_for_support_provider(
+    product_dir: Path,
+    status: dict,
+    provider_name: str,
+) -> bool:
+    if not is_product_completed(product_dir):
+        return False
+    if status.get("lovart_support_resume_invalidated"):
+        return False
+    include_lovart_legacy = provider_name == PROVIDER_LOVART
+    return all(
+        _find_support_image(
+            product_dir,
+            status,
+            step_name,
+            final_index,
+            include_lovart_legacy=include_lovart_legacy,
+            provider_name=provider_name,
+        )
+        for step_name, final_index in (("white_bg", 0), ("scene", 1))
+    )
 
 
 class _SupportImageGenerationError(RuntimeError):
@@ -659,9 +685,22 @@ def _process_products_once(
             image_count=len(product.image_paths),
         )
 
+        status = read_status(product_dir)
         if resume and is_product_completed(product_dir):
+            validate_completed_support = getattr(
+                support_provider,
+                "validate_completed_support",
+                None,
+            )
+            if callable(validate_completed_support):
+                validate_completed_support(product, product_dir, status)
+                status = read_status(product_dir)
+        if resume and _is_completed_for_support_provider(
+            product_dir,
+            status,
+            effective_routing.support_provider,
+        ):
             skipped += 1
-            status = read_status(product_dir)
             project_url = status.get("project_url", "")
             from utils import get_output_dir
             append_result(f"{get_output_dir()}/results.csv", product.id, product.name_cn, project_url, status="success")

@@ -9,9 +9,10 @@ from tests.image_test_helpers import (
     RecordingImageProvider,
     RecordingRegistry,
     run_product_pipeline,
+    write_truncated_png,
     write_valid_png,
 )
-from utils import read_status, update_status
+from utils import is_product_completed, read_status, update_status
 
 
 @pytest.mark.parametrize(
@@ -55,6 +56,108 @@ def test_openai_support_never_validates_or_creates_lovart_project(tmp_path):
     assert "lovart_final_images_ready" not in status
     assert "lovart_white_bg_local_path" not in status
     assert "lovart_scene_local_path" not in status
+
+
+def test_completed_lovart_product_switching_to_openai_support_is_reprocessed(tmp_path):
+    product_dir = tmp_path / "products" / "SKU-ROUTING"
+    old_white = write_valid_png(product_dir / "lovart_steps" / "white_bg" / "old.png")
+    old_scene = write_valid_png(product_dir / "lovart_steps" / "scene" / "old.png")
+    update_status(
+        product_dir,
+        "lovart_done",
+        project_id="old-project",
+        white_bg_local_path=old_white,
+        white_bg_provider="lovart",
+        scene_local_path=old_scene,
+        scene_provider="lovart",
+        lovart_white_bg_local_path=old_white,
+        lovart_scene_local_path=old_scene,
+        lovart_final_images=[old_white, old_scene],
+    )
+
+    run = run_product_pipeline(tmp_path, "openai_image", "lovart")
+
+    assert (run.success, run.skipped) == (1, 0)
+    status = read_status(product_dir)
+    assert status["white_bg_provider"] == "openai_image"
+    assert status["scene_provider"] == "openai_image"
+
+
+def test_completed_lovart_product_with_valid_legacy_support_is_skipped(tmp_path):
+    product_dir = tmp_path / "products" / "SKU-ROUTING"
+    white = write_valid_png(product_dir / "lovart_steps" / "white_bg" / "white.png")
+    scene = write_valid_png(product_dir / "lovart_steps" / "scene" / "scene.png")
+    update_status(
+        product_dir,
+        "lovart_done",
+        project_id="project-1",
+        lovart_white_bg_local_path=white,
+        lovart_scene_local_path=scene,
+        lovart_final_images=[white, scene],
+    )
+
+    run = run_product_pipeline(tmp_path, "lovart", "lovart")
+
+    assert (run.success, run.skipped) == (0, 1)
+
+
+def test_completed_lovart_product_with_invalid_project_is_reprocessed(tmp_path):
+    import main
+
+    product_dir = tmp_path / "products" / "SKU-INVALID-COMPLETED"
+    product_image = write_valid_png(product_dir / "product.png")
+    old_white = write_valid_png(product_dir / "lovart_steps" / "white_bg" / "old.png")
+    old_scene = write_valid_png(product_dir / "lovart_steps" / "scene" / "old.png")
+    update_status(
+        product_dir,
+        "lovart_done",
+        project_id="invalid-project",
+        lovart_white_bg_local_path=old_white,
+        lovart_scene_local_path=old_scene,
+        lovart_final_images=[old_white, old_scene],
+    )
+    new_white = write_valid_png(product_dir / "new-white.png")
+    new_scene = write_valid_png(product_dir / "new-scene.png")
+    product = SimpleNamespace(
+        id="SKU-INVALID-COMPLETED",
+        name_cn="Product",
+        language="English",
+        selling_points="",
+        image_size="1:1",
+        image_paths=[product_image],
+        reference_images_are_product=False,
+    )
+    gemini = Mock()
+    gemini.generate_prompt.return_value = "generated prompt"
+    bot = Mock()
+    bot.validate_project.return_value = False
+    bot.create_project.return_value = "new-project"
+    bot.create_support_image.side_effect = [
+        {"local_path": new_white},
+        {"local_path": new_scene},
+    ]
+    bot.create_and_generate.return_value = {
+        "generation_succeeded": True,
+        "project_id": "new-project",
+    }
+
+    with (
+        patch("main.product_output_dir", return_value=product_dir),
+        patch("main._backfill_result_project_urls", return_value=0),
+        patch("main.append_result"),
+        patch("utils.organize_output_folders"),
+    ):
+        success, fail, skipped, still_running = main._process_products_once(
+            [product],
+            gemini,
+            bot,
+            Mock(),
+            tmp_path / "run",
+        )
+
+    assert (success, fail, skipped, still_running) == (1, 0, 0, 0)
+    bot.validate_project.assert_called()
+    bot.create_project.assert_called_once_with(product.id, product.name_cn)
 
 
 def test_building_all_openai_registry_does_not_construct_lovart():
@@ -212,6 +315,7 @@ def test_lovart_provider_restarts_invalid_resume_project(tmp_path):
         "failed",
         project_id="old-project",
         project_url="https://www.lovart.ai/canvas?projectId=old-project",
+        lovart_done=True,
     )
     bot = Mock()
     bot.validate_project.return_value = False
@@ -229,6 +333,7 @@ def test_lovart_provider_restarts_invalid_resume_project(tmp_path):
     bot.validate_project.assert_called_once_with("old-project")
     bot.create_project.assert_called_once_with("SKU-1", "Product")
     assert read_status(tmp_path)["project_id"] == "new-project"
+    assert is_product_completed(tmp_path) is False
 
 
 @pytest.mark.parametrize(
@@ -315,6 +420,7 @@ def test_lovart_restart_reuses_only_new_white_after_scene_timeout(tmp_path):
         tmp_path,
         "failed",
         project_id="old-project",
+        lovart_done=True,
         white_bg_local_path=old_white,
         scene_local_path=old_scene,
         lovart_final_images=[old_white, old_scene],
@@ -346,6 +452,7 @@ def test_lovart_restart_reuses_only_new_white_after_scene_timeout(tmp_path):
             {},
             read_status(tmp_path),
         )
+    assert is_product_completed(tmp_path) is False
 
     new_scene = write_valid_png(tmp_path / "new-scene.png")
     second_bot = Mock()
@@ -361,3 +468,80 @@ def test_lovart_restart_reuses_only_new_white_after_scene_timeout(tmp_path):
     assert second_bot.create_support_image.call_count == 1
     assert second_bot.create_support_image.call_args.kwargs["step_name"] == "scene"
     assert read_status(tmp_path)["lovart_support_resume_invalidated"] is False
+
+
+@pytest.mark.parametrize(
+    ("resume_source", "invalid_kind"),
+    [
+        ("generic", "zero_byte"),
+        ("generic", "corrupt"),
+        ("generic", "truncated"),
+        ("generic", "directory"),
+        ("lovart_field", "corrupt"),
+        ("lovart_final", "truncated"),
+        ("lovart_directory", "corrupt"),
+    ],
+)
+def test_lovart_support_resume_regenerates_invalid_images(
+    tmp_path, resume_source, invalid_kind
+):
+    from main import _generate_support_images
+    from image_providers import LovartImageProvider
+
+    if resume_source == "lovart_directory":
+        invalid_path = tmp_path / "lovart_steps" / "white_bg" / "old.png"
+    else:
+        invalid_path = tmp_path / "invalid.png"
+    if invalid_kind == "directory":
+        invalid_path.mkdir(parents=True)
+    elif invalid_kind == "zero_byte":
+        invalid_path.parent.mkdir(parents=True, exist_ok=True)
+        invalid_path.write_bytes(b"")
+    elif invalid_kind == "truncated":
+        write_truncated_png(invalid_path)
+    else:
+        invalid_path.parent.mkdir(parents=True, exist_ok=True)
+        invalid_path.write_text("not an image", encoding="utf-8")
+
+    status_fields = {"project_id": "project-1"}
+    if resume_source == "generic":
+        status_fields.update(
+            white_bg_local_path=str(invalid_path),
+            white_bg_provider="lovart",
+        )
+    elif resume_source == "lovart_field":
+        status_fields["lovart_white_bg_local_path"] = str(invalid_path)
+    elif resume_source == "lovart_final":
+        status_fields["lovart_final_images"] = [str(invalid_path)]
+    update_status(tmp_path, "failed", **status_fields)
+
+    product_image = write_valid_png(tmp_path / "product.png")
+    new_white = write_valid_png(tmp_path / "new-white.png")
+    new_scene = write_valid_png(tmp_path / "new-scene.png")
+    product = Mock(
+        id="SKU-INVALID-RESUME",
+        name_cn="Product",
+        language="English",
+        selling_points="",
+        image_size="1:1",
+        image_paths=[product_image],
+    )
+    bot = Mock()
+    bot.validate_project.return_value = True
+    bot.create_support_image.side_effect = [
+        {"local_path": new_white},
+        {"local_path": new_scene},
+    ]
+
+    white, scene = _generate_support_images(
+        product,
+        tmp_path,
+        LovartImageProvider(bot, logger=Mock()),
+        {},
+        read_status(tmp_path),
+    )
+
+    assert (white, scene) == (new_white, new_scene)
+    assert [
+        call.kwargs["step_name"] for call in bot.create_support_image.call_args_list
+    ] == ["white_bg", "scene"]

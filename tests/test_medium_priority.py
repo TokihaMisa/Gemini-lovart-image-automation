@@ -1426,10 +1426,19 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             try:
                 product_dir = Path("output") / "SKU-COMPLETED"
                 product_dir.mkdir(parents=True, exist_ok=True)
+                white = product_dir / "lovart_steps" / "white_bg" / "white.png"
+                scene = product_dir / "lovart_steps" / "scene" / "scene.png"
+                white.parent.mkdir(parents=True, exist_ok=True)
+                scene.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("RGB", (1, 1), "white").save(white)
+                Image.new("RGB", (1, 1), "white").save(scene)
                 update_status(
                     product_dir,
                     "lovart_done",
                     project_url="https://www.lovart.ai/canvas?projectId=project-completed",
+                    lovart_white_bg_local_path=str(white),
+                    lovart_scene_local_path=str(scene),
+                    lovart_final_images=[str(white), str(scene)],
                 )
 
                 result = _process_products([Product()], Gemini(), Lovart(), Logger(), Path("runs") / "run")
@@ -1937,8 +1946,8 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 scene = product_dir / "lovart_steps" / "scene" / "scene.png"
                 white.parent.mkdir(parents=True, exist_ok=True)
                 scene.parent.mkdir(parents=True, exist_ok=True)
-                white.write_bytes(b"white")
-                scene.write_bytes(b"scene")
+                Image.new("RGB", (1, 1), "white").save(white)
+                Image.new("RGB", (1, 1), "green").save(scene)
                 product_image = product_dir / "image_1.png"
                 product_image.write_bytes(b"product")
                 update_status(

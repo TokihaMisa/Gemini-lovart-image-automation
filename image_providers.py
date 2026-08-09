@@ -103,7 +103,7 @@ def read_completed_detail_indexes(product_dir: str | Path, expected_count: int) 
         if (
             isinstance(checkpoint, Mapping)
             and checkpoint.get("state") == "done"
-            and _is_valid_image(checkpoint.get("local_path"))
+            and is_valid_image_file(checkpoint.get("local_path"))
         ):
             completed.add(index)
     return completed
@@ -184,6 +184,19 @@ class LovartImageProvider:
         self.confirmation_advisor: Any | None = None
         self._project_ids: dict[str, str] = {}
 
+    def validate_completed_support(
+        self,
+        product: Any,
+        product_dir: str | Path,
+        existing_status: Mapping[str, object],
+    ) -> bool:
+        """Validate the Lovart project before a completed product is skipped."""
+        previous_project_id = _existing_project_id(existing_status)
+        if not previous_project_id or self._can_reuse_project(previous_project_id):
+            return True
+        self._invalidate_support_resume(product, product_dir, previous_project_id)
+        return False
+
     def prepare_support_images(
         self,
         product: Any,
@@ -204,25 +217,7 @@ class LovartImageProvider:
         else:
             if previous_project_id:
                 restart = True
-                if self.logger:
-                    self.logger.warning(
-                        f"Lovart project {previous_project_id} for '{product.id}' is invalid; "
-                        "restarting product"
-                    )
-                update_status(
-                    product_dir,
-                    "lovart_project_invalid",
-                    previous_project_id=previous_project_id,
-                    previous_project_url=_lovart_project_url(previous_project_id),
-                    white_bg_local_path="",
-                    scene_local_path="",
-                    white_bg_provider="",
-                    scene_provider="",
-                    lovart_white_bg_local_path="",
-                    lovart_scene_local_path="",
-                    lovart_final_images=[],
-                    lovart_support_resume_invalidated=True,
-                )
+                self._invalidate_support_resume(product, product_dir, previous_project_id)
             project_id = self.bot.create_project(product.id, product.name_cn)
             update_status(
                 product_dir,
@@ -232,6 +227,37 @@ class LovartImageProvider:
             )
         self._project_ids[str(product.id)] = str(project_id)
         return restart
+
+    def _invalidate_support_resume(
+        self,
+        product: Any,
+        product_dir: str | Path,
+        previous_project_id: str,
+    ) -> None:
+        if self.logger:
+            self.logger.warning(
+                f"Lovart project {previous_project_id} for '{product.id}' is invalid; "
+                "restarting product"
+            )
+        update_status(
+            product_dir,
+            "lovart_project_invalid",
+            previous_project_id=previous_project_id,
+            previous_project_url=_lovart_project_url(previous_project_id),
+            white_bg_local_path="",
+            scene_local_path="",
+            white_bg_provider="",
+            scene_provider="",
+            lovart_white_bg_local_path="",
+            lovart_scene_local_path="",
+            lovart_final_images=[],
+            lovart_support_resume_invalidated=True,
+            lovart_done=False,
+            lovart_support_images_ready=False,
+            lovart_final_images_ready=False,
+            support_images_ready=False,
+            artifact_count=0,
+        )
 
     def complete_support_images(self, product_dir: str | Path) -> None:
         update_status(
@@ -312,12 +338,13 @@ def _completed_paths(product_dir: str | Path, expected_count: int) -> tuple[str,
     paths: list[str] = []
     for index in range(1, max(0, int(expected_count)) + 1):
         checkpoint = _checkpoint_for_index(checkpoints, index)
-        if isinstance(checkpoint, Mapping) and _is_valid_image(checkpoint.get("local_path")):
+        if isinstance(checkpoint, Mapping) and is_valid_image_file(checkpoint.get("local_path")):
             paths.append(str(checkpoint["local_path"]))
     return tuple(paths)
 
 
-def _is_valid_image(value: object) -> bool:
+def is_valid_image_file(value: object) -> bool:
+    """Return whether a path is a fully decodable, non-empty image file."""
     try:
         with Image.open(Path(str(value))) as image:
             image.verify()
