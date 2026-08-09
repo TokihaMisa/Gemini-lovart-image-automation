@@ -813,6 +813,7 @@ def persist_openai_image_settings(
         "resolution": normalize_resolution(resolution),
     }
     updated["image_generation"] = {
+        **updated.get("image_generation", {}),
         "support_provider": normalize_image_provider(support_provider),
         "detail_provider": normalize_image_provider(detail_provider),
     }

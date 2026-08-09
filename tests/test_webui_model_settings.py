@@ -162,6 +162,168 @@ class WebUIModelSettingsTests(unittest.TestCase):
             "detail_provider": "lovart",
         })
 
+    def test_persist_openai_image_settings_preserves_unrelated_image_routing_fields(self):
+        original = {
+            "image_generation": {
+                "future_option": "keep-me",
+                "support_provider": "lovart",
+                "detail_provider": "lovart",
+            },
+        }
+
+        updated = webui.persist_openai_image_settings(
+            original,
+            "https://hapiopen.cc/v1", "gpt-image-2", "1K",
+            "openai_image", "openai_image",
+        )
+
+        self.assertEqual(original["image_generation"]["future_option"], "keep-me")
+        self.assertEqual(updated["image_generation"], {
+            "future_option": "keep-me",
+            "support_provider": "openai_image",
+            "detail_provider": "openai_image",
+        })
+
+    def test_save_api_settings_replaces_nonblank_openai_key_without_writing_it_to_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path, env_path = Path(tmp) / "config.yaml", Path(tmp) / ".env"
+            config_path.write_text("other: keep\n", encoding="utf-8")
+            env_path.write_text(
+                "OPENAI_IMAGE_API_KEY=old-key\nUNRELATED_ENV=preserve\n",
+                encoding="utf-8",
+            )
+
+            status = save_api_settings(
+                "", "", "", "", "new-key",
+                "https://gemini.test/v1beta", "gemini-test",
+                "https://nvidia.test/v1", "nvidia-test",
+                "https://hapiopen.cc/v1", "gpt-image-2", "1K",
+                "openai_image", "openai_image",
+                config_path=config_path, env_path=env_path,
+            )
+
+            saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            saved_env = env_path.read_text(encoding="utf-8")
+            self.assertNotIn("OPENAI_IMAGE_API_KEY", yaml.safe_dump(saved_config))
+            self.assertNotIn("new-key", yaml.safe_dump(saved_config))
+            self.assertNotIn("OPENAI_IMAGE_API_KEY=old-key", saved_env)
+            self.assertIn("OPENAI_IMAGE_API_KEY=new-key", saved_env)
+            self.assertIn("UNRELATED_ENV=preserve", saved_env)
+        self.assertNotIn("new-key", status)
+
+    def test_save_api_settings_none_openai_key_preserves_existing_key_and_unrelated_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path, env_path = Path(tmp) / "config.yaml", Path(tmp) / ".env"
+            config_path.write_text("other: keep\n", encoding="utf-8")
+            env_path.write_text(
+                "OPENAI_IMAGE_API_KEY=existing-key\nUNRELATED_ENV=preserve\n",
+                encoding="utf-8",
+            )
+
+            status = save_api_settings(
+                "", "", "", "", None,
+                "https://gemini.test/v1beta", "gemini-test",
+                "https://nvidia.test/v1", "nvidia-test",
+                "https://hapiopen.cc/v1", "gpt-image-2", "1K",
+                "openai_image", "openai_image",
+                config_path=config_path, env_path=env_path,
+            )
+
+            saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            saved_env = env_path.read_text(encoding="utf-8")
+            self.assertNotIn("OPENAI_IMAGE_API_KEY", yaml.safe_dump(saved_config))
+            self.assertNotIn("existing-key", yaml.safe_dump(saved_config))
+            self.assertIn("OPENAI_IMAGE_API_KEY=existing-key", saved_env)
+            self.assertIn("UNRELATED_ENV=preserve", saved_env)
+        self.assertNotIn("existing-key", status)
+
+    def test_transaction_rolls_back_both_files_when_config_temp_write_fails_without_leaking_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path, env_path = Path(tmp) / "config.yaml", Path(tmp) / ".env"
+            config_path.write_bytes(b"original: config\r\n")
+            env_path.write_bytes(b"UNRELATED_ENV=preserve\r\nOPENAI_IMAGE_API_KEY=old-key\r\n")
+            original_config, original_env = config_path.read_bytes(), env_path.read_bytes()
+            real_write_text = Path.write_text
+
+            def fail_config_temp_write(path, *args, **kwargs):
+                if path.name == ".config.yaml.tmp":
+                    raise OSError("config temp write failed")
+                return real_write_text(path, *args, **kwargs)
+
+            with patch.object(webui.Path, "write_text", autospec=True, side_effect=fail_config_temp_write):
+                status = save_api_settings(
+                    "", "", "", "", "new-key",
+                    "https://gemini.test/v1beta", "gemini-test",
+                    "https://nvidia.test/v1", "nvidia-test",
+                    "https://hapiopen.cc/v1", "gpt-image-2", "1K",
+                    "openai_image", "openai_image",
+                    config_path=config_path, env_path=env_path,
+                )
+
+            self.assertEqual(config_path.read_bytes(), original_config)
+            self.assertEqual(env_path.read_bytes(), original_env)
+        self.assertIn("config temp write failed", status)
+        self.assertNotIn("new-key", status)
+        self.assertNotIn("old-key", status)
+
+    def test_transaction_rolls_back_both_files_when_config_replace_fails_without_leaking_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path, env_path = Path(tmp) / "config.yaml", Path(tmp) / ".env"
+            config_path.write_bytes(b"original: config\r\n")
+            env_path.write_bytes(b"UNRELATED_ENV=preserve\r\nOPENAI_IMAGE_API_KEY=old-key\r\n")
+            original_config, original_env = config_path.read_bytes(), env_path.read_bytes()
+            real_replace = os.replace
+
+            def fail_config_replace(source, destination):
+                if Path(source).name == ".config.yaml.tmp":
+                    raise OSError("config replace failed")
+                return real_replace(source, destination)
+
+            with patch("webui.os.replace", side_effect=fail_config_replace):
+                status = save_api_settings(
+                    "", "", "", "", "new-key",
+                    "https://gemini.test/v1beta", "gemini-test",
+                    "https://nvidia.test/v1", "nvidia-test",
+                    "https://hapiopen.cc/v1", "gpt-image-2", "1K",
+                    "openai_image", "openai_image",
+                    config_path=config_path, env_path=env_path,
+                )
+
+            self.assertEqual(config_path.read_bytes(), original_config)
+            self.assertEqual(env_path.read_bytes(), original_env)
+        self.assertIn("config replace failed", status)
+        self.assertNotIn("new-key", status)
+        self.assertNotIn("old-key", status)
+
+    def test_transaction_rolls_back_both_files_when_env_temp_write_fails_without_leaking_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path, env_path = Path(tmp) / "config.yaml", Path(tmp) / ".env"
+            config_path.write_bytes(b"original: config\r\n")
+            env_path.write_bytes(b"UNRELATED_ENV=preserve\r\nOPENAI_IMAGE_API_KEY=old-key\r\n")
+            original_config, original_env = config_path.read_bytes(), env_path.read_bytes()
+            real_write_text = Path.write_text
+
+            def fail_env_temp_write(path, *args, **kwargs):
+                if path.name == "..env.tmp":
+                    raise OSError("env temp write failed")
+                return real_write_text(path, *args, **kwargs)
+
+            with patch.object(webui.Path, "write_text", autospec=True, side_effect=fail_env_temp_write):
+                status = save_api_settings(
+                    "", "", "", "", "new-key",
+                    "https://gemini.test/v1beta", "gemini-test",
+                    "https://nvidia.test/v1", "nvidia-test",
+                    "https://hapiopen.cc/v1", "gpt-image-2", "1K",
+                    "openai_image", "openai_image",
+                    config_path=config_path, env_path=env_path,
+                )
+
+            self.assertEqual(config_path.read_bytes(), original_config)
+            self.assertEqual(env_path.read_bytes(), original_env)
+        self.assertIn("env temp write failed", status)
+        self.assertNotIn("new-key", status)
+        self.assertNotIn("old-key", status)
+
     def test_transaction_rolls_back_config_and_openai_image_key_on_second_replace_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path, env_path = Path(tmp) / "config.yaml", Path(tmp) / ".env"
@@ -194,6 +356,8 @@ class WebUIModelSettingsTests(unittest.TestCase):
             self.assertIn("\u5931\u8d25", status)
             self.assertEqual(config_path.read_bytes(), original_config)
             self.assertEqual(env_path.read_bytes(), original_env)
+        self.assertNotIn("new-key", status)
+        self.assertNotIn("old-key", status)
 
     @patch("webui.AgentSkill")
     def test_detect_lovart_unlimited_models_returns_only_enabled_supported_models(self, skill_cls):
