@@ -1,3 +1,5 @@
+from dataclasses import asdict
+
 import pytest
 
 from openai_image_api import (
@@ -29,6 +31,8 @@ def test_normalize_openai_image_base_url(raw, expected):
         "https://gateway.test/v1?debug=true",
         "https://gateway.test/v1#anchor",
         "https://gateway.test/v1/v1",
+        "https://gateway.test/v1/root",
+        "https://gateway.test:",
     ],
 )
 def test_normalize_openai_image_base_url_rejects_unsafe_or_ambiguous_urls(raw):
@@ -63,6 +67,17 @@ def test_invalid_url_never_echoes_key_in_error_or_config_repr():
 
     config = OpenAIImageAPIConfig.from_config({}, api_key=secret)
     assert secret not in repr(config)
+
+
+def test_config_serialization_omits_key_but_authorization_can_access_it():
+    """Fails if standard dataclass serialization exposes the resolved API key."""
+    secret = "serialization-secret"
+    config = OpenAIImageAPIConfig.from_config({}, api_key=secret)
+
+    serialized = asdict(config)
+    assert secret not in serialized.values()
+    assert "api_key" not in serialized
+    assert config.api_key == secret
 
 
 def test_config_normalizes_defaults_and_provider_values():

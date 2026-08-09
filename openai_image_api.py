@@ -1,7 +1,7 @@
 """Validated configuration primitives for OpenAI Images-compatible APIs."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Final
 from urllib.parse import urlsplit, urlunsplit
 
@@ -33,15 +33,41 @@ class GeneratedImage:
     model: str
 
 
-@dataclass(frozen=True)
-class OpenAIImageAPIConfig:
-    api_key: str = field(repr=False)
+class _OpenAIImageAPIKeyAccess:
+    __slots__ = ("_api_key",)
+
+    @property
+    def api_key(self) -> str:
+        """Return the resolved key for the request authorizer only."""
+        return self._api_key
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
     base_url: str = DEFAULT_OPENAI_IMAGE_BASE_URL
     model: str = "gpt-image-2"
     resolution: str = "1K"
     timeout: float = 600.0
     max_attempts: int = 4
     retry_delays: tuple[float, ...] = (3.0, 6.0, 12.0)
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = DEFAULT_OPENAI_IMAGE_BASE_URL,
+        model: str = "gpt-image-2",
+        resolution: str = "1K",
+        timeout: float = 600.0,
+        max_attempts: int = 4,
+        retry_delays: tuple[float, ...] = (3.0, 6.0, 12.0),
+    ) -> None:
+        object.__setattr__(self, "_api_key", api_key)
+        object.__setattr__(self, "base_url", base_url)
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "resolution", resolution)
+        object.__setattr__(self, "timeout", timeout)
+        object.__setattr__(self, "max_attempts", max_attempts)
+        object.__setattr__(self, "retry_delays", retry_delays)
 
     @classmethod
     def from_config(
@@ -91,12 +117,13 @@ def normalize_openai_image_base_url(value: object | None) -> str:
         or parsed.fragment
         or any(character.isspace() for character in parsed.netloc)
         or "\\" in parsed.netloc
+        or parsed.netloc.endswith(":")
         or port is not None and not 0 < port <= 65535
     ):
         _raise_invalid_base_url()
 
     path_segments = [segment for segment in parsed.path.split("/") if segment]
-    if len(path_segments) >= 2 and all(segment.lower() == "v1" for segment in path_segments[-2:]):
+    if any(segment.lower() == "v1" for segment in path_segments[:-1]):
         _raise_invalid_base_url()
     if not path_segments or path_segments[-1].lower() != "v1":
         path_segments.append("v1")
