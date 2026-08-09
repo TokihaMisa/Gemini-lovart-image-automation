@@ -1,4 +1,5 @@
 import argparse
+from collections.abc import Mapping
 import csv
 import io
 import json
@@ -41,6 +42,7 @@ from image_providers import (
     LovartImageProvider,
     OpenAIImageProvider,
     SupportImageRequest,
+    detail_screen_prompt_hash,
     is_valid_image_file,
     read_completed_detail_indexes,
 )
@@ -185,6 +187,44 @@ def _emit_ui_detail_progress(current, target, completed, failed) -> None:
         "failed": sorted({max(1, int(index)) for index in failed}),
     }
     print(f"[UI_DETAIL_PROGRESS] {json.dumps(payload)}", flush=True)
+
+
+def _detail_execution_settings(provider) -> dict[str, object]:
+    describe = getattr(provider, "detail_execution_settings", None)
+    if not callable(describe):
+        return {}
+    settings = describe()
+    return dict(settings) if isinstance(settings, Mapping) else {}
+
+
+def _compose_detail_request_screens(
+    screens,
+    provider_name,
+    *,
+    product,
+    image_note,
+    prompt_settings,
+    target_count,
+):
+    if provider_name != PROVIDER_OPENAI_IMAGE:
+        return tuple(screens)
+    compose_settings = dict(prompt_settings)
+    compose_settings["detail_page_count"] = target_count
+    return tuple(
+        DetailScreen(
+            screen.index,
+            compose_detail_image_prompt(
+                screen=screen,
+                product_name_cn=product.name_cn,
+                language=product.language,
+                selling_points=product.selling_points,
+                image_note=image_note,
+                image_size=getattr(product, "image_size", ""),
+                prompt_settings=compose_settings,
+            ),
+        )
+        for screen in screens
+    )
 
 
 def _apply_lovart_overrides(config: dict, args) -> None:
@@ -490,6 +530,7 @@ def _is_completed_for_detail_provider(
     status: dict,
     provider_name: str,
     configured_count: int,
+    screen_prompt_hashes: Mapping[int, str] | None = None,
 ) -> bool:
     saved_provider = str(status.get("detail_provider") or "")
     snapshot = status.get("detail_page_count_snapshot")
@@ -526,13 +567,17 @@ def _is_completed_for_detail_provider(
         target_count = int(status["detail_page_count_snapshot"])
     except (KeyError, TypeError, ValueError):
         return False
-    completed_count = len(
-        read_completed_detail_indexes(
-            product_dir,
-            target_count,
-            str(status.get("detail_input_fingerprint") or ""),
+    if screen_prompt_hashes is None:
+        completed_count = 0
+    else:
+        completed_count = len(
+            read_completed_detail_indexes(
+                product_dir,
+                target_count,
+                str(status.get("detail_input_fingerprint") or ""),
+                screen_prompt_hashes,
+            )
         )
-    )
     if completed_count == target_count:
         return True
     update_status(
@@ -1047,6 +1092,7 @@ def _process_products_once(
                     "reference_images": tuple(reference_images),
                     "reference_sheet": (reference_sheet,) if reference_sheet else (),
                 },
+                detail_execution_settings=_detail_execution_settings(detail_provider),
             )
             _prepare_detail_input_state(
                 product_dir,
@@ -1056,11 +1102,40 @@ def _process_products_once(
                 resume=resume,
             )
             status = read_status(product_dir)
+            detail_prompt_path = product_dir / "detail_prompt.txt"
+            completion_prompt_hashes = None
+            if (
+                resume
+                and effective_routing.detail_provider == PROVIDER_OPENAI_IMAGE
+                and detail_prompt_path.exists()
+            ):
+                try:
+                    saved_detail_prompt = detail_prompt_path.read_text(encoding="utf-8")
+                    saved_screens = split_detail_screens(saved_detail_prompt, target_count)
+                    saved_request_screens = _compose_detail_request_screens(
+                        saved_screens,
+                        effective_routing.detail_provider,
+                        product=product,
+                        image_note=image_note,
+                        prompt_settings=prompt_settings,
+                        target_count=target_count,
+                    )
+                    completion_prompt_hashes = {
+                        screen.index: detail_screen_prompt_hash(
+                            screen,
+                            target_count,
+                            getattr(product, "image_size", ""),
+                        )
+                        for screen in saved_request_screens
+                    }
+                except (OSError, TypeError, ValueError):
+                    completion_prompt_hashes = None
             if resume and _is_completed_for_detail_provider(
                 product_dir,
                 status,
                 effective_routing.detail_provider,
                 target_count,
+                completion_prompt_hashes,
             ):
                 status = read_status(product_dir)
                 skipped += 1
@@ -1095,7 +1170,6 @@ def _process_products_once(
                 })
                 continue
 
-            detail_prompt_path = product_dir / "detail_prompt.txt"
             detail_prompt = ""
             screens = []
             gemini_chars = 0
@@ -1161,25 +1235,14 @@ def _process_products_once(
                     selected_model = PROVIDER_OPENAI_IMAGE
                 print(f"[UI_MODEL] {selected_model}", flush=True)
 
-            request_screens = tuple(screens)
-            if effective_routing.detail_provider == PROVIDER_OPENAI_IMAGE:
-                compose_settings = dict(prompt_settings)
-                compose_settings["detail_page_count"] = target_count
-                request_screens = tuple(
-                    DetailScreen(
-                        screen.index,
-                        compose_detail_image_prompt(
-                            screen=screen,
-                            product_name_cn=product.name_cn,
-                            language=product.language,
-                            selling_points=product.selling_points,
-                            image_note=image_note,
-                            image_size=getattr(product, "image_size", ""),
-                            prompt_settings=compose_settings,
-                        ),
-                    )
-                    for screen in screens
-                )
+            request_screens = _compose_detail_request_screens(
+                screens,
+                effective_routing.detail_provider,
+                product=product,
+                image_note=image_note,
+                prompt_settings=prompt_settings,
+                target_count=target_count,
+            )
             detail_result = detail_provider.generate_detail_set(
                 DetailSetRequest(
                     product_id=product.id,

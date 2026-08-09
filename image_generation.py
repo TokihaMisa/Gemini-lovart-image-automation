@@ -145,6 +145,7 @@ def build_detail_input_fingerprint(
     prompt_settings: Mapping[str, object] | None,
     target_count: int,
     image_inputs: Mapping[str, Sequence[str | Path]],
+    detail_execution_settings: Mapping[str, object] | None = None,
 ) -> str:
     """Hash every deterministic input that can alter the detail prompt or result."""
     settings = normalize_prompt_settings(prompt_settings)
@@ -154,7 +155,7 @@ def build_detail_input_fingerprint(
         for role, paths in sorted(image_inputs.items(), key=lambda item: str(item[0]))
     }
     payload = {
-        "schema": 1,
+        "schema": 2,
         "providers": {
             "support": normalize_image_provider(support_provider),
             "detail": normalize_image_provider(detail_provider),
@@ -168,6 +169,7 @@ def build_detail_input_fingerprint(
             "reference_images_are_product": bool(reference_images_are_product),
         },
         "prompt_settings": settings,
+        "detail_execution_settings": dict(detail_execution_settings or {}),
         "target_count": int(target_count),
         "image_inputs": hashed_images,
     }

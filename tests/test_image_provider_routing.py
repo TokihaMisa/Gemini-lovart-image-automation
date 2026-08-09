@@ -318,6 +318,136 @@ def test_no_resume_regenerates_the_configured_gpt_detail_set(tmp_path):
     rerun.gemini.generate_prompt.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    ("changed_setting", "changed_value"),
+    [
+        ("openai_model", "gpt-image-next"),
+        ("openai_resolution", "4K"),
+    ],
+)
+def test_openai_detail_execution_setting_change_invalidates_paid_outputs(
+    tmp_path,
+    changed_setting,
+    changed_value,
+):
+    first = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=2,
+    )
+    first_fingerprint = read_status(first.product_dir)["detail_input_fingerprint"]
+
+    changed = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=2,
+        **{changed_setting: changed_value},
+    )
+
+    assert (changed.success, changed.skipped) == (1, 0)
+    assert changed.generated_indexes == (1, 2)
+    changed.gemini.generate_prompt.assert_called_once()
+    assert read_status(changed.product_dir)["detail_input_fingerprint"] != first_fingerprint
+
+
+def test_lovart_detail_model_setting_change_invalidates_prompt_and_completion(tmp_path):
+    def lovart_with_model(model):
+        bot = Mock()
+        bot.tool_config = {
+            "image_model": model,
+            "image_models": [model],
+            "model_selection": "force",
+            "prefer_models": None,
+            "include_tools": [f"generate_image_{model}"],
+            "mode": "thinking",
+            "tool_names": [f"generate_image_{model}"],
+        }
+        bot._fast_mode = True
+        bot.create_and_generate.return_value = {
+            "generation_succeeded": True,
+            "project_id": "detail-project",
+            "used_model": model,
+        }
+        return bot
+
+    first_bot = lovart_with_model("nano_banana_2")
+    first = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "lovart",
+        detail_count=2,
+        lovart=first_bot,
+    )
+    first_fingerprint = read_status(first.product_dir)["detail_input_fingerprint"]
+
+    changed_bot = lovart_with_model("nano_banana_pro")
+    changed = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "lovart",
+        detail_count=2,
+        lovart=changed_bot,
+    )
+
+    assert (changed.success, changed.skipped) == (1, 0)
+    changed_bot.create_and_generate.assert_called_once()
+    changed.gemini.generate_prompt.assert_called_once()
+    assert read_status(changed.product_dir)["detail_input_fingerprint"] != first_fingerprint
+
+
+def test_deleted_detail_prompt_reuses_only_identically_regenerated_screen_prompts(tmp_path):
+    first = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=2
+    )
+    (first.product_dir / "detail_prompt.txt").unlink()
+
+    identical = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=2
+    )
+
+    assert (identical.success, identical.skipped) == (1, 0)
+    identical.gemini.generate_prompt.assert_called_once()
+    assert identical.generated_indexes == ()
+
+
+def test_deleted_detail_prompt_with_changed_plan_regenerates_paid_set(tmp_path):
+    first = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=2
+    )
+    (first.product_dir / "detail_prompt.txt").unlink()
+
+    changed = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=2,
+        screen_label="Changed screen",
+    )
+
+    assert (changed.success, changed.skipped) == (1, 0)
+    changed.gemini.generate_prompt.assert_called_once()
+    assert changed.generated_indexes == (1, 2)
+
+
+def test_edited_detail_prompt_content_invalidates_matching_upstream_checkpoints(tmp_path):
+    first = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=2
+    )
+    prompt_path = first.product_dir / "detail_prompt.txt"
+    edited = prompt_path.read_text(encoding="utf-8").replace("Screen 2", "Edited screen 2")
+    prompt_path.write_text(edited, encoding="utf-8")
+
+    resumed = run_product_pipeline(
+        tmp_path, "openai_image", "openai_image", detail_count=2
+    )
+
+    assert (resumed.success, resumed.skipped) == (1, 0)
+    resumed.gemini.generate_prompt.assert_not_called()
+    assert resumed.generated_indexes == (2,)
+
+
 def test_completed_openai_detail_set_regenerates_only_corrupt_screen(tmp_path):
     first = run_product_pipeline(
         tmp_path, "openai_image", "openai_image", detail_count=3

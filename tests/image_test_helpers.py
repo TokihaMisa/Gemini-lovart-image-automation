@@ -95,9 +95,21 @@ class RecordingRegistry:
 
 
 class RecordingOpenAIAPI:
-    def __init__(self, fail_indexes=frozenset()) -> None:
+    def __init__(
+        self,
+        fail_indexes=frozenset(),
+        *,
+        base_url="https://images.example/v1",
+        model="gpt-image-2",
+        resolution="1K",
+    ) -> None:
         self.fail_indexes = frozenset(fail_indexes)
         self.generated_indexes: list[int] = []
+        self.config = SimpleNamespace(
+            base_url=base_url,
+            model=model,
+            resolution=resolution,
+        )
 
     def generate_edit(self, *, output_path, **_kwargs):
         output_path = Path(output_path)
@@ -125,6 +137,9 @@ class PipelineOpenAIProvider:
     def generate_detail_set(self, request):
         return self.detail.generate_detail_set(request)
 
+    def detail_execution_settings(self):
+        return self.detail.detail_execution_settings()
+
 
 @dataclass(frozen=True)
 class PipelineRunResult:
@@ -150,6 +165,10 @@ def run_product_pipeline(
     lovart=None,
     openai_api=None,
     resume=True,
+    openai_base_url="https://images.example/v1",
+    openai_model="gpt-image-2",
+    openai_resolution="1K",
+    screen_label="Screen",
 ):
     product_dir = Path(tmp_path) / "products" / "SKU-ROUTING"
     product_image = write_valid_png(product_dir / "product.png")
@@ -169,7 +188,7 @@ def run_product_pipeline(
         else prompt_screen_count
     )
     marked_prompt = "\n\n".join(
-        f"[[SCREEN {index:02d}]]\nScreen {index}\n[[/SCREEN {index:02d}]]"
+        f"[[SCREEN {index:02d}]]\n{screen_label} {index}\n[[/SCREEN {index:02d}]]"
         for index in range(1, screen_count + 1)
     )
     gemini = Mock()
@@ -194,7 +213,12 @@ def run_product_pipeline(
             "used_model": "lovart",
         }
     if openai_api is None:
-        openai_api = RecordingOpenAIAPI(fail_indexes=fail_indexes)
+        openai_api = RecordingOpenAIAPI(
+            fail_indexes=fail_indexes,
+            base_url=openai_base_url,
+            model=openai_model,
+            resolution=openai_resolution,
+        )
     lovart_provider = LovartImageProvider(lovart)
     openai_provider = PipelineOpenAIProvider(
         openai_api,

@@ -112,3 +112,74 @@ An earlier full-suite invocation was terminated by the command wrapper at 120 se
 - `py_compile` passed for all three modified production modules and three modified Python test files.
 - `git diff --check` passed.
 - No known functional concerns remain within Final Fix 1 scope.
+
+## Review round 1: provider execution settings and paid-prompt binding
+
+### Status
+
+Implemented review round 1 as a separate strict-TDD change on top of commit `81e8e522581d55ec931c0c814c0435a79ab104fc`.
+
+- The upstream detail-input fingerprint schema is now version 2 and includes an explicit, non-secret detail-provider execution-settings object.
+- OpenAI execution settings include only normalized `base_url`, `model`, and `resolution`, matching the non-secret configuration that changes the actual Images edit request. The API key property is never read, enumerated, copied, or serialized.
+- Lovart execution settings include the selected image model(s), model-selection policy, preferred/included tools, reasoning mode, tool names, and fast/unlimited run mode actually used by detail generation.
+- Every GPT detail checkpoint state (`running`, `done`, and `failed`) now stores a deterministic per-screen paid-prompt hash over the exact prompt after the same aspect-ratio composition used by the API, plus screen index and target count.
+- Done reuse and post-save/pre-done reconciliation require both the current upstream fingerprint and the exact current screen prompt hash. Legacy checkpoints without a prompt hash regenerate once.
+- Completed GPT products are not skipped until the saved detail prompt is present, parseable, composed into the final paid prompts, and matched against all checkpoint prompt hashes.
+
+### Strict TDD evidence
+
+RED command:
+
+```text
+.\.venv\Scripts\python.exe -m pytest tests/test_image_providers.py tests/test_image_provider_routing.py -q
+```
+
+Observed before production changes:
+
+```text
+12 failed, 53 passed in 15.08s
+```
+
+The failures demonstrated that provider settings did not affect the fingerprint, valid hashless checkpoints were reused, missing/edited prompt files bypassed regeneration through the completed-product skip, no exact paid-prompt hash existed, and wrong-fingerprint running state was not covered by a production-shaped checkpoint test.
+
+Focused GREEN after implementation:
+
+```text
+65 passed in 17.30s
+```
+
+Expanded settings/retry/provider GREEN:
+
+```text
+.\.venv\Scripts\python.exe -m pytest tests/test_image_generation.py tests/test_openai_image_api.py tests/test_lovart_unlimited_guard.py tests/test_low_priority.py tests/test_failed_retry_queue.py -q
+84 passed, 3 subtests passed in 1.84s
+```
+
+Full suite GREEN:
+
+```text
+.\.venv\Scripts\python.exe -m pytest -q
+515 passed, 118 subtests passed in 129.16s (0:02:09)
+```
+
+### Review-round regressions
+
+- OpenAI model change invalidates prompt, checkpoints, canonical outputs, and completion state before regenerating the paid set.
+- OpenAI resolution change performs the same invalidation; identical execution settings remain stable.
+- Lovart selected image-model/tool/mode change invalidates the prompt and prior completion before invoking Lovart again.
+- Provider settings serialization is allowlisted and a real `OpenAIImageAPIConfig` test proves the API key is absent.
+- A deleted detail prompt with an identically regenerated nondeterministic plan reuses exact matching prompt-bound checkpoints without paid calls.
+- A deleted detail prompt with changed regenerated content makes paid calls for the changed set.
+- A valid edited saved prompt regenerates only screens whose final composed prompt hash changed.
+- A valid legacy `done` checkpoint without a prompt hash regenerates once.
+- A `running` checkpoint with a valid canonical image but the wrong upstream fingerprint cannot reconcile and makes the paid call.
+
+### Self-review and verification
+
+- Prompt hashing calls the same `append_aspect_instruction` function used immediately before the network request, avoiding a hash of an earlier plan fragment.
+- Screen index and snapshotted target count are included in the prompt-hash payload; model/resolution/base URL remain bound by the upstream fingerprint.
+- OpenAI execution settings access only three named non-secret attributes and never introspect the configuration object.
+- Lovart settings use an explicit allowlist and JSON-safe canonical values; arbitrary bot/config fields are not serialized.
+- Missing or unparsable GPT prompt files deliberately prevent completed-product skip but do not immediately discard checkpoints; exact hashes after regeneration determine safe reuse.
+- `py_compile` passed for all modified production/test Python files, and `git diff --check` passed.
+- No Final Fix 2/3 concerns were changed. No known functional concerns remain in this review scope.

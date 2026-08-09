@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,7 @@ from image_generation import (
     DetailScreen,
     normalize_image_provider,
 )
+from openai_image_api import append_aspect_instruction, normalize_openai_image_base_url
 from utils import read_status, update_status
 
 
@@ -88,6 +91,7 @@ def record_detail_checkpoint(
     error: str = "",
     attempts: int = 0,
     input_fingerprint: str = "",
+    prompt_hash: str = "",
 ) -> None:
     """Atomically persist the state of one GPT detail screen."""
     status = read_status(product_dir)
@@ -99,6 +103,7 @@ def record_detail_checkpoint(
         "error": str(error),
         "attempts": max(0, int(attempts)),
         "input_fingerprint": str(input_fingerprint or ""),
+        "prompt_hash": str(prompt_hash or ""),
     }
     update_status(product_dir, "detail_checkpoint_updated", **{_CHECKPOINT_FIELD: saved})
 
@@ -107,6 +112,7 @@ def read_completed_detail_indexes(
     product_dir: str | Path,
     expected_count: int,
     input_fingerprint: str = "",
+    screen_prompt_hashes: Mapping[int, str] | None = None,
 ) -> set[int]:
     """Return only checkpointed screens whose saved image remains usable."""
     status = read_status(product_dir)
@@ -120,6 +126,10 @@ def read_completed_detail_indexes(
             isinstance(checkpoint, Mapping)
             and checkpoint.get("state") == "done"
             and _checkpoint_matches_fingerprint(checkpoint, input_fingerprint)
+            and _checkpoint_matches_prompt(
+                checkpoint,
+                _expected_prompt_hash(screen_prompt_hashes, index),
+            )
             and is_valid_image_file(checkpoint.get("local_path"))
         ):
             completed.add(index)
@@ -130,6 +140,17 @@ class OpenAIImageProvider:
     def __init__(self, api: Any, logger: Any | None = None) -> None:
         self.api = api
         self.logger = logger
+
+    def detail_execution_settings(self) -> dict[str, object]:
+        """Return only non-secret values that alter an Images edit request."""
+        config = getattr(self.api, "config", None)
+        return {
+            "base_url": normalize_openai_image_base_url(
+                getattr(config, "base_url", None)
+            ),
+            "model": str(getattr(config, "model", "gpt-image-2") or "gpt-image-2").strip(),
+            "resolution": str(getattr(config, "resolution", "1K") or "1K").upper(),
+        }
 
     def generate_support_image(self, request: SupportImageRequest) -> ImageProviderResult:
         output_path = request.product_dir / "gpt_image" / "support" / f"{request.step_name}.png"
@@ -150,16 +171,26 @@ class OpenAIImageProvider:
         )
 
     def generate_detail_set(self, request: DetailSetRequest) -> ImageProviderResult:
+        prompt_hashes = {
+            screen.index: detail_screen_prompt_hash(
+                screen,
+                request.target_count,
+                request.image_size,
+            )
+            for screen in request.screens
+        }
         if request.resume:
             completed = read_completed_detail_indexes(
                 request.product_dir,
                 request.target_count,
                 request.input_fingerprint,
+                prompt_hashes,
             )
             for screen in sorted(request.screens, key=lambda item: item.index):
                 if screen.index not in completed and _reconcile_running_detail_output(
                     request,
                     screen.index,
+                    prompt_hashes[screen.index],
                 ):
                     completed.add(screen.index)
         else:
@@ -182,6 +213,7 @@ class OpenAIImageProvider:
                 "running",
                 attempts=attempts,
                 input_fingerprint=request.input_fingerprint,
+                prompt_hash=prompt_hashes[screen.index],
             )
             output_path = request.product_dir / "gpt_image" / "detail" / f"{screen.index:02d}.png"
             try:
@@ -201,6 +233,7 @@ class OpenAIImageProvider:
                     error=str(exc),
                     attempts=attempts,
                     input_fingerprint=request.input_fingerprint,
+                    prompt_hash=prompt_hashes[screen.index],
                 )
                 if request.progress_callback:
                     request.progress_callback(
@@ -218,6 +251,7 @@ class OpenAIImageProvider:
                 local_path,
                 attempts=attempts,
                 input_fingerprint=request.input_fingerprint,
+                prompt_hash=prompt_hashes[screen.index],
             )
             completed.add(screen.index)
             used_model = str(generated.model) or used_model
@@ -233,6 +267,7 @@ class OpenAIImageProvider:
             request.product_dir,
             request.target_count,
             request.input_fingerprint,
+            prompt_hashes,
         )
         completed_count = len(completed)
         return ImageProviderResult(
@@ -254,6 +289,28 @@ class LovartImageProvider:
         self.logger = logger
         self.confirmation_advisor: Any | None = None
         self._project_ids: dict[str, str] = {}
+
+    def detail_execution_settings(self) -> dict[str, object]:
+        """Return the selected non-secret Lovart tool and run-mode settings."""
+        tool_config = getattr(self.bot, "tool_config", {})
+        source = tool_config if isinstance(tool_config, Mapping) else {}
+        settings = {
+            key: _json_safe_setting(source.get(key))
+            for key in (
+                "image_model",
+                "image_models",
+                "model_selection",
+                "prefer_models",
+                "include_tools",
+                "mode",
+                "tool_names",
+            )
+            if key in source
+        }
+        fast_mode = getattr(self.bot, "_fast_mode", None)
+        if isinstance(fast_mode, bool):
+            settings["run_mode"] = "fast" if fast_mode else "unlimited"
+        return settings
 
     def validate_completed_support(
         self,
@@ -405,7 +462,50 @@ def _checkpoint_matches_fingerprint(
     return not expected or str(checkpoint.get("input_fingerprint") or "") == expected
 
 
-def _reconcile_running_detail_output(request: DetailSetRequest, index: int) -> bool:
+def detail_screen_prompt_hash(
+    screen: DetailScreen,
+    target_count: int,
+    image_size: str = "",
+) -> str:
+    """Hash the exact prompt payload associated with one paid detail screen."""
+    payload = {
+        "schema": 1,
+        "index": int(screen.index),
+        "target_count": int(target_count),
+        "prompt": append_aspect_instruction(screen.prompt, image_size),
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _expected_prompt_hash(
+    screen_prompt_hashes: Mapping[int, str] | None,
+    index: int,
+) -> str | None:
+    if screen_prompt_hashes is None:
+        return None
+    return str(screen_prompt_hashes.get(index) or "")
+
+
+def _checkpoint_matches_prompt(
+    checkpoint: Mapping[str, object],
+    expected_prompt_hash: str | None,
+) -> bool:
+    if expected_prompt_hash is None:
+        return True
+    return bool(expected_prompt_hash) and str(checkpoint.get("prompt_hash") or "") == expected_prompt_hash
+
+
+def _reconcile_running_detail_output(
+    request: DetailSetRequest,
+    index: int,
+    prompt_hash: str,
+) -> bool:
     checkpoints = read_status(request.product_dir).get(_CHECKPOINT_FIELD, {})
     if not isinstance(checkpoints, Mapping):
         return False
@@ -414,6 +514,7 @@ def _reconcile_running_detail_output(request: DetailSetRequest, index: int) -> b
         not isinstance(checkpoint, Mapping)
         or checkpoint.get("state") != "running"
         or not _checkpoint_matches_fingerprint(checkpoint, request.input_fingerprint)
+        or not _checkpoint_matches_prompt(checkpoint, prompt_hash)
     ):
         return False
     canonical_path = request.product_dir / "gpt_image" / "detail" / f"{index:02d}.png"
@@ -430,6 +531,7 @@ def _reconcile_running_detail_output(request: DetailSetRequest, index: int) -> b
         str(canonical_path),
         attempts=attempts,
         input_fingerprint=request.input_fingerprint,
+        prompt_hash=prompt_hash,
     )
     return True
 
@@ -451,6 +553,7 @@ def _completed_paths(
     product_dir: str | Path,
     expected_count: int,
     input_fingerprint: str = "",
+    screen_prompt_hashes: Mapping[int, str] | None = None,
 ) -> tuple[str, ...]:
     checkpoints = read_status(product_dir).get(_CHECKPOINT_FIELD, {})
     if not isinstance(checkpoints, Mapping):
@@ -462,10 +565,27 @@ def _completed_paths(
             isinstance(checkpoint, Mapping)
             and checkpoint.get("state") == "done"
             and _checkpoint_matches_fingerprint(checkpoint, input_fingerprint)
+            and _checkpoint_matches_prompt(
+                checkpoint,
+                _expected_prompt_hash(screen_prompt_hashes, index),
+            )
             and is_valid_image_file(checkpoint.get("local_path"))
         ):
             paths.append(str(checkpoint["local_path"]))
     return tuple(paths)
+
+
+def _json_safe_setting(value: object) -> object:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {
+            str(key): _json_safe_setting(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_setting(item) for item in value]
+    return str(value)
 
 
 def is_valid_image_file(value: object) -> bool:

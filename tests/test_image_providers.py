@@ -38,10 +38,22 @@ def test_registry_reuses_the_same_openai_provider_instance():
 
 
 def test_openai_detail_set_skips_valid_completed_indexes(tmp_path: Path):
-    from image_providers import DetailSetRequest, OpenAIImageProvider, record_detail_checkpoint
+    from image_providers import (
+        DetailSetRequest,
+        OpenAIImageProvider,
+        detail_screen_prompt_hash,
+        record_detail_checkpoint,
+    )
 
+    screens = (DetailScreen(1, "hero"), DetailScreen(2, "feature"))
     first_path = write_valid_png(tmp_path / "gpt_image" / "detail" / "01.png")
-    record_detail_checkpoint(tmp_path, 1, "done", first_path)
+    record_detail_checkpoint(
+        tmp_path,
+        1,
+        "done",
+        first_path,
+        prompt_hash=detail_screen_prompt_hash(screens[0], 2, "1:1"),
+    )
     api = Mock()
     second_path = write_valid_png(tmp_path / "gpt_image" / "detail" / "02.png")
     api.generate_edit.return_value = GeneratedImage(second_path, "gpt-image-2")
@@ -49,7 +61,7 @@ def test_openai_detail_set_skips_valid_completed_indexes(tmp_path: Path):
     request = DetailSetRequest(
         product_id="P1",
         product_dir=tmp_path,
-        screens=(DetailScreen(1, "hero"), DetailScreen(2, "feature")),
+        screens=screens,
         image_paths=(write_valid_png(tmp_path / "reference.png"),),
         image_size="1:1",
         target_count=2,
@@ -228,22 +240,29 @@ def test_openai_detail_set_no_resume_replaces_all_prior_checkpoints(tmp_path: Pa
 def test_openai_detail_set_reconciles_only_matching_running_canonical_output(
     tmp_path: Path,
 ):
-    from image_providers import DetailSetRequest, OpenAIImageProvider, record_detail_checkpoint
+    from image_providers import (
+        DetailSetRequest,
+        OpenAIImageProvider,
+        detail_screen_prompt_hash,
+        record_detail_checkpoint,
+    )
     from utils import read_status
 
     canonical = write_valid_png(tmp_path / "gpt_image" / "detail" / "01.png")
+    screen = DetailScreen(1, "hero")
     record_detail_checkpoint(
         tmp_path,
         1,
         "running",
         attempts=1,
         input_fingerprint="inputs-v1",
+        prompt_hash=detail_screen_prompt_hash(screen, 1, "1:1"),
     )
     api = Mock()
     request = DetailSetRequest(
         product_id="P1",
         product_dir=tmp_path,
-        screens=(DetailScreen(1, "hero"),),
+        screens=(screen,),
         image_paths=(write_valid_png(tmp_path / "reference.png"),),
         image_size="1:1",
         target_count=1,
@@ -260,16 +279,24 @@ def test_openai_detail_set_reconciles_only_matching_running_canonical_output(
     assert checkpoint["state"] == "done"
     assert checkpoint["input_fingerprint"] == "inputs-v1"
 
-    unrelated_dir = tmp_path / "unrelated"
-    arbitrary = write_valid_png(unrelated_dir / "01.png")
     other_product = tmp_path / "other-product"
-    write_valid_png(other_product / "gpt_image" / "detail" / "01.png")
+    other_canonical = write_valid_png(other_product / "gpt_image" / "detail" / "01.png")
+    wrong_screen = DetailScreen(1, "hero")
+    record_detail_checkpoint(
+        other_product,
+        1,
+        "running",
+        other_canonical,
+        attempts=1,
+        input_fingerprint="wrong-inputs",
+        prompt_hash=detail_screen_prompt_hash(wrong_screen, 1, "1:1"),
+    )
     wrong_api = Mock()
-    wrong_api.generate_edit.return_value = GeneratedImage(arbitrary, "gpt-image-2")
+    wrong_api.generate_edit.return_value = GeneratedImage(other_canonical, "gpt-image-2")
     wrong_request = DetailSetRequest(
         product_id="P2",
         product_dir=other_product,
-        screens=(DetailScreen(1, "hero"),),
+        screens=(wrong_screen,),
         image_paths=(write_valid_png(other_product / "reference.png"),),
         image_size="1:1",
         target_count=1,
@@ -280,6 +307,143 @@ def test_openai_detail_set_reconciles_only_matching_running_canonical_output(
     OpenAIImageProvider(wrong_api).generate_detail_set(wrong_request)
 
     wrong_api.generate_edit.assert_called_once()
+
+
+def test_openai_detail_set_regenerates_legacy_done_checkpoint_without_prompt_hash(
+    tmp_path: Path,
+):
+    from image_providers import DetailSetRequest, OpenAIImageProvider, record_detail_checkpoint
+
+    canonical = write_valid_png(tmp_path / "gpt_image" / "detail" / "01.png")
+    record_detail_checkpoint(
+        tmp_path,
+        1,
+        "done",
+        canonical,
+        input_fingerprint="inputs-v1",
+    )
+    api = Mock()
+    api.generate_edit.return_value = GeneratedImage(canonical, "gpt-image-2")
+    request = DetailSetRequest(
+        product_id="P1",
+        product_dir=tmp_path,
+        screens=(DetailScreen(1, "hero"),),
+        image_paths=(write_valid_png(tmp_path / "reference.png"),),
+        image_size="1:1",
+        target_count=1,
+        input_fingerprint="inputs-v1",
+        resume=True,
+    )
+
+    OpenAIImageProvider(api).generate_detail_set(request)
+
+    api.generate_edit.assert_called_once()
+
+
+def test_openai_detail_set_reuses_only_identical_final_screen_prompt(tmp_path: Path):
+    from image_providers import (
+        DetailSetRequest,
+        OpenAIImageProvider,
+        detail_screen_prompt_hash,
+        record_detail_checkpoint,
+    )
+
+    old_screen = DetailScreen(1, "exact paid prompt")
+    canonical = write_valid_png(tmp_path / "gpt_image" / "detail" / "01.png")
+    record_detail_checkpoint(
+        tmp_path,
+        1,
+        "done",
+        canonical,
+        input_fingerprint="inputs-v1",
+        prompt_hash=detail_screen_prompt_hash(old_screen, 1, "1:1"),
+    )
+    reference = write_valid_png(tmp_path / "reference.png")
+    identical_api = Mock()
+    identical_request = DetailSetRequest(
+        product_id="P1",
+        product_dir=tmp_path,
+        screens=(old_screen,),
+        image_paths=(reference,),
+        image_size="1:1",
+        target_count=1,
+        input_fingerprint="inputs-v1",
+        resume=True,
+    )
+
+    identical = OpenAIImageProvider(identical_api).generate_detail_set(identical_request)
+
+    identical_api.generate_edit.assert_not_called()
+    assert identical.succeeded is True
+
+    changed_api = Mock()
+    changed_api.generate_edit.return_value = GeneratedImage(canonical, "gpt-image-2")
+    changed_request = DetailSetRequest(
+        product_id="P1",
+        product_dir=tmp_path,
+        screens=(DetailScreen(1, "changed paid prompt"),),
+        image_paths=(reference,),
+        image_size="1:1",
+        target_count=1,
+        input_fingerprint="inputs-v1",
+        resume=True,
+    )
+
+    OpenAIImageProvider(changed_api).generate_detail_set(changed_request)
+
+    changed_api.generate_edit.assert_called_once()
+
+
+def test_detail_execution_settings_are_explicit_and_never_include_openai_key():
+    import json
+
+    from image_providers import OpenAIImageProvider
+    from openai_image_api import OpenAIImageAPI, OpenAIImageAPIConfig
+
+    config = OpenAIImageAPIConfig(
+        api_key="top-secret-key",
+        base_url="https://images.example/",
+        model="gpt-image-custom",
+        resolution="4K",
+    )
+
+    settings = OpenAIImageProvider(OpenAIImageAPI(config)).detail_execution_settings()
+
+    assert settings == {
+        "base_url": "https://images.example/v1",
+        "model": "gpt-image-custom",
+        "resolution": "4K",
+    }
+    assert "top-secret-key" not in json.dumps(settings)
+
+
+def test_lovart_detail_execution_settings_match_selected_tool_and_mode():
+    from image_providers import LovartImageProvider
+
+    bot = Mock()
+    bot.tool_config = {
+        "image_model": "nano_banana_pro",
+        "image_models": ["nano_banana_pro"],
+        "model_selection": "force",
+        "prefer_models": None,
+        "include_tools": ["generate_image_nano_banana_pro"],
+        "mode": "thinking",
+        "tool_names": ["generate_image_nano_banana_pro"],
+    }
+    bot._fast_mode = True
+
+    settings = LovartImageProvider(bot).detail_execution_settings()
+
+    assert settings == {
+        "image_model": "nano_banana_pro",
+        "image_models": ["nano_banana_pro"],
+        "model_selection": "force",
+        "prefer_models": None,
+        "include_tools": ["generate_image_nano_banana_pro"],
+        "mode": "thinking",
+        "tool_names": ["generate_image_nano_banana_pro"],
+        "run_mode": "fast",
+    }
 
 
 def test_lovart_adapter_preserves_pending_confirmation_result(tmp_path: Path):
