@@ -8,6 +8,7 @@ from image_generation import (
     PROVIDER_OPENAI_IMAGE,
     compose_detail_image_prompt,
     ensure_detail_page_count_snapshot,
+    normalize_image_provider,
     routing_from_config,
     split_detail_screens,
 )
@@ -28,6 +29,10 @@ def test_routing_defaults_to_lovart_for_both_stages():
     routing = routing_from_config({}, {"detail_page_count": 4})
     assert routing.support_provider == PROVIDER_LOVART
     assert routing.detail_provider == PROVIDER_LOVART
+
+
+def test_provider_normalization_keeps_supported_provider_names():
+    assert normalize_image_provider(" OPENAI_IMAGE ") == PROVIDER_OPENAI_IMAGE
 
 
 def test_design_prompt_requires_stable_screen_markers():

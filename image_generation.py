@@ -38,8 +38,8 @@ def routing_from_config(
     image_generation = (config or {}).get("image_generation", {})
     if not isinstance(image_generation, Mapping):
         image_generation = {}
-    support_provider = _normalize_provider(image_generation.get("support_provider"))
-    detail_provider = _normalize_provider(image_generation.get("detail_provider"))
+    support_provider = normalize_image_provider(image_generation.get("support_provider"))
+    detail_provider = normalize_image_provider(image_generation.get("detail_provider"))
     settings = normalize_prompt_settings(prompt_settings)
     return GenerationRouting(
         support_provider=support_provider,
@@ -48,7 +48,7 @@ def routing_from_config(
     )
 
 
-def _normalize_provider(value: object) -> str:
+def normalize_image_provider(value: object) -> str:
     provider = str(value or PROVIDER_LOVART).strip().lower()
     if provider not in _SUPPORTED_PROVIDERS:
         raise ValueError(f"Unsupported image generation provider: {provider}")
