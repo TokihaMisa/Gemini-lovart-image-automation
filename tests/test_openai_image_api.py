@@ -106,13 +106,16 @@ class FakeSocketFactory:
 
 
 class FakeDefaultSSLContext:
-    def __init__(self):
+    def __init__(self, wrap_error=None):
         self.check_hostname = True
         self.verify_mode = ssl.CERT_REQUIRED
+        self.wrap_error = wrap_error
         self.wrap_calls = []
 
     def wrap_socket(self, connected_socket, *, server_hostname):
         self.wrap_calls.append((connected_socket, server_hostname))
+        if self.wrap_error is not None:
+            raise self.wrap_error
         return connected_socket
 
 
@@ -390,6 +393,67 @@ def test_result_url_rejects_hostname_when_any_resolved_address_is_private(getadd
     assert ctx.value.code == "unsafe_result_url"
 
 
+@pytest.mark.parametrize(
+    ("family", "address"),
+    [
+        (socket.AF_INET, "224.0.0.1"),
+        (socket.AF_INET6, "ff02::1"),
+        (socket.AF_INET6, "fec0::1"),
+        (socket.AF_INET6, "::127.0.0.1"),
+        (socket.AF_INET6, "::7f00:1"),
+        (socket.AF_INET6, "::ffff:127.0.0.1"),
+        (socket.AF_INET6, "::ffff:10.0.0.1"),
+        (socket.AF_INET6, "::ffff:93.184.216.34"),
+        (socket.AF_INET6, "2002:7f00:1::"),
+        (socket.AF_INET6, "2002:5db8:d822::"),
+        (socket.AF_INET6, "2001:0000:4136:e378:8000:63bf:3fff:fdd2"),
+        (socket.AF_INET6, "64:ff9b::5db8:d822"),
+        (socket.AF_INET6, "64:ff9b:1::5db8:d822"),
+        (socket.AF_INET6, "2606:2800::5efe:5db8:d822"),
+    ],
+)
+@patch("openai_image_api.socket.getaddrinfo")
+def test_result_url_rejects_explicitly_unsafe_and_transition_addresses(
+    getaddrinfo, family, address
+):
+    """Address safety must not rely on a broad is_global classification alone."""
+    socket_address = (
+        (address, 443)
+        if family == socket.AF_INET
+        else (address, 443, 0, 0)
+    )
+    getaddrinfo.return_value = [
+        (family, socket.SOCK_STREAM, 6, "", socket_address),
+    ]
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        validate_remote_image_url("https://images.example.test/generated.png")
+
+    assert ctx.value.code == "unsafe_result_url"
+
+
+@patch("openai_image_api.socket.getaddrinfo")
+def test_result_url_accepts_normal_public_native_ipv4_and_ipv6(getaddrinfo):
+    """Conservative transition filtering must retain ordinary public addresses."""
+    getaddrinfo.return_value = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        (
+            socket.AF_INET6,
+            socket.SOCK_STREAM,
+            6,
+            "",
+            ("2606:2800:220:1:248:1893:25c8:1946", 443, 0, 0),
+        ),
+    ]
+
+    resolved = validate_remote_image_url("https://images.example.test/generated.png")
+
+    assert [address.ip_literal for address in resolved.addresses] == [
+        "93.184.216.34",
+        "2606:2800:220:1:248:1893:25c8:1946",
+    ]
+
+
 @patch("openai_image_api.ssl.create_default_context")
 @patch("openai_image_api.socket.socket")
 @patch("openai_image_api.socket.getaddrinfo")
@@ -425,6 +489,7 @@ def test_generate_edit_pins_public_result_connection_and_preserves_https_identit
     assert socket_factory.calls == [(socket.AF_INET, socket.SOCK_STREAM)]
     assert connected_socket.connected_to == ("93.184.216.34", 8443)
     assert connected_socket.timeout == 12.5
+    create_default_context.assert_called_once_with()
     assert tls_context.wrap_calls == [(connected_socket, "images.example.test")]
     assert tls_context.check_hostname is True
     assert tls_context.verify_mode == ssl.CERT_REQUIRED
@@ -632,6 +697,118 @@ def test_http_ipv6_result_uses_pinned_literal_and_original_idna_authority(
         0,
     )
     assert b"Host: xn--bcher-kva.example:8080\r\n" in connected_socket.sent
+
+
+@pytest.mark.parametrize(
+    ("remote_url", "port", "expected_host"),
+    [
+        (
+            "https://[2606:2800:220:1:248:1893:25c8:1946]/generated.png",
+            443,
+            b"Host: [2606:2800:220:1:248:1893:25c8:1946]\r\n",
+        ),
+        (
+            "https://[2606:2800:220:1:248:1893:25c8:1946]:8443/generated.png",
+            8443,
+            b"Host: [2606:2800:220:1:248:1893:25c8:1946]:8443\r\n",
+        ),
+    ],
+)
+@patch("openai_image_api.ssl.create_default_context")
+@patch("openai_image_api.socket.socket")
+@patch("openai_image_api.socket.getaddrinfo")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_https_ipv6_literal_preserves_bracketed_host_authority(
+    build_opener,
+    getaddrinfo,
+    socket_constructor,
+    create_default_context,
+    remote_url,
+    port,
+    expected_host,
+    tmp_path,
+):
+    """IPv6 literal Host syntax remains bracketed for default and explicit ports."""
+    ipv6 = "2606:2800:220:1:248:1893:25c8:1946"
+    png = base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
+    connected_socket = FakeConnectedSocket(raw_http_response(png), ipv6)
+    socket_constructor.side_effect = FakeSocketFactory([connected_socket])
+    tls_context = FakeDefaultSSLContext()
+    create_default_context.return_value = tls_context
+    getaddrinfo.return_value = [
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", (ipv6, port, 0, 0)),
+    ]
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
+        "data": [{"url": remote_url}],
+    }).encode("utf-8"))
+
+    make_client().generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+    )
+
+    assert expected_host in connected_socket.sent
+    assert tls_context.wrap_calls == [(connected_socket, ipv6)]
+
+
+@patch("openai_image_api.ssl.create_default_context")
+@patch("openai_image_api.socket.socket")
+@patch("openai_image_api.socket.getaddrinfo")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_result_download_closes_raw_socket_when_tls_wrap_fails(
+    build_opener, getaddrinfo, socket_constructor, create_default_context, tmp_path
+):
+    """A TLS handshake failure must not leak the already-connected raw socket."""
+    connected_socket = FakeConnectedSocket(b"", "93.184.216.34")
+    socket_constructor.side_effect = FakeSocketFactory([connected_socket])
+    create_default_context.return_value = FakeDefaultSSLContext(
+        ssl.SSLError("injected TLS wrap failure")
+    )
+    getaddrinfo.return_value = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+    ]
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
+        "data": [{"url": "https://images.example.test/generated.png"}],
+    }).encode("utf-8"))
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client().generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+        )
+
+    assert ctx.value.code == "network"
+    assert connected_socket.was_closed
+    assert not connected_socket.sent
+
+
+@patch("openai_image_api.ssl.create_default_context")
+@patch("openai_image_api.socket.socket")
+@patch("openai_image_api.socket.getaddrinfo")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_downloaded_invalid_image_reaches_decode_rejection_after_cleanup(
+    build_opener, getaddrinfo, socket_constructor, create_default_context, tmp_path
+):
+    """A valid HTTP image contract still requires full decode before publication."""
+    connected_socket = FakeConnectedSocket(
+        raw_http_response(b"not-an-image"), "93.184.216.34"
+    )
+    socket_constructor.side_effect = FakeSocketFactory([connected_socket])
+    create_default_context.return_value = FakeDefaultSSLContext()
+    getaddrinfo.return_value = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+    ]
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
+        "data": [{"url": "https://images.example.test/generated.png"}],
+    }).encode("utf-8"))
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client().generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+        )
+
+    assert ctx.value.code == "invalid_image"
+    assert connected_socket.was_closed
+    assert connected_socket.response_file.was_closed
+    assert not (tmp_path / "out.png").exists()
 
 
 @patch("openai_image_api.urllib.request.build_opener")

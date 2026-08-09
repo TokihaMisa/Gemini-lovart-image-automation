@@ -30,6 +30,14 @@ from network_retry import PERMANENT_TLS_GUIDANCE, RetryKind, classify_network_er
 
 DEFAULT_OPENAI_IMAGE_BASE_URL: Final = "https://hapiopen.cc/v1"
 _VALID_RESOLUTIONS: Final = {"1K", "2K", "4K"}
+_UNSAFE_IPV6_TRANSITION_NETWORKS: Final = (
+    ipaddress.IPv6Network("::/96"),  # deprecated IPv4-compatible addresses
+    ipaddress.IPv6Network("::ffff:0:0/96"),  # IPv4-mapped addresses
+    ipaddress.IPv6Network("64:ff9b::/96"),  # well-known NAT64 translation
+    ipaddress.IPv6Network("64:ff9b:1::/48"),  # local-use NAT64 translation
+    ipaddress.IPv6Network("2001::/32"),  # Teredo
+    ipaddress.IPv6Network("2002::/16"),  # 6to4
+)
 _TEST_IMAGE_BASE64: Final = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8Dw"
     "HwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
@@ -401,7 +409,10 @@ def validate_remote_image_url(url: str) -> _ResolvedResultURL:
             address = ipaddress.ip_address(ip_literal)
         except (TypeError, ValueError, IndexError):
             _raise_unsafe_result_url()
-        if family not in {socket.AF_INET, socket.AF_INET6} or not address.is_global:
+        if (
+            family not in {socket.AF_INET, socket.AF_INET6}
+            or not _is_safe_public_result_address(address)
+        ):
             _raise_unsafe_result_url()
         key = (family, str(address))
         if key in seen_addresses:
@@ -450,6 +461,39 @@ def _ascii_result_hostname(hostname: str) -> str:
     if not ascii_hostname or len(ascii_hostname) > 253:
         _raise_unsafe_result_url()
     return ascii_hostname
+
+
+def _is_safe_public_result_address(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    explicitly_unsafe = (
+        address.is_loopback
+        or address.is_private
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    )
+    if explicitly_unsafe:
+        return False
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.is_site_local:
+            return False
+        if (
+            address.ipv4_mapped is not None
+            or address.sixtofour is not None
+            or address.teredo is not None
+            or any(address in network for network in _UNSAFE_IPV6_TRANSITION_NETWORKS)
+            or _is_isatap_address(address)
+        ):
+            return False
+    return address.is_global
+
+
+def _is_isatap_address(address: ipaddress.IPv6Address) -> bool:
+    """Recognize both common ISATAP interface-identifier encodings."""
+    interface_prefix = (int(address) >> 32) & 0xFFFFFFFF
+    return interface_prefix in {0x00005EFE, 0x02005EFE}
 
 
 def _is_ipv6_literal(hostname: str) -> bool:
