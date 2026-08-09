@@ -228,6 +228,9 @@ def _completed_paths(product_dir: str | Path, expected_count: int) -> tuple[str,
 def _is_valid_image(value: object) -> bool:
     try:
         with Image.open(Path(str(value))) as image:
+            image.verify()
+        with Image.open(Path(str(value))) as image:
+            image.load()
             return bool(image.format and image.width > 0 and image.height > 0)
     except (FileNotFoundError, IsADirectoryError, OSError, SyntaxError, UnidentifiedImageError, ValueError):
         return False

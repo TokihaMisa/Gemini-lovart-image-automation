@@ -1,9 +1,11 @@
 from pathlib import Path
 from unittest.mock import Mock
 
+from PIL import Image
+
 from image_generation import DetailScreen
 from openai_image_api import GeneratedImage
-from tests.image_test_helpers import write_valid_png
+from tests.image_test_helpers import write_truncated_png, write_valid_png
 
 
 def test_registry_does_not_build_lovart_for_all_openai_run():
@@ -15,6 +17,24 @@ def test_registry_does_not_build_lovart_for_all_openai_run():
 
     assert registry.get("openai_image") is openai_factory.return_value
     lovart_factory.assert_not_called()
+
+
+def test_registry_reuses_the_same_openai_provider_instance():
+    from image_providers import LazyImageProviderRegistry
+
+    constructed = []
+
+    def openai_factory():
+        instance = object()
+        constructed.append(instance)
+        return instance
+
+    registry = LazyImageProviderRegistry(
+        lambda: (_ for _ in ()).throw(AssertionError("Lovart must stay lazy")), openai_factory
+    )
+
+    assert registry.get("openai_image") is registry.get("openai_image")
+    assert len(constructed) == 1
 
 
 def test_openai_detail_set_skips_valid_completed_indexes(tmp_path: Path):
@@ -51,6 +71,32 @@ def test_completed_indexes_ignore_checkpoint_with_invalid_image(tmp_path: Path):
     record_detail_checkpoint(tmp_path, 1, "done", str(invalid))
 
     assert read_completed_detail_indexes(tmp_path, expected_count=1) == set()
+
+
+def test_openai_detail_set_regenerates_a_header_valid_truncated_checkpoint(tmp_path: Path):
+    from image_providers import DetailSetRequest, OpenAIImageProvider, record_detail_checkpoint
+
+    corrupted_path = write_truncated_png(tmp_path / "gpt_image" / "detail" / "01.png")
+    with Image.open(corrupted_path) as header:
+        assert header.size == (1, 1)
+    record_detail_checkpoint(tmp_path, 1, "done", corrupted_path)
+    replacement_path = write_valid_png(tmp_path / "replacement.png")
+    api = Mock()
+    api.generate_edit.return_value = GeneratedImage(replacement_path, "gpt-image-2")
+    request = DetailSetRequest(
+        product_id="P1",
+        product_dir=tmp_path,
+        screens=(DetailScreen(1, "hero"),),
+        image_paths=(write_valid_png(tmp_path / "reference.png"),),
+        image_size="1:1",
+        target_count=1,
+    )
+
+    result = OpenAIImageProvider(api).generate_detail_set(request)
+
+    assert result.succeeded is True
+    assert result.local_paths == (replacement_path,)
+    assert api.generate_edit.call_count == 1
 
 
 def test_openai_detail_set_keeps_paid_success_when_later_screen_fails(tmp_path: Path):
