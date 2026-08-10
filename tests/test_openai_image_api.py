@@ -166,13 +166,14 @@ def make_client(*, sleep=None, **overrides) -> OpenAIImageAPI:
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("https://hapiopen.cc", "https://hapiopen.cc/v1"),
+        ("https://hapiopen.cc", "https://hapiopen.cc"),
+        ("https://image.hapiopen.cc/", "https://image.hapiopen.cc"),
         ("https://hapiopen.cc/v1/", "https://hapiopen.cc/v1"),
-        ("https://gateway.test/root/v1", "https://gateway.test/root/v1"),
+        ("https://gateway.test/root/", "https://gateway.test/root"),
     ],
 )
 def test_normalize_openai_image_base_url(raw, expected):
-    """Fails if a valid provider endpoint is not normalized to one terminal /v1."""
+    """Fails if validation invents a path segment not supplied by the provider."""
     assert normalize_openai_image_base_url(raw) == expected
 
 
@@ -187,8 +188,6 @@ def test_normalize_openai_image_base_url(raw, expected):
         "https:///v1",
         "https://gateway.test/v1?debug=true",
         "https://gateway.test/v1#anchor",
-        "https://gateway.test/v1/v1",
-        "https://gateway.test/v1/root",
         "https://gateway.test:",
     ],
 )
@@ -256,7 +255,7 @@ def test_config_normalizes_defaults_and_provider_values():
         api_key="  resolved-key  ",
     )
 
-    assert config.base_url == "https://gateway.test/root/v1"
+    assert config.base_url == "https://gateway.test/root"
     assert config.model == "custom-image-model"
     assert config.resolution == "2K"
     assert config.api_key == "resolved-key"
@@ -302,6 +301,20 @@ def test_generate_edit_posts_multipart_and_saves_b64_png(build_opener, tmp_path)
     with Image.open(tmp_path / "out.png") as output:
         output.verify()
     assert build_opener.return_value.open.call_args.kwargs == {"timeout": 12.5}
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_generate_edit_uses_provider_root_without_inserting_v1(build_opener, tmp_path):
+    build_opener.return_value.open.return_value = fake_png_response()
+
+    make_client(base_url="https://image.hapiopen.cc").generate_edit(
+        "prompt",
+        [make_png(tmp_path / "source.png")],
+        tmp_path / "out.png",
+    )
+
+    request = build_opener.return_value.open.call_args.args[0]
+    assert request.full_url == "https://image.hapiopen.cc/images/edits"
 
 
 @pytest.mark.parametrize(

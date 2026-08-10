@@ -55,7 +55,8 @@ nvidia_api:
     kimi: "moonshotai/kimi-k2.5"
 
 openai_image:
-  # Keep OPENAI_IMAGE_API_KEY only in local .env. Enter an endpoint ending in exactly one /v1.
+  # Keep OPENAI_IMAGE_API_KEY only in local .env. Copy the provider's Base URL as supplied.
+  # Both root endpoints and endpoints ending in /v1 are supported.
   # Leave this empty to avoid silently selecting a provider.
   base_url: ""
   model: gpt-image-2

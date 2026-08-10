@@ -144,11 +144,13 @@ Excel 默认字段含义：
 
 ### 5. OpenAI-compatible GPT Image 生成与迁移
 
-`openai_image` 使用本地 `.env` 中的 `OPENAI_IMAGE_API_KEY`。`openai_image.base_url` 必须以且只以一个 `/v1` 结束；WebUI 默认留空，只用灰色占位文字提示官方地址示例 `https://api.openai.com/v1`，不会静默选择任何服务商。默认模型为 `gpt-image-2`，分辨率可选 `1K`、`2K` 或 `4K`。真实兼容性测试会调用标准 `/images/edits` 图像编辑端点，因此一次点击可能产生图片费用；保存设置、构建 UI、dry-run 和自动测试都不会发送该请求。
+`openai_image` 使用本地 `.env` 中的 `OPENAI_IMAGE_API_KEY`。`openai_image.base_url` 按服务商提供的地址填写，既支持 `https://image.hapiopen.cc` 这类根地址，也支持以 `/v1` 结尾的地址；程序不会自动追加 `/v1`。WebUI 默认留空，只用灰色占位文字提示官方地址示例 `https://api.openai.com/v1`。默认模型为 `gpt-image-2`，分辨率可选 `1K`、`2K` 或 `4K`。真实兼容性测试会调用标准 `/images/edits` 图像编辑端点，因此一次点击可能产生图片费用；保存设置、构建 UI、dry-run 和自动测试都不会发送该请求。
 
 详情屏数取自提示词设置，并在商品开始时写入 `detail_page_count_snapshot`。续跑时保持该快照，已经完成的 GPT Image 屏幕不再生成，只补缺失屏幕。历史 Lovart 状态仍可通过 `lovart_white_bg_local_path`、`lovart_scene_local_path` 或 `lovart_final_images` 复用旧的白底图和场景图。无论支持图还是详情图选择哪家供应商，失败都会保留状态供人工修复和续跑，不做自动 provider fallback。
 
 失败任务补偿策略对所有供应商组合生效，包括全 GPT Image 路由。GPT Image 服务端临时错误和 Gemini 页面控件短暂缺失会在当前队列结束后进入有上限的补偿轮次，已完成的支持图和详情屏不会重复生成。
+
+WebUI 通过结构化状态事件显示当前商品及阶段，包括白底图、场景图、提示词和详情屏进度，不依赖控制台日志文案推断“处理中”状态。
 
 `lovart_api.py` 是较完整的 Lovart OpenAPI 客户端，包含：
 

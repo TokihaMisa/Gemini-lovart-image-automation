@@ -146,7 +146,7 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
 
 
 def normalize_openai_image_base_url(value: object | None) -> str:
-    """Validate an endpoint and return its sole terminal OpenAI API ``/v1`` path."""
+    """Validate a provider endpoint without inventing provider-specific path segments."""
     raw_value = "" if value is None else str(value)
     if "\r" in raw_value or "\n" in raw_value:
         _raise_invalid_base_url()
@@ -175,13 +175,7 @@ def normalize_openai_image_base_url(value: object | None) -> str:
     ):
         _raise_invalid_base_url()
 
-    path_segments = [segment for segment in parsed.path.split("/") if segment]
-    if any(segment.lower() == "v1" for segment in path_segments[:-1]):
-        _raise_invalid_base_url()
-    if not path_segments or path_segments[-1].lower() != "v1":
-        path_segments.append("v1")
-
-    path = "/" + "/".join(path_segments)
+    path = parsed.path.rstrip("/")
     return urlunsplit((parsed.scheme.lower(), parsed.netloc, path, "", ""))
 
 
@@ -768,5 +762,5 @@ class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
 def _raise_invalid_base_url() -> None:
     raise OpenAIImageAPIError(
         "invalid_base_url",
-        "请填写有效的 GPT Image API 地址，地址必须以 /v1 结尾。",
+        "请填写有效的 GPT Image API 地址。请按服务商提供的地址填写，可带或不带 /v1。",
     )

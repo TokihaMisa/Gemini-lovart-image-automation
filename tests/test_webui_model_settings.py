@@ -129,6 +129,10 @@ class WebUIModelSettingsTests(unittest.TestCase):
             by_label["GPT Image API 地址"]["props"]["placeholder"],
             "例如：https://api.openai.com/v1",
         )
+        self.assertIn(
+            "可以带或不带 /v1",
+            by_label["GPT Image API 地址"]["props"]["info"],
+        )
         self.assertEqual(by_label["GPT Image 模型"]["props"]["value"], "gpt-image-2")
         self.assertEqual(
             {
@@ -344,7 +348,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
 
         self.assertEqual(original, {"other": {"keep": True}})
         self.assertEqual(updated["openai_image"], {
-            "base_url": "https://hapiopen.cc/v1",
+            "base_url": "https://hapiopen.cc",
             "model": "custom-image",
             "resolution": "2K",
         })
@@ -1155,6 +1159,38 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--support-provider") + 1], "openai_image")
         self.assertEqual(argv[argv.index("--detail-provider") + 1], "lovart")
         self.assertIn("output folder with spaces", popen.call_args.kwargs["env"]["LOVART_OUTPUT_DIR"])
+
+    @patch("webui.subprocess.Popen")
+    @patch("webui.save_config")
+    @patch("webui.load_config")
+    @patch("webui.save_env")
+    def test_run_dashboard_marks_structured_active_product_and_stage(
+        self, _save_env, load_config, _save_config, popen
+    ):
+        load_config.return_value = {
+            "gemini_api": {"model": "gemini-model"},
+            "nvidia_api": {"model": "nvidia-model"},
+        }
+        child = Mock()
+        child.stdout = io.StringIO(
+            '[UI_PRODUCT] {"id":"SKU-1","name":"测试商品","image":""}\n'
+            '[UI_STATUS] {"id":"SKU-1","stage":"prompt","message":"🧠 正在生成详情提示词"}\n'
+            '[UI_DETAIL_PROGRESS] {"current":1,"target":4,"completed":1,"failed":[]}\n'
+        )
+        child.poll.return_value = 0
+        popen.return_value = child
+
+        frames = list(run_process(
+            None, "output", "gemini_api", "gemini-model", "unlimited", "auto",
+            "https://gemini.test/v1beta", "https://nvidia.test/v1",
+            "gemini-key", "nvidia-key", "", "",
+        ))
+
+        self.assertTrue(any("SKU-1 - 测试商品" in frame for frame in frames))
+        self.assertTrue(any("详情图 1/4，已完成 1" in frame for frame in frames))
+        self.assertFalse(
+            all("⏳ 等待处理" in frame for frame in frames if "SKU-1" in frame)
+        )
 
     @patch("webui.subprocess.Popen")
     def test_lovart_only_launch_ignores_malformed_unused_gpt_settings(self, popen):

@@ -498,7 +498,7 @@ def test_detail_execution_settings_are_explicit_and_never_include_openai_key():
     settings = OpenAIImageProvider(OpenAIImageAPI(config)).detail_execution_settings()
 
     assert settings == {
-        "base_url": "https://images.example/v1",
+        "base_url": "https://images.example",
         "model": "gpt-image-custom",
         "resolution": "4K",
     }

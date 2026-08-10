@@ -166,6 +166,29 @@ def test_ui_detail_progress_reports_only_counts_and_failed_indexes(tmp_path, cap
     assert all(set(payload) == {"current", "target", "completed", "failed"} for payload in payloads)
 
 
+def test_ui_emits_active_product_and_stage_statuses(tmp_path, capsys):
+    with patch.dict(os.environ, {"UI_MODE": "1"}):
+        run_product_pipeline(
+            tmp_path,
+            "openai_image",
+            "openai_image",
+            detail_count=1,
+        )
+
+    payloads = [
+        json.loads(line.split("]", 1)[1].strip())
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("[UI_STATUS]")
+    ]
+    stages = [payload["stage"] for payload in payloads]
+    assert payloads[0]["stage"] == "product"
+    assert payloads[0]["id"]
+    assert "support_white" in stages
+    assert "support_scene" in stages
+    assert "prompt" in stages
+    assert "detail" in stages
+
+
 @pytest.mark.parametrize(
     ("support", "detail"),
     [

@@ -189,6 +189,17 @@ def _emit_ui_detail_progress(current, target, completed, failed) -> None:
     print(f"[UI_DETAIL_PROGRESS] {json.dumps(payload)}", flush=True)
 
 
+def _emit_ui_status(product_id: str, stage: str, message: str) -> None:
+    if not _is_ui_mode():
+        return
+    payload = {
+        "id": str(product_id),
+        "stage": str(stage),
+        "message": str(message),
+    }
+    print(f"[UI_STATUS] {json.dumps(payload)}", flush=True)
+
+
 def _detail_execution_settings(provider) -> dict[str, object]:
     describe = getattr(provider, "detail_execution_settings", None)
     if not callable(describe):
@@ -733,6 +744,8 @@ def _generate_support_images(
         provider_name = str(getattr(provider, "name", "") or "")
 
     def generate(step_name: str, prompt: str, image_paths: tuple[str, ...], final_index: int) -> str:
+        stage = "support_white" if step_name == "white_bg" else "support_scene"
+        label = "白底图" if step_name == "white_bg" else "场景图"
         status = read_status(product_dir)
         existing_path = _find_support_image(
             product_dir,
@@ -743,6 +756,7 @@ def _generate_support_images(
             provider_name=provider_name,
         )
         if existing_path:
+            _emit_ui_status(product.id, stage, f"♻️ 正在复用已完成{label}")
             update_status(
                 product_dir,
                 f"{step_name}_ready",
@@ -752,6 +766,7 @@ def _generate_support_images(
                 },
             )
             return existing_path
+        _emit_ui_status(product.id, stage, f"🎨 正在生成{label}")
         result = provider.generate_support_image(
             SupportImageRequest(
                 product_id=product.id,
@@ -941,6 +956,11 @@ def _process_products_once(
                 status = read_status(product_dir)
 
         logger.info(f"[{idx}/{len(products)}] {product.id} - {product.name_cn}")
+        _emit_ui_status(
+            product.id,
+            "product",
+            f"🔄 正在处理商品（{idx}/{len(products)}）",
+        )
         console.print(Panel(
             f"[bold cyan]Product ID:[/bold cyan] {product.id}\n[bold cyan]Name:[/bold cyan] {product.name_cn}",
             title=f"[bold green]Processing [{idx}/{len(products)}][/bold green]",
@@ -1184,6 +1204,7 @@ def _process_products_once(
                     screens = []
 
             if not screens:
+                _emit_ui_status(product.id, "prompt", "🧠 正在生成详情提示词")
                 prompt = gemini.generate_prompt(
                     product_id=product.id,
                     product_name_cn=product.name_cn,
@@ -1208,6 +1229,8 @@ def _process_products_once(
                     prompt_settings=detail_prompt_settings,
                 )
                 gemini_chars = len(prompt)
+            else:
+                _emit_ui_status(product.id, "prompt", "♻️ 正在复用已生成详情提示词")
 
             detail_prompt_path.write_text(detail_prompt, encoding="utf-8")
             update_status(
@@ -1264,6 +1287,11 @@ def _process_products_once(
                 "detail_generation_started",
                 detail_provider=effective_routing.detail_provider,
                 used_model=initial_used_model,
+            )
+            _emit_ui_status(
+                product.id,
+                "detail",
+                f"🖼️ 正在生成详情图（目标 {target_count} 张）",
             )
             detail_result = detail_provider.generate_detail_set(
                 DetailSetRequest(

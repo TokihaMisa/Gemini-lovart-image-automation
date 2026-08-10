@@ -1470,8 +1470,17 @@ def run_process(
         is_uifail = clean_line.startswith("[UI_FAIL]")
         is_uimodel = clean_line.startswith("[UI_MODEL]")
         is_uidetail = clean_line.startswith("[UI_DETAIL_PROGRESS]")
+        is_uistatus = clean_line.startswith("[UI_STATUS]")
         
-        if not is_progress and not is_uiproduct and not is_uisuccess and not is_uifail and not is_uimodel and not is_uidetail:
+        if not any((
+            is_progress,
+            is_uiproduct,
+            is_uisuccess,
+            is_uifail,
+            is_uimodel,
+            is_uidetail,
+            is_uistatus,
+        )):
             logs.append(clean_line)
             if len(logs) > 30:
                 logs.pop(0)
@@ -1482,7 +1491,32 @@ def run_process(
                 if "INFO" not in clean_line: # ignore basic INFO lines to save space
                     products_dict[current_pid].setdefault("logs", []).append(f"▶ {clean_msg}")
         
-        if is_uidetail:
+        if is_uistatus:
+            try:
+                data = json.loads(clean_line.replace("[UI_STATUS]", "", 1).strip())
+                pid = str(data.get("id") or "")
+                stage = str(data.get("stage") or "product")
+                message = str(data.get("message") or "🔄 正在处理")
+                if pid in products_dict:
+                    current_pid = pid
+                    current_product = f"{pid} - {products_dict[pid]['name']}"
+                    current_status = message
+                    status_color = {
+                        "product": "#8b5cf6",
+                        "support_white": "#f59e0b",
+                        "support_scene": "#f59e0b",
+                        "prompt": "#06b6d4",
+                        "detail": "#3b82f6",
+                    }.get(stage, "#8b5cf6")
+                    products_dict[pid]["status"] = message
+                    products_dict[pid]["color"] = status_color
+                    stage_log = f"▶ {html.escape(message)}"
+                    product_logs = products_dict[pid].setdefault("logs", [])
+                    if not product_logs or product_logs[-1] != stage_log:
+                        product_logs.append(stage_log)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        elif is_uidetail:
             try:
                 data = json.loads(clean_line.replace("[UI_DETAIL_PROGRESS]", "", 1).strip())
                 current = max(0, int(data.get("current", 0)))
@@ -1524,6 +1558,10 @@ def run_process(
                 pid = data["id"]
                 if pid in products_dict:
                     products_dict[pid]["url"] = data.get("url", "")
+                    products_dict[pid]["status"] = "🎉 成功生成"
+                    products_dict[pid]["color"] = "#10b981"
+                    current_status = f"🎉 {pid} 已完成"
+                    status_color = "#10b981"
                     model = data.get("used_model", "")
                     if model and model != "unknown":
                         products_dict[pid]["used_model"] = model
@@ -2350,7 +2388,7 @@ def build_ui():
                         label="GPT Image API 地址",
                         value=openai_image_config.get("base_url", ""),
                         placeholder="例如：https://api.openai.com/v1",
-                        info="地址必须以 /v1 结尾",
+                        info="可以带或不带 /v1，请按服务商提供的完整 Base URL 填写",
                     )
                     with gr.Row():
                         openai_image_model = gr.Textbox(
