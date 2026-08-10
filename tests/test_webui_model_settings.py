@@ -48,6 +48,20 @@ def gemini_model(model_id="gemini-2.5-flash"):
 
 
 class WebUIModelSettingsTests(unittest.TestCase):
+    def test_paid_image_test_start_immediately_reports_progress_and_disables_button(self):
+        message, button_update = webui.begin_openai_image_test()
+
+        self.assertIn("进度：0/1", message)
+        self.assertIn("正在上传测试图并等待生成", message)
+        self.assertFalse(button_update["interactive"])
+        self.assertIn("正在生成", button_update["value"])
+
+    def test_paid_image_test_button_reset_restores_label_and_interaction(self):
+        button_update = webui.reset_openai_image_test_button()
+
+        self.assertTrue(button_update["interactive"])
+        self.assertIn("真实图像编辑测试", button_update["value"])
+
     @patch("webui.OpenAIImageAPI")
     def test_paid_image_test_runs_only_when_handler_is_explicitly_called(self, api_cls):
         api_cls.return_value.test_edit.return_value.local_path = "test-output.png"
@@ -57,7 +71,19 @@ class WebUIModelSettingsTests(unittest.TestCase):
         )
 
         self.assertIn("测试成功", message)
+        self.assertIn("进度：1/1", message)
         api_cls.return_value.test_edit.assert_called_once()
+
+    @patch("webui.OpenAIImageAPI")
+    def test_paid_image_test_failure_reports_terminal_progress(self, api_cls):
+        api_cls.return_value.test_edit.side_effect = ValueError("invalid request")
+
+        message = webui.test_openai_image_edit(
+            "test-key", "https://hapiopen.cc/v1", "gpt-image-2", "1K"
+        )
+
+        self.assertIn("测试失败", message)
+        self.assertIn("进度：0/1", message)
 
     @patch("webui.OpenAIImageAPI")
     @patch("webui.load_config", return_value={})
@@ -126,6 +152,26 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertGreaterEqual(
             {labels[item] for item in paid_test["inputs"]},
             {"GPT Image API 密钥", "GPT Image API 地址", "GPT Image 模型", "GPT Image 分辨率"},
+        )
+        paid_test_index = demo.config["dependencies"].index(paid_test)
+        paid_test_start = demo.config["dependencies"][paid_test["trigger_after"]]
+        paid_test_button_id = paid_test_start["targets"][0][0]
+        self.assertFalse(paid_test_start["api_name"])
+        self.assertIn(paid_test_button_id, paid_test_start["outputs"])
+        self.assertTrue(
+            any(
+                item["id"] in paid_test_start["outputs"]
+                and "立即显示生成状态和进度"
+                in str(item.get("props", {}).get("value", ""))
+                for item in components
+            )
+        )
+        self.assertTrue(
+            any(
+                dependency["trigger_after"] == paid_test_index
+                and paid_test_button_id in dependency["outputs"]
+                for dependency in demo.config["dependencies"]
+            )
         )
         button_values = [
             str(item.get("props", {}).get("value", ""))

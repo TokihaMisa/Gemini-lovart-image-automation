@@ -77,6 +77,7 @@ PROMPT_FORM_FIELDS = (
 
 active_processes = []
 API_SETTINGS_SAVE_SUCCESS = "✅ 密钥、API 地址和模型已保存"
+OPENAI_IMAGE_TEST_BUTTON_LABEL = "真实图像编辑测试（可能产生一次图片费用）"
 _gemini_login_launch_lock = threading.Lock()
 _gemini_login_launches: dict[str, float] = {}
 _GEMINI_LOGIN_LAUNCH_GRACE_SECONDS = 10.0
@@ -803,6 +804,20 @@ def normalize_resolution(resolution) -> str:
     return normalized
 
 
+def begin_openai_image_test():
+    """Immediately acknowledge the paid test and prevent duplicate submissions."""
+    return (
+        "⏳ **进度：0/1** 已收到请求，正在上传测试图并等待生成。通常需要 "
+        "30–120 秒，请勿重复点击或关闭页面。",
+        gr.update(value="⏳ 正在生成（0/1）…", interactive=False),
+    )
+
+
+def reset_openai_image_test_button():
+    """Restore the paid-test button after either success or failure."""
+    return gr.update(value=OPENAI_IMAGE_TEST_BUTTON_LABEL, interactive=True)
+
+
 def test_openai_image_edit(api_key, base_url, model, resolution) -> str:
     """Run the explicitly requested, potentially billable GPT Image edit probe."""
     try:
@@ -820,9 +835,9 @@ def test_openai_image_edit(api_key, base_url, model, resolution) -> str:
         result = client.test_edit(Path("output") / ".api-tests")
     except (OpenAIImageAPIError, OSError, ValueError) as exc:
         message = exc.user_message if isinstance(exc, OpenAIImageAPIError) else str(exc)
-        return f"❌ GPT Image 图生图测试失败：{message}"
+        return f"❌ **进度：0/1** GPT Image 图生图测试失败：{message}"
     return (
-        f"✅ GPT Image 图生图测试成功：{Path(result.local_path).name}。"
+        f"✅ **进度：1/1** GPT Image 图生图测试成功：{Path(result.local_path).name}。"
         "本次测试可能已产生一次图片费用。"
     )
 
@@ -2346,12 +2361,20 @@ def build_ui():
                             value=openai_image_config.get("resolution", "1K"),
                             label="GPT Image 分辨率",
                         )
+                    openai_image_test_status = gr.Markdown(
+                        "点击下方按钮后，这里会立即显示生成状态和进度。"
+                    )
                     openai_image_test_btn = gr.Button(
-                        "真实图像编辑测试（可能产生一次图片费用）",
+                        OPENAI_IMAGE_TEST_BUTTON_LABEL,
                         variant="stop",
                     )
-                    openai_image_test_status = gr.Markdown("")
-                    openai_image_test_btn.click(
+                    openai_image_test_start = openai_image_test_btn.click(
+                        fn=begin_openai_image_test,
+                        outputs=[openai_image_test_status, openai_image_test_btn],
+                        queue=False,
+                        api_name=False,
+                    )
+                    openai_image_test_run = openai_image_test_start.then(
                         fn=test_openai_image_edit,
                         inputs=[
                             openai_image_key,
@@ -2361,6 +2384,18 @@ def build_ui():
                         ],
                         outputs=openai_image_test_status,
                         api_name="test_openai_image_edit",
+                    )
+                    openai_image_test_run.then(
+                        fn=reset_openai_image_test_button,
+                        outputs=openai_image_test_btn,
+                        queue=False,
+                        api_name=False,
+                    )
+                    openai_image_test_run.failure(
+                        fn=reset_openai_image_test_button,
+                        outputs=openai_image_test_btn,
+                        queue=False,
+                        api_name=False,
                     )
 
                     lovart_access = gr.Textbox(label="LOVART_ACCESS_KEY", value=get_env("LOVART_ACCESS_KEY"), type="password")
