@@ -1553,8 +1553,11 @@ def _process_products(
     prompt_settings=None,
     image_registry=None,
     routing=None,
+    failed_retry_policy=None,
 ):
-    policy = getattr(lovart, "failed_retry_policy", FailedRetryPolicy(mode="off"))
+    policy = failed_retry_policy
+    if policy is None:
+        policy = getattr(lovart, "failed_retry_policy", FailedRetryPolicy(mode="off"))
     if not isinstance(policy, FailedRetryPolicy) or not policy.enabled:
         return _process_products_once(
             products,
@@ -1804,6 +1807,7 @@ def _run_owned_browser_flow(
                 prompt_settings=prompt_settings,
                 image_registry=image_registry,
                 routing=routing,
+                failed_retry_policy=FailedRetryPolicy.from_config(config.get("lovart")),
             )
         finally:
             context.close()
@@ -1920,6 +1924,7 @@ def main(argv=None):
             prompt_settings=prompt_settings,
             image_registry=image_registry,
             routing=routing,
+            failed_retry_policy=FailedRetryPolicy.from_config(config.get("lovart")),
         )
     elif prompt_source == "nvidia":
         prompt_client = _build_nvidia_api(config, logger, prompt_settings=prompt_settings)
@@ -1937,6 +1942,7 @@ def main(argv=None):
             prompt_settings=prompt_settings,
             image_registry=image_registry,
             routing=routing,
+            failed_retry_policy=FailedRetryPolicy.from_config(config.get("lovart")),
         )
     else:
         success, fail, skipped, still_running = _run_browser_flow(

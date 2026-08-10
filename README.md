@@ -88,6 +88,8 @@ Set `openai_image.base_url` to your OpenAI-compatible gateway URL ending in exac
 
 The saved detail-page count controls how many final GPT Image screens are requested. That target is snapshotted when a product starts, so changing the setting later does not alter an in-progress or resumed product. Completed detail screens are retained and a resume generates only missing screens. Provider failures stop on the selected provider: there is no automatic switch to the other provider.
 
+The failed-task compensation policy applies to every routing combination, including an all-GPT-Image run. Retryable GPT Image service errors and transient Gemini page-control failures are retried after the current queue, while completed support/detail images are reused.
+
 The **真实图像编辑测试（可能产生一次图片费用）** button is deliberately billable. It sends one real compatibility request to the standard `/images/edits` endpoint; saving configuration, opening the UI, dry-runs, and automated tests do not call the image API.
 
 ## Prompt-model and prompt-settings workflow

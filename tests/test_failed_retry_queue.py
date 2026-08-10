@@ -85,6 +85,44 @@ class FailedRetryQueueTests(unittest.TestCase):
         self.assertEqual([row["status"] for row in final_rows], ["success", "success"])
         self.assertEqual(len(logger.warnings), 2)
 
+    def test_explicit_policy_retries_without_constructing_lovart(self):
+        product = _Product("SKU-OPENAI")
+        calls = []
+
+        def process_once(_current, _gemini, _lovart, _logger, run_dir, **_kwargs):
+            calls.append(1)
+            failed = len(calls) == 1
+            write_run_summary(run_dir, [{
+                "product_id": product.id,
+                "status": "failed" if failed else "success",
+                "error": (
+                    "screen 4: GPT Image API is temporarily unavailable."
+                    if failed else ""
+                ),
+            }])
+            return 0, 0, 0, 0
+
+        policy = FailedRetryPolicy(
+            mode=RETRY_MODE_FINITE,
+            rounds=2,
+            delay=0,
+            error_types=("network",),
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "main._process_products_once", side_effect=process_once
+        ):
+            result = main._process_products(
+                [product],
+                object(),
+                None,
+                _Logger(),
+                Path(tmp),
+                failed_retry_policy=policy,
+            )
+
+        self.assertEqual(calls, [1, 1])
+        self.assertEqual(result, (1, 0, 0, 0))
+
     def test_infinite_policy_has_no_fixed_cap_and_stops_after_success(self):
         product = _Product("SKU-1")
         calls = []

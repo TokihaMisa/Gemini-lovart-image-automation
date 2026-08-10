@@ -308,18 +308,46 @@ class GeminiBot:
             raise GeminiLoginRequiredError()
         if status.state is GeminiPageState.ERROR:
             raise GeminiPageNotReadyError()
-        if status.state is GeminiPageState.PAGE_LOADING:
-            policy = retry_policy_from_config({"browser": self._browser_config})
-            status = navigate_gemini_with_retry(
-                self.page, "https://gemini.google.com/app", policy, logger=self.logger
-            )
-            if status.state is GeminiPageState.WAITING_LOGIN:
-                raise GeminiLoginRequiredError()
-            if status.state is GeminiPageState.ERROR:
-                raise GeminiPageNotReadyError()
+        if status.state is GeminiPageState.READY:
             if self._select_thinking_mode():
                 return
-        elif status.state is GeminiPageState.READY and self._select_thinking_mode():
+            self.logger.info(
+                "Gemini: mode control still missing; waiting for the toolbar to stabilize"
+            )
+            self.page.wait_for_timeout(2000)
+            if self._select_thinking_mode():
+                return
+
+        self.logger.info(
+            "Gemini: reloading the new-chat page to recover the mode control"
+        )
+        policy = retry_policy_from_config({"browser": self._browser_config})
+        status = navigate_gemini_with_retry(
+            self.page, "https://gemini.google.com/app", policy, logger=self.logger
+        )
+        if status.state is GeminiPageState.WAITING_LOGIN:
+            raise GeminiLoginRequiredError()
+        if status.state is not GeminiPageState.READY or not status.ready:
+            raise GeminiPageNotReadyError()
+
+        temporary_chat_started = self._start_temporary_chat()
+        if (
+            not temporary_chat_started
+            and self.cfg.get("allow_regular_chat_fallback") is not True
+        ):
+            raise GeminiPageStructureError(
+                "Gemini temporary chat control is missing after mode-control recovery"
+            )
+        if not temporary_chat_started:
+            self.logger.warning(
+                "Gemini: temporary chat unavailable after recovery; continuing in regular chat"
+            )
+
+        self.page.wait_for_timeout(1500)
+        if self._select_thinking_mode():
+            return
+        self.page.wait_for_timeout(2000)
+        if self._select_thinking_mode():
             return
         self._save_debug_snapshot(product_id, "thinking-mode-not-selected", 1, "page_structure")
         raise GeminiPageStructureError("Gemini Thinking mode control is missing on a ready page")

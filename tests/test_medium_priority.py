@@ -828,6 +828,45 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
                 bot._select_thinking_mode_with_recovery("SKU")
         self.assertEqual(bot.selects, 1)
 
+    def test_thinking_mode_reloads_new_chat_after_ready_page_control_disappears(self):
+        class Page:
+            def __init__(self):
+                self.waits = []
+
+            def wait_for_timeout(self, milliseconds):
+                self.waits.append(milliseconds)
+
+        class Bot(GeminiBot):
+            def __init__(self):
+                super().__init__(Page(), {"gemini": {}}, FakeFormalLogger())
+                self.selects = 0
+                self.temporary_chat_starts = 0
+
+            def _select_thinking_mode(self):
+                self.selects += 1
+                return self.selects == 4
+
+            def _start_temporary_chat(self):
+                self.temporary_chat_starts += 1
+                return True
+
+        ready = LoginStatus.create(
+            GeminiPageState.READY,
+            True,
+            "https://gemini.google.com/app",
+            "zh-CN",
+            "ready",
+        )
+        bot = Bot()
+        with patch("gemini_bot.inspect_gemini_page", return_value=ready), patch(
+            "gemini_bot.navigate_gemini_with_retry", return_value=ready
+        ) as navigate:
+            bot._select_thinking_mode_with_recovery("SKU")
+
+        self.assertEqual(bot.selects, 4)
+        self.assertEqual(bot.temporary_chat_starts, 1)
+        navigate.assert_called_once()
+
     def test_permanent_browser_errors_do_not_retry_but_reset_retries_once(self):
         for error in (
             RuntimeError("net::ERR_CERT_REVOKED"),

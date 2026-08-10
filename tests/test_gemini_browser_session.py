@@ -8,6 +8,7 @@ from unittest.mock import patch
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 import main
+from failed_retry import FailedRetryPolicy
 
 from gemini_browser_session import (
     GeminiPermanentTlsError,
@@ -322,7 +323,7 @@ class GeminiBrowserSessionTests(unittest.TestCase):
             "main.build_browser_launch_options", return_value=launch_options
         ) as build_options, patch.object(
             main, "navigate_gemini_with_retry", create=True, return_value=ready
-        ) as navigate, patch("main._process_products", return_value=(1, 0, 0, 0)):
+        ) as navigate, patch("main._process_products", return_value=(1, 0, 0, 0)) as process_products:
             result = main._run_browser_flow(
                 config,
                 products=[object()],
@@ -336,6 +337,11 @@ class GeminiBrowserSessionTests(unittest.TestCase):
         self.assertEqual(result, (1, 0, 0, 0))
         build_options.assert_called_once_with(config, config_path=config_path)
         navigate.assert_called_once()
+        self.assertIsInstance(
+            process_products.call_args.kwargs["failed_retry_policy"],
+            FailedRetryPolicy,
+        )
+        self.assertTrue(process_products.call_args.kwargs["failed_retry_policy"].enabled)
         self.assertEqual(context.launch_options, launch_options)
 
     def test_helper_command_matches_source_and_frozen_entry_points(self):

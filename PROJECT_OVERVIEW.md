@@ -148,6 +148,8 @@ Excel 默认字段含义：
 
 详情屏数取自提示词设置，并在商品开始时写入 `detail_page_count_snapshot`。续跑时保持该快照，已经完成的 GPT Image 屏幕不再生成，只补缺失屏幕。历史 Lovart 状态仍可通过 `lovart_white_bg_local_path`、`lovart_scene_local_path` 或 `lovart_final_images` 复用旧的白底图和场景图。无论支持图还是详情图选择哪家供应商，失败都会保留状态供人工修复和续跑，不做自动 provider fallback。
 
+失败任务补偿策略对所有供应商组合生效，包括全 GPT Image 路由。GPT Image 服务端临时错误和 Gemini 页面控件短暂缺失会在当前队列结束后进入有上限的补偿轮次，已完成的支持图和详情屏不会重复生成。
+
 `lovart_api.py` 是较完整的 Lovart OpenAPI 客户端，包含：
 
 - HMAC-SHA256 鉴权。
