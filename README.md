@@ -84,7 +84,7 @@ You can also input and save these keys directly via the **"⚙️ 系统设置" 
 
 GPT Image is an optional image-generation provider; it does not replace Gemini/NVIDIA prompt generation. Keep `OPENAI_IMAGE_API_KEY` only in your local `.env` (or save it through System Settings, which writes the local `.env`); never put it in `config.yaml` or commit it.
 
-Set `openai_image.base_url` to your HAPI/OpenAI-compatible gateway URL ending in exactly one `/v1` (for example, the default `https://hapiopen.cc/v1`). The default model is `gpt-image-2`; choose `1K`, `2K`, or `4K` as the gateway-supported resolution. In the WebUI, **白底图和场景图来源** and **最终套图来源** are independent selectors, so either route may use Lovart or `openai_image`.
+Set `openai_image.base_url` to your OpenAI-compatible gateway URL ending in exactly one `/v1`. The WebUI leaves this field empty and shows `https://api.openai.com/v1` only as a gray example; no provider is silently selected. The default model is `gpt-image-2`; choose `1K`, `2K`, or `4K` as the gateway-supported resolution. In the WebUI, **白底图和场景图来源** and **最终套图来源** are independent selectors, so either route may use Lovart or `openai_image`.
 
 The saved detail-page count controls how many final GPT Image screens are requested. That target is snapshotted when a product starts, so changing the setting later does not alter an in-progress or resumed product. Completed detail screens are retained and a resume generates only missing screens. Provider failures stop on the selected provider: there is no automatic switch to the other provider.
 

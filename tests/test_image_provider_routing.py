@@ -954,7 +954,10 @@ def test_building_all_openai_registry_does_not_construct_lovart():
     from main import _build_image_provider_registry
 
     config = {
-        "openai_image": {"model": "gpt-image-2"},
+        "openai_image": {
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-image-2",
+        },
         "lovart": {"api_key": "must-not-be-read"},
     }
     with patch.dict(os.environ, {"OPENAI_IMAGE_API_KEY": "test-key"}, clear=True), patch("main.LovartBot") as lovart_bot:

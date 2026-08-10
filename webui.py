@@ -404,7 +404,7 @@ nvidia_api:
   models:
     kimi: moonshotai/kimi-k2.5
 openai_image:
-  base_url: https://hapiopen.cc/v1
+  base_url: ""
   model: gpt-image-2
   resolution: 1K
 image_generation:
@@ -1179,7 +1179,7 @@ def run_process(
     lovart_access,
     lovart_secret,
     openai_image_key=None,
-    openai_image_base_url="https://hapiopen.cc/v1",
+    openai_image_base_url="",
     openai_image_model="gpt-image-2",
     openai_image_resolution="1K",
     support_provider="lovart",
@@ -1933,7 +1933,7 @@ def save_api_settings_from_existing_controls(
         gemini_model,
         nvidia_base_url,
         nvidia_model,
-        openai_image.get("base_url", "https://hapiopen.cc/v1"),
+        openai_image.get("base_url", ""),
         openai_image.get("model", "gpt-image-2"),
         openai_image.get("resolution", "1K"),
         image_generation.get("support_provider", "lovart"),
@@ -2348,7 +2348,8 @@ def build_ui():
                     )
                     openai_image_base_url = gr.Textbox(
                         label="GPT Image API 地址",
-                        value=openai_image_config.get("base_url", "https://hapiopen.cc/v1"),
+                        value=openai_image_config.get("base_url", ""),
+                        placeholder="例如：https://api.openai.com/v1",
                         info="地址必须以 /v1 结尾",
                     )
                     with gr.Row():

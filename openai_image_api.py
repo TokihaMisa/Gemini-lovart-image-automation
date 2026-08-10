@@ -28,7 +28,7 @@ from PIL import Image, UnidentifiedImageError
 from network_retry import PERMANENT_TLS_GUIDANCE, RetryKind, classify_network_error
 
 
-DEFAULT_OPENAI_IMAGE_BASE_URL: Final = "https://hapiopen.cc/v1"
+DEFAULT_OPENAI_IMAGE_BASE_URL: Final = "https://api.openai.com/v1"
 _VALID_RESOLUTIONS: Final = {"1K", "2K", "4K"}
 _UNSAFE_IPV6_TRANSITION_NETWORKS: Final = (
     ipaddress.IPv6Network("::/96"),  # deprecated IPv4-compatible addresses
@@ -147,11 +147,13 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
 
 def normalize_openai_image_base_url(value: object | None) -> str:
     """Validate an endpoint and return its sole terminal OpenAI API ``/v1`` path."""
-    raw_value = DEFAULT_OPENAI_IMAGE_BASE_URL if value is None else str(value)
+    raw_value = "" if value is None else str(value)
     if "\r" in raw_value or "\n" in raw_value:
         _raise_invalid_base_url()
 
-    cleaned = raw_value.strip() or DEFAULT_OPENAI_IMAGE_BASE_URL
+    cleaned = raw_value.strip()
+    if not cleaned:
+        _raise_invalid_base_url()
     try:
         parsed = urlsplit(cleaned)
         hostname = parsed.hostname
@@ -764,4 +766,7 @@ class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _raise_invalid_base_url() -> None:
-    raise OpenAIImageAPIError("invalid_base_url", "GPT Image API 地址无效。")
+    raise OpenAIImageAPIError(
+        "invalid_base_url",
+        "请填写有效的 GPT Image API 地址，地址必须以 /v1 结尾。",
+    )

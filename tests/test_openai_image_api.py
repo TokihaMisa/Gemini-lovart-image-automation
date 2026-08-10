@@ -179,6 +179,9 @@ def test_normalize_openai_image_base_url(raw, expected):
 @pytest.mark.parametrize(
     "raw",
     [
+        None,
+        "",
+        "   ",
         "https://bad\nhost",
         "https://user:pass@gateway.test",
         "https:///v1",
@@ -219,14 +222,20 @@ def test_invalid_url_never_echoes_key_in_error_or_config_repr():
     assert secret not in str(ctx.value)
     assert secret not in repr(ctx.value)
 
-    config = OpenAIImageAPIConfig.from_config({}, api_key=secret)
+    config = OpenAIImageAPIConfig.from_config(
+        {"openai_image": {"base_url": "https://api.openai.com/v1"}},
+        api_key=secret,
+    )
     assert secret not in repr(config)
 
 
 def test_config_serialization_omits_key_but_authorization_can_access_it():
     """Fails if standard dataclass serialization exposes the resolved API key."""
     secret = "serialization-secret"
-    config = OpenAIImageAPIConfig.from_config({}, api_key=secret)
+    config = OpenAIImageAPIConfig.from_config(
+        {"openai_image": {"base_url": "https://api.openai.com/v1"}},
+        api_key=secret,
+    )
 
     serialized = asdict(config)
     assert secret not in serialized.values()

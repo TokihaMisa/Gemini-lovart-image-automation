@@ -55,8 +55,9 @@ nvidia_api:
     kimi: "moonshotai/kimi-k2.5"
 
 openai_image:
-  # Keep OPENAI_IMAGE_API_KEY only in local .env. The endpoint must end in exactly one /v1.
-  base_url: "https://hapiopen.cc/v1"
+  # Keep OPENAI_IMAGE_API_KEY only in local .env. Enter an endpoint ending in exactly one /v1.
+  # Leave this empty to avoid silently selecting a provider.
+  base_url: ""
   model: gpt-image-2
   # The gateway-supported options are 1K, 2K, and 4K.
   resolution: 1K

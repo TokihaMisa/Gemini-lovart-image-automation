@@ -124,7 +124,11 @@ class WebUIModelSettingsTests(unittest.TestCase):
 
         self.assertEqual(by_label["GPT Image API 密钥"]["props"]["type"], "password")
         self.assertEqual(by_label["GPT Image API 密钥"]["props"]["value"], "")
-        self.assertTrue(by_label["GPT Image API 地址"]["props"]["value"].endswith("/v1"))
+        self.assertEqual(by_label["GPT Image API 地址"]["props"]["value"], "")
+        self.assertEqual(
+            by_label["GPT Image API 地址"]["props"]["placeholder"],
+            "例如：https://api.openai.com/v1",
+        )
         self.assertEqual(by_label["GPT Image 模型"]["props"]["value"], "gpt-image-2")
         self.assertEqual(
             {
@@ -284,7 +288,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
             config["image_generation"],
             {"support_provider": "lovart", "detail_provider": "lovart"},
         )
-        self.assertEqual(config["openai_image"]["base_url"], "https://hapiopen.cc/v1")
+        self.assertEqual(config["openai_image"]["base_url"], "")
         self.assertEqual(config["openai_image"]["model"], "gpt-image-2")
 
     def test_blank_openai_image_key_preserves_existing_value(self):
@@ -1191,6 +1195,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
     def test_selected_gpt_route_rejects_malformed_or_missing_selected_settings(self):
         cases = [
             ("not-a-url", "gpt-image-2", "1K", "test-key"),
+            ("", "gpt-image-2", "1K", "test-key"),
             ("https://hapiopen.cc/v1", "gpt-image-2", "1K", ""),
         ]
         for base_url, model, resolution, key in cases:
