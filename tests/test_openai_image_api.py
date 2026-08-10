@@ -471,6 +471,49 @@ def test_hapi_async_edit_surfaces_failed_task_reason(build_opener, tmp_path):
     assert build_opener.return_value.open.call_count == 2
 
 
+@patch("openai_image_api.urllib.request.build_opener")
+def test_hapi_async_disabled_falls_back_to_sync_once_per_client(build_opener, tmp_path):
+    build_opener.return_value.open.side_effect = [
+        HTTPError(
+            "https://image.hapiopen.cc/images/edits/async",
+            404,
+            "async image tasks are not enabled",
+            {},
+            None,
+        ),
+        fake_png_response(),
+        fake_png_response(),
+    ]
+    statuses = []
+    client = make_client(
+        base_url="https://image.hapiopen.cc",
+        async_edits=True,
+    )
+    source = make_png(tmp_path / "source.png")
+
+    client.generate_edit(
+        "first",
+        [source],
+        tmp_path / "first.png",
+        status_callback=statuses.append,
+    )
+    client.generate_edit(
+        "second",
+        [source],
+        tmp_path / "second.png",
+        status_callback=statuses.append,
+    )
+
+    requests = [call.args[0] for call in build_opener.return_value.open.call_args_list]
+    assert [request.full_url for request in requests] == [
+        "https://image.hapiopen.cc/images/edits/async",
+        "https://image.hapiopen.cc/images/edits",
+        "https://image.hapiopen.cc/images/edits",
+    ]
+    assert all(b'name="image";' in request.data for request in requests)
+    assert statuses.count("↩️ HAPI 未启用异步任务，已切换为同步生成") == 1
+
+
 @pytest.mark.parametrize(
     ("status", "content_type", "body"),
     [

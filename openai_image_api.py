@@ -275,6 +275,7 @@ class OpenAIImageAPI:
         self.config = config
         self.logger = logger
         self._sleep = sleep or time.sleep
+        self._hapi_async_available: bool | None = None
 
     def generate_edit(
         self,
@@ -387,15 +388,40 @@ class OpenAIImageAPI:
         *,
         status_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
+        if self._hapi_async_available is False:
+            return self._request_hapi_sync_edit(
+                body,
+                content_type,
+                status_callback=status_callback,
+            )
         # An ambiguous retry of a multipart submit can create a second paid job.
         # Submit once, then make all subsequent retries against the safe task GET.
-        payload = self._request_json(
-            _hapi_images_endpoint(self.config.base_url, "/edits/async"),
-            body,
-            content_type,
-            max_attempts=1,
-            status_callback=status_callback,
-        )
+        try:
+            payload = self._request_json(
+                _hapi_images_endpoint(self.config.base_url, "/edits/async"),
+                body,
+                content_type,
+                max_attempts=1,
+                status_callback=status_callback,
+            )
+        except OpenAIImageAPIError as exc:
+            if exc.status_code != 404:
+                raise
+            self._hapi_async_available = False
+            if self.logger is not None:
+                self.logger.warning(
+                    "HAPI async image tasks are unavailable; falling back to sync edits."
+                )
+            _notify_status(
+                status_callback,
+                "↩️ HAPI 未启用异步任务，已切换为同步生成",
+            )
+            return self._request_hapi_sync_edit(
+                body,
+                content_type,
+                status_callback=status_callback,
+            )
+        self._hapi_async_available = True
         task_id = _validated_hapi_task_id(payload.get("task_id"))
         _notify_status(status_callback, "📨 GPT Image 任务已提交，正在等待生成")
         if self.logger is not None:
@@ -466,6 +492,20 @@ class OpenAIImageAPI:
             "timeout",
             "GPT Image async task did not finish before the local wait timeout.",
             retryable=True,
+        )
+
+    def _request_hapi_sync_edit(
+        self,
+        body: bytes,
+        content_type: str,
+        *,
+        status_callback: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        return self._request_json(
+            _hapi_images_endpoint(self.config.base_url, "/edits"),
+            body,
+            content_type,
+            status_callback=status_callback,
         )
 
     def _raise_hapi_task_failure(self, payload: Mapping[str, Any]) -> None:
