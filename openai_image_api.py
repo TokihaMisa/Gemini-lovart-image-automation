@@ -101,6 +101,7 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
     timeout: float = 600.0
     max_attempts: int = 4
     retry_delays: tuple[float, ...] = (3.0, 6.0, 12.0)
+    async_edits: bool = False
 
     def __init__(
         self,
@@ -111,6 +112,7 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
         timeout: float = 600.0,
         max_attempts: int = 4,
         retry_delays: tuple[float, ...] = (3.0, 6.0, 12.0),
+        async_edits: bool = False,
     ) -> None:
         object.__setattr__(self, "_api_key", api_key)
         object.__setattr__(self, "base_url", base_url)
@@ -119,6 +121,7 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
         object.__setattr__(self, "timeout", timeout)
         object.__setattr__(self, "max_attempts", max_attempts)
         object.__setattr__(self, "retry_delays", retry_delays)
+        object.__setattr__(self, "async_edits", bool(async_edits))
 
     @classmethod
     def from_config(
@@ -137,11 +140,13 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
             )
 
         model = str(section.get("model") or "gpt-image-2").strip() or "gpt-image-2"
+        base_url = normalize_openai_image_base_url(section.get("base_url"))
         return cls(
             api_key=resolved_key,
-            base_url=normalize_openai_image_base_url(section.get("base_url")),
+            base_url=base_url,
             model=model,
             resolution=resolution,
+            async_edits=_is_hapi_image_service(base_url),
         )
 
 
@@ -179,6 +184,85 @@ def normalize_openai_image_base_url(value: object | None) -> str:
     return urlunsplit((parsed.scheme.lower(), parsed.netloc, path, "", ""))
 
 
+def _is_hapi_image_service(base_url: str) -> bool:
+    """Recognize HAPI's standard and dedicated image gateways."""
+    try:
+        parsed = urlsplit(base_url)
+        return (parsed.hostname or "").rstrip(".").lower() in {
+            "hapiopen.cc",
+            "image.hapiopen.cc",
+        } and parsed.path.rstrip("/") in {"", "/v1"}
+    except ValueError:
+        return False
+
+
+def _hapi_images_endpoint(base_url: str, suffix: str) -> str:
+    parsed = urlsplit(base_url)
+    prefix = "/v1/images" if (
+        (parsed.hostname or "").rstrip(".").lower() == "hapiopen.cc"
+        and not parsed.path.rstrip("/")
+    ) else "/images"
+    return f"{prefix}{suffix}"
+
+
+def _decode_json_response(raw_response: bytes) -> dict[str, Any]:
+    try:
+        decoded = json.loads(raw_response.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise OpenAIImageAPIError(
+            "invalid_response", "GPT Image API returned an unreadable response."
+        ) from None
+    if not isinstance(decoded, dict):
+        raise OpenAIImageAPIError(
+            "invalid_response", "GPT Image API returned an invalid response."
+        )
+    return decoded
+
+
+def _validated_hapi_task_id(value: object) -> str:
+    task_id = str(value or "").strip()
+    if (
+        not task_id
+        or len(task_id) > 160
+        or any(
+            character
+            not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+            for character in task_id
+        )
+    ):
+        raise OpenAIImageAPIError(
+            "invalid_response", "GPT Image API returned an invalid async task ID."
+        )
+    return task_id
+
+
+def _hapi_task_result(payload: Mapping[str, Any]) -> dict[str, Any]:
+    result = payload.get("result")
+    if not isinstance(result, Mapping):
+        raise OpenAIImageAPIError(
+            "invalid_response", "GPT Image API returned no async task result."
+        )
+    return dict(result)
+
+
+def _notify_status(callback: Callable[[str], None] | None, message: str) -> None:
+    if callback is not None:
+        callback(str(message))
+
+
+def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
+    raw_value = next(
+        (value for name, value in headers.items() if name.lower() == "retry-after"),
+        None,
+    )
+    if raw_value is None:
+        return None
+    try:
+        return max(1.0, min(60.0, float(raw_value)))
+    except (TypeError, ValueError):
+        return None
+
+
 class OpenAIImageAPI:
     """Minimal transport for the standard OpenAI-compatible Images edits API."""
 
@@ -198,18 +282,33 @@ class OpenAIImageAPI:
         image_paths: Sequence[str | Path],
         output_path: str | Path,
         image_size: str = "",
+        status_callback: Callable[[str], None] | None = None,
     ) -> GeneratedImage:
         files = _validated_image_paths(image_paths)
+        use_hapi_async = bool(self.config.async_edits)
+        image_field = "image" if use_hapi_async else "image[]"
         body, content_type = encode_multipart(
             fields={
                 "model": self.config.model,
                 "prompt": append_aspect_instruction(prompt, image_size),
                 "size": self.config.resolution,
             },
-            files=[("image[]", path) for path in files],
+            files=[(image_field, path) for path in files],
         )
-        payload = self._request_json("/images/edits", body, content_type)
-        image_bytes = self._extract_image_bytes(payload)
+        if use_hapi_async:
+            payload = self._request_hapi_async_edit(
+                body,
+                content_type,
+                status_callback=status_callback,
+            )
+        else:
+            payload = self._request_json(
+                "/images/edits",
+                body,
+                content_type,
+                status_callback=status_callback,
+            )
+        image_bytes = self._extract_image_bytes(payload, status_callback=status_callback)
         target = Path(output_path)
         atomic_save_validated_image(image_bytes, target)
         return GeneratedImage(local_path=str(target), model=self.config.model)
@@ -237,7 +336,15 @@ class OpenAIImageAPI:
                 except FileNotFoundError:
                     pass
 
-    def _request_json(self, endpoint: str, body: bytes, content_type: str) -> dict[str, Any]:
+    def _request_json(
+        self,
+        endpoint: str,
+        body: bytes,
+        content_type: str,
+        *,
+        max_attempts: int | None = None,
+        status_callback: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
         request = urllib.request.Request(
             f"{self.config.base_url}{endpoint}", data=body, method="POST"
         )
@@ -245,26 +352,164 @@ class OpenAIImageAPI:
         request.add_header("Authorization", f"Bearer {self.config.api_key}")
         request.add_header("Content-Type", content_type)
         opener = urllib.request.build_opener(_RejectRedirectHandler())
-        raw_response = self._request_bytes(request, opener.open, "json")
-        try:
-            decoded = json.loads(raw_response.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+        raw_response = self._request_bytes(
+            request,
+            opener.open,
+            "json",
+            max_attempts=max_attempts,
+            status_callback=status_callback,
+        )
+        return _decode_json_response(raw_response)
+
+    def _request_json_url(
+        self,
+        url: str,
+        status_callback: Callable[[str], None] | None = None,
+    ) -> tuple[dict[str, Any], float | None]:
+        request = urllib.request.Request(url, method="GET")
+        request.add_header("Accept", "application/json")
+        request.add_header("Authorization", f"Bearer {self.config.api_key}")
+        opener = urllib.request.build_opener(_RejectRedirectHandler())
+        response_headers: dict[str, str] = {}
+        raw_response = self._request_bytes(
+            request,
+            opener.open,
+            "json",
+            status_callback=status_callback,
+            response_headers=response_headers,
+        )
+        return _decode_json_response(raw_response), _retry_after_seconds(response_headers)
+
+    def _request_hapi_async_edit(
+        self,
+        body: bytes,
+        content_type: str,
+        *,
+        status_callback: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        # An ambiguous retry of a multipart submit can create a second paid job.
+        # Submit once, then make all subsequent retries against the safe task GET.
+        payload = self._request_json(
+            _hapi_images_endpoint(self.config.base_url, "/edits/async"),
+            body,
+            content_type,
+            max_attempts=1,
+            status_callback=status_callback,
+        )
+        task_id = _validated_hapi_task_id(payload.get("task_id"))
+        _notify_status(status_callback, "📨 GPT Image 任务已提交，正在等待生成")
+        if self.logger is not None:
+            self.logger.info("GPT Image async task submitted: %s", task_id)
+
+        status = str(payload.get("status") or "").strip().lower()
+        if status == "completed":
+            return _hapi_task_result(payload)
+        if status == "failed":
+            self._raise_hapi_task_failure(payload)
+        if status not in {"processing", "pending", "queued"}:
             raise OpenAIImageAPIError(
-                "invalid_response", "GPT Image API returned an unreadable response."
-            ) from None
-        if not isinstance(decoded, dict):
-            raise OpenAIImageAPIError(
-                "invalid_response", "GPT Image API returned an invalid response."
+                "invalid_response",
+                "GPT Image API returned an invalid async task status.",
             )
-        return decoded
+
+        poll_url = (
+            f"{self.config.base_url}"
+            f"{_hapi_images_endpoint(self.config.base_url, f'/tasks/{task_id}')}"
+        )
+        poll_interval = 3.0
+        max_polls = max(
+            1,
+            int(max(float(self.config.timeout), poll_interval) / poll_interval),
+        )
+        deadline = time.monotonic() + max(float(self.config.timeout), poll_interval)
+        for poll_number in range(1, max_polls + 1):
+            polled, retry_after = self._request_json_url(
+                poll_url,
+                status_callback=status_callback,
+            )
+            polled_task_id = polled.get("task_id")
+            if polled_task_id not in {None, "", task_id}:
+                raise OpenAIImageAPIError(
+                    "invalid_response",
+                    "GPT Image API returned a mismatched async task.",
+                )
+            status = str(polled.get("status") or "").strip().lower()
+            if self.logger is not None:
+                self.logger.info(
+                    "GPT Image async task %s: %s (poll %s/%s)",
+                    task_id,
+                    status or "unknown",
+                    poll_number,
+                    max_polls,
+                )
+            if status == "completed":
+                _notify_status(status_callback, "✅ GPT Image 生成完成，正在保存图片")
+                return _hapi_task_result(polled)
+            if status == "failed":
+                self._raise_hapi_task_failure(polled)
+            if status not in {"processing", "pending", "queued"}:
+                raise OpenAIImageAPIError(
+                    "invalid_response",
+                    "GPT Image API returned an invalid async task status.",
+                )
+            _notify_status(
+                status_callback,
+                f"⏳ GPT Image 正在生成（状态检查 {poll_number}/{max_polls}）",
+            )
+            if poll_number < max_polls:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._sleep(min(retry_after or poll_interval, remaining))
+
+        raise OpenAIImageAPIError(
+            "timeout",
+            "GPT Image async task did not finish before the local wait timeout.",
+            retryable=True,
+        )
+
+    def _raise_hapi_task_failure(self, payload: Mapping[str, Any]) -> None:
+        raw_status = payload.get("http_status")
+        try:
+            status_code = int(raw_status) if raw_status is not None else None
+        except (TypeError, ValueError):
+            status_code = None
+        error_value = payload.get("error")
+        if isinstance(error_value, Mapping):
+            detail = str(
+                error_value.get("message") or error_value.get("type") or ""
+            ).strip()
+        else:
+            detail = str(error_value or "").strip()
+        detail = " ".join(detail.replace(self.config.api_key, "[redacted]").split())[:300]
+        if status_code == 429:
+            code = "rate_limit"
+            retryable = True
+        elif status_code is not None and 500 <= status_code < 600:
+            code = "server_error"
+            retryable = True
+        else:
+            code = "task_failed"
+            retryable = False
+        message = "GPT Image async task failed."
+        if detail:
+            message = f"GPT Image async task failed: {detail}"
+        raise OpenAIImageAPIError(code, message, status_code, retryable)
 
     def _request_bytes(
         self,
         request: urllib.request.Request,
         open_request: Callable[..., Any] | None = None,
         expected_content_type: str | None = None,
+        *,
+        max_attempts: int | None = None,
+        status_callback: Callable[[str], None] | None = None,
+        response_headers: dict[str, str] | None = None,
     ) -> bytes:
-        attempts = max(1, int(self.config.max_attempts))
+        attempts = max(
+            1,
+            int(self.config.max_attempts if max_attempts is None else max_attempts),
+        )
         request_opener = open_request or urllib.request.urlopen
         for attempt in range(1, attempts + 1):
             try:
@@ -274,21 +519,41 @@ class OpenAIImageAPI:
                         _validate_response_contract(
                             response, response_body, expected_content_type
                         )
+                    if response_headers is not None:
+                        response_headers.clear()
+                        response_headers.update(
+                            (str(name), str(value))
+                            for name, value in response.headers.items()
+                        )
                     return response_body
             except (HTTPError, URLError, TimeoutError, socket.timeout, OSError, http.client.HTTPException) as exc:
                 error = _transport_error(exc)
                 if not error.retryable or attempt >= attempts:
                     raise error from None
-                self._notice_retry(attempt, attempts)
+                self._notice_retry(attempt, attempts, status_callback=status_callback)
         raise RuntimeError("image request retry loop exhausted")
 
-    def _notice_retry(self, attempt: int, attempts: int) -> None:
+    def _notice_retry(
+        self,
+        attempt: int,
+        attempts: int,
+        status_callback: Callable[[str], None] | None = None,
+    ) -> None:
         delay = _retry_delay(self.config.retry_delays, attempt)
         if self.logger is not None:
             self.logger.warning("GPT Image request failed (%s/%s); retrying.", attempt, attempts)
+        _notify_status(
+            status_callback,
+            f"🔄 GPT Image 请求失败，正在重试（{attempt}/{attempts}）",
+        )
         self._sleep(delay)
 
-    def _extract_image_bytes(self, payload: dict[str, Any]) -> bytes:
+    def _extract_image_bytes(
+        self,
+        payload: dict[str, Any],
+        *,
+        status_callback: Callable[[str], None] | None = None,
+    ) -> bytes:
         data = payload.get("data")
         if not isinstance(data, list) or not data:
             raise OpenAIImageAPIError("invalid_response", "GPT Image API returned no image.")
@@ -311,7 +576,11 @@ class OpenAIImageAPI:
             resolved_url,
             self.config.timeout,
             self.config.max_attempts,
-            self._notice_retry,
+            lambda attempt, attempts: self._notice_retry(
+                attempt,
+                attempts,
+                status_callback=status_callback,
+            ),
         )
 
 

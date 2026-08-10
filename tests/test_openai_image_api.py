@@ -155,6 +155,7 @@ def make_client(*, sleep=None, **overrides) -> OpenAIImageAPI:
         "base_url": "https://hapiopen.cc/v1",
         "timeout": 12.5,
         "retry_delays": (0.0,),
+        "async_edits": False,
     }
     settings.update(overrides)
     config = OpenAIImageAPIConfig(
@@ -263,6 +264,25 @@ def test_config_normalizes_defaults_and_provider_values():
         config.model = "another-model"
 
 
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("https://image.hapiopen.cc", True),
+        ("https://image.hapiopen.cc/v1", True),
+        ("https://hapiopen.cc/v1", True),
+        ("https://api.openai.com/v1", False),
+        ("https://gateway.test/v1", False),
+    ],
+)
+def test_config_enables_async_edits_only_for_hapi(base_url, expected):
+    config = OpenAIImageAPIConfig.from_config(
+        {"openai_image": {"base_url": base_url}},
+        api_key="test-key",
+    )
+
+    assert config.async_edits is expected
+
+
 def test_config_rejects_unsupported_resolution_without_disclosing_key():
     """Fails if unsupported resolution values are accepted or secrets appear in the error."""
     secret = "resolution-secret"
@@ -305,16 +325,150 @@ def test_generate_edit_posts_multipart_and_saves_b64_png(build_opener, tmp_path)
 
 @patch("openai_image_api.urllib.request.build_opener")
 def test_generate_edit_uses_provider_root_without_inserting_v1(build_opener, tmp_path):
-    build_opener.return_value.open.return_value = fake_png_response()
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(json.dumps({
+            "task_id": "imgtask_test123",
+            "status": "processing",
+            "poll_url": "/images/tasks/imgtask_test123",
+        }).encode("utf-8"), status=202),
+        FakeResponse(json.dumps({
+            "task_id": "imgtask_test123",
+            "status": "completed",
+            "result": {
+                "data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}],
+            },
+        }).encode("utf-8")),
+    ]
 
-    make_client(base_url="https://image.hapiopen.cc").generate_edit(
+    sleeps = []
+    make_client(
+        base_url="https://image.hapiopen.cc",
+        sleep=sleeps.append,
+        async_edits=True,
+    ).generate_edit(
         "prompt",
         [make_png(tmp_path / "source.png")],
         tmp_path / "out.png",
     )
 
-    request = build_opener.return_value.open.call_args.args[0]
-    assert request.full_url == "https://image.hapiopen.cc/images/edits"
+    submit = build_opener.return_value.open.call_args_list[0].args[0]
+    poll = build_opener.return_value.open.call_args_list[1].args[0]
+    assert submit.full_url == "https://image.hapiopen.cc/images/edits/async"
+    assert submit.method == "POST"
+    assert b'name="image"; filename="source.png"' in submit.data
+    assert b'name="image[]"' not in submit.data
+    assert poll.full_url == "https://image.hapiopen.cc/images/tasks/imgtask_test123"
+    assert poll.method == "GET"
+    assert poll.get_header("Authorization") == "Bearer test-key"
+    assert sleeps == []
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_hapi_main_root_async_edit_inserts_documented_v1_image_path(build_opener, tmp_path):
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(json.dumps({
+            "task_id": "imgtask_mainroot",
+            "status": "processing",
+        }).encode("utf-8"), status=202),
+        FakeResponse(json.dumps({
+            "task_id": "imgtask_mainroot",
+            "status": "completed",
+            "result": {"data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}]},
+        }).encode("utf-8")),
+    ]
+
+    make_client(
+        base_url="https://hapiopen.cc",
+        async_edits=True,
+    ).generate_edit(
+        "prompt",
+        [make_png(tmp_path / "source.png")],
+        tmp_path / "out.png",
+    )
+
+    requests = [call.args[0] for call in build_opener.return_value.open.call_args_list]
+    assert requests[0].full_url == "https://hapiopen.cc/v1/images/edits/async"
+    assert requests[1].full_url == "https://hapiopen.cc/v1/images/tasks/imgtask_mainroot"
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_hapi_async_edit_polls_processing_task_without_resubmitting(build_opener, tmp_path):
+    processing_response = FakeResponse(json.dumps({
+        "task_id": "imgtask_slow456",
+        "status": "processing",
+    }).encode("utf-8"))
+    processing_response.headers["Retry-After"] = "5"
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(json.dumps({
+            "task_id": "imgtask_slow456",
+            "status": "processing",
+            "poll_url": "/images/tasks/imgtask_slow456",
+        }).encode("utf-8"), status=202),
+        processing_response,
+        FakeResponse(json.dumps({
+            "task_id": "imgtask_slow456",
+            "status": "completed",
+            "result": {
+                "data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}],
+            },
+        }).encode("utf-8")),
+    ]
+    sleeps = []
+    statuses = []
+
+    result = make_client(
+        base_url="https://image.hapiopen.cc",
+        sleep=sleeps.append,
+        async_edits=True,
+    ).generate_edit(
+        "prompt",
+        [make_png(tmp_path / "source.png")],
+        tmp_path / "out.png",
+        status_callback=statuses.append,
+    )
+
+    requests = [call.args[0] for call in build_opener.return_value.open.call_args_list]
+    assert [request.method for request in requests] == ["POST", "GET", "GET"]
+    assert sum(request.full_url.endswith("/images/edits/async") for request in requests) == 1
+    assert sleeps == [5.0]
+    assert statuses == [
+        "📨 GPT Image 任务已提交，正在等待生成",
+        "⏳ GPT Image 正在生成（状态检查 1/4）",
+        "✅ GPT Image 生成完成，正在保存图片",
+    ]
+    assert result.local_path == str(tmp_path / "out.png")
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_hapi_async_edit_surfaces_failed_task_reason(build_opener, tmp_path):
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(json.dumps({
+            "task_id": "imgtask_failed789",
+            "status": "processing",
+            "poll_url": "/images/tasks/imgtask_failed789",
+        }).encode("utf-8"), status=202),
+        FakeResponse(json.dumps({
+            "task_id": "imgtask_failed789",
+            "status": "failed",
+            "http_status": 503,
+            "error": {"message": "upstream image model unavailable"},
+        }).encode("utf-8")),
+    ]
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client(
+            base_url="https://image.hapiopen.cc",
+            async_edits=True,
+        ).generate_edit(
+            "prompt",
+            [make_png(tmp_path / "source.png")],
+            tmp_path / "out.png",
+        )
+
+    assert ctx.value.code == "server_error"
+    assert ctx.value.status_code == 503
+    assert "upstream image model unavailable" in str(ctx.value)
+    assert build_opener.return_value.open.call_count == 2
 
 
 @pytest.mark.parametrize(

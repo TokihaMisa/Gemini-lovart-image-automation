@@ -798,6 +798,11 @@ def _generate_support_images(
                 language=product.language,
                 selling_points=product.selling_points,
                 confirmation_advisor=getattr(provider, "confirmation_advisor", None),
+                status_callback=lambda message: _emit_ui_status(
+                    product.id,
+                    stage,
+                    message,
+                ),
             )
         )
         if not result.succeeded or not result.local_paths:
@@ -1331,6 +1336,11 @@ def _process_products_once(
                     resume=resume,
                     confirmation_advisor=gemini,
                     progress_callback=_emit_ui_detail_progress,
+                    status_callback=lambda message: _emit_ui_status(
+                        product.id,
+                        "detail",
+                        message,
+                    ),
                 )
             )
             raw_result = dict(detail_result.raw_result or {})

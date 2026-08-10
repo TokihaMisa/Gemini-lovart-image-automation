@@ -35,6 +35,7 @@ class SupportImageRequest:
     language: str = ""
     selling_points: str = ""
     confirmation_advisor: Any | None = None
+    status_callback: Callable[[str], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ class DetailSetRequest:
     resume: bool = True
     confirmation_advisor: Any | None = None
     progress_callback: Callable[[int, int, int, tuple[int, ...]], None] | None = None
+    status_callback: Callable[[str], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -174,6 +176,7 @@ class OpenAIImageProvider:
                 image_paths=list(request.image_paths),
                 output_path=output_path,
                 image_size=request.image_size,
+                status_callback=request.status_callback,
             )
         except Exception as exc:
             return ImageProviderResult(succeeded=False, error=str(exc))
@@ -252,6 +255,7 @@ class OpenAIImageProvider:
                     image_paths=list(request.image_paths),
                     output_path=output_path,
                     image_size=request.image_size,
+                    status_callback=request.status_callback,
                 )
             except Exception as exc:
                 failed.append(screen.index)
