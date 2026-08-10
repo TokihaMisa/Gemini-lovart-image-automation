@@ -15,6 +15,7 @@ from utils import (
     env_or_config,
     is_product_completed,
     load_dotenv,
+    organize_output_folders,
     product_output_dir,
     read_status,
     split_image_roles,
@@ -77,6 +78,33 @@ class HighPriorityBehaviorTests(unittest.TestCase):
             self.assertTrue(data["lovart_done"])
             self.assertEqual(data["project_url"], "https://example.test")
             self.assertTrue(is_product_completed(out))
+
+    def test_organizer_moves_gpt_image_completed_product_to_done(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            product_dir = base / "3_处理中" / "SKU-GPT-DONE"
+            product_dir.mkdir(parents=True)
+            detail_path = product_dir / "gpt_image" / "detail" / "01.png"
+            detail_path.parent.mkdir(parents=True)
+            detail_path.write_bytes(b"generated")
+            update_status(
+                product_dir,
+                "detail_generation_done",
+                detail_generation_complete=True,
+                lovart_done=False,
+                detail_images=[str(detail_path)],
+            )
+
+            organize_output_folders(base)
+
+            moved_dir = base / "1_完全做好" / "SKU-GPT-DONE"
+            self.assertTrue(moved_dir.is_dir())
+            self.assertFalse(product_dir.exists())
+            status = read_status(moved_dir)
+            self.assertEqual(
+                status["detail_images"],
+                [str(moved_dir / "gpt_image" / "detail" / "01.png")],
+            )
 
     def test_append_result_writes_header_escapes_csv_and_upserts_by_product_id(self):
         with tempfile.TemporaryDirectory() as tmp:

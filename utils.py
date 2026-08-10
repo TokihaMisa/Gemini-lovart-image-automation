@@ -647,15 +647,29 @@ def _fix_status_paths(status_file_dir: Path, old_base: str, new_base: str):
     status_file = status_file_dir / "status.json"
     if not status_file.exists():
         return
-    content = status_file.read_text(encoding="utf-8")
-    old_base_fwd = old_base.replace("\\", "/")
-    new_base_fwd = new_base.replace("\\", "/")
-    old_base_bck = old_base.replace("/", "\\")
-    new_base_bck = new_base.replace("/", "\\")
-    
-    content = content.replace(old_base_fwd, new_base_fwd)
-    content = content.replace(old_base_bck, new_base_bck)
-    status_file.write_text(content, encoding="utf-8")
+    status = json.loads(status_file.read_text(encoding="utf-8"))
+    replacements = (
+        (old_base.replace("\\", "/"), new_base.replace("\\", "/")),
+        (old_base.replace("/", "\\"), new_base.replace("/", "\\")),
+    )
+
+    def replace_paths(value):
+        if isinstance(value, str):
+            for old_value, new_value in replacements:
+                value = value.replace(old_value, new_value)
+            return value
+        if isinstance(value, list):
+            return [replace_paths(item) for item in value]
+        if isinstance(value, dict):
+            return {key: replace_paths(item) for key, item in value.items()}
+        return value
+
+    temp_path = status_file.with_suffix(".json.tmp")
+    temp_path.write_text(
+        json.dumps(replace_paths(status), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temp_path.replace(status_file)
 
 
 def organize_output_folders(base_dir: str = None):
@@ -693,7 +707,7 @@ def organize_output_folders(base_dir: str = None):
         if not status:
             continue
             
-        is_done = bool(status.get("lovart_done"))
+        is_done = is_product_completed(pdir)
         is_pending = bool(status.get("needs_manual_action"))
         is_error = bool(status.get("lovart_project_invalid") or status.get("lovart_still_running"))
         
