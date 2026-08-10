@@ -23,7 +23,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 import urllib.request
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from network_retry import PERMANENT_TLS_GUIDANCE, RetryKind, classify_network_error
 
@@ -288,14 +288,26 @@ class OpenAIImageAPI:
         files = _validated_image_paths(image_paths)
         use_hapi_async = bool(self.config.async_edits)
         image_field = "image" if use_hapi_async else "image[]"
-        body, content_type = encode_multipart(
-            fields={
-                "model": self.config.model,
-                "prompt": append_aspect_instruction(prompt, image_size),
-                "size": self.config.resolution,
-            },
-            files=[(image_field, path) for path in files],
-        )
+        temporary_upload: Path | None = None
+        upload_files = files
+        if use_hapi_async and len(files) > 1:
+            temporary_upload = _build_hapi_reference_sheet(files)
+            upload_files = [temporary_upload]
+        try:
+            body, content_type = encode_multipart(
+                fields={
+                    "model": self.config.model,
+                    "prompt": append_aspect_instruction(prompt, image_size),
+                    "size": self.config.resolution,
+                },
+                files=[(image_field, path) for path in upload_files],
+            )
+        finally:
+            if temporary_upload is not None:
+                try:
+                    temporary_upload.unlink()
+                except FileNotFoundError:
+                    pass
         if use_hapi_async:
             payload = self._request_hapi_async_edit(
                 body,
@@ -1023,17 +1035,91 @@ def _validated_image_paths(image_paths: Sequence[str | Path]) -> list[Path]:
     return paths
 
 
+def _build_hapi_reference_sheet(image_paths: Sequence[Path]) -> Path:
+    """Flatten multiple references into HAPI's documented single `image` upload."""
+    descriptor, raw_path = tempfile.mkstemp(
+        prefix="hapi-reference-sheet-",
+        suffix=".png",
+    )
+    os.close(descriptor)
+    target = Path(raw_path)
+    try:
+        prepared: list[Image.Image] = []
+        for source_path in image_paths:
+            with Image.open(source_path) as source:
+                normalized = ImageOps.exif_transpose(source).convert("RGB")
+                normalized.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+                prepared.append(normalized.copy())
+        if not prepared:
+            raise ValueError("no reference images")
+
+        columns = 2 if len(prepared) > 1 else 1
+        rows = (len(prepared) + columns - 1) // columns
+        padding = 24
+        cell_width = max(image.width for image in prepared)
+        cell_height = max(image.height for image in prepared)
+        canvas = Image.new(
+            "RGB",
+            (
+                columns * cell_width + (columns + 1) * padding,
+                rows * cell_height + (rows + 1) * padding,
+            ),
+            "white",
+        )
+        for index, image in enumerate(prepared):
+            column = index % columns
+            row = index // columns
+            left = padding + column * (cell_width + padding)
+            top = padding + row * (cell_height + padding)
+            left += (cell_width - image.width) // 2
+            top += (cell_height - image.height) // 2
+            canvas.paste(image, (left, top))
+        canvas.save(target, format="PNG", optimize=True)
+        return target
+    except (OSError, UnidentifiedImageError, ValueError):
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        raise OpenAIImageAPIError(
+            "invalid_input_image",
+            "Could not combine source images for the HAPI image edit request.",
+        ) from None
+
+
 def _transport_error(exc: BaseException) -> OpenAIImageAPIError:
     if isinstance(exc, HTTPError):
         if exc.code in {401, 403}:
-            return OpenAIImageAPIError("authentication", "GPT Image API authentication failed.", exc.code)
-        if exc.code in {400, 404}:
-            return OpenAIImageAPIError("invalid_request", "GPT Image API request or endpoint is invalid.", exc.code)
+            return OpenAIImageAPIError(
+                "authentication",
+                f"GPT Image API authentication failed (HTTP {exc.code}).",
+                exc.code,
+            )
+        if exc.code in {400, 404, 422}:
+            return OpenAIImageAPIError(
+                "invalid_request",
+                f"GPT Image API request or endpoint is invalid (HTTP {exc.code}).",
+                exc.code,
+            )
         if exc.code == 429:
-            return OpenAIImageAPIError("rate_limit", "GPT Image API is rate limiting requests.", exc.code, True)
+            return OpenAIImageAPIError(
+                "rate_limit",
+                "GPT Image API is rate limiting requests (HTTP 429).",
+                exc.code,
+                True,
+            )
         if 500 <= exc.code < 600:
-            return OpenAIImageAPIError("server_error", "GPT Image API is temporarily unavailable.", exc.code, True)
-        return OpenAIImageAPIError("http_error", "GPT Image API request failed.", exc.code)
+            return OpenAIImageAPIError(
+                "server_error",
+                f"GPT Image API is temporarily unavailable (HTTP {exc.code}).",
+                exc.code,
+                True,
+            )
+        return OpenAIImageAPIError(
+            "http_error",
+            f"GPT Image API request failed (HTTP {exc.code}).",
+            exc.code,
+        )
     kind = classify_network_error(exc)
     if kind is RetryKind.PERMANENT_TLS:
         return OpenAIImageAPIError("tls_certificate", PERMANENT_TLS_GUIDANCE)

@@ -514,6 +514,51 @@ def test_hapi_async_disabled_falls_back_to_sync_once_per_client(build_opener, tm
     assert statuses.count("↩️ HAPI 未启用异步任务，已切换为同步生成") == 1
 
 
+@patch("openai_image_api.urllib.request.build_opener")
+def test_hapi_multiple_reference_images_are_uploaded_as_one_contact_sheet(
+    build_opener,
+    tmp_path,
+):
+    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
+        "task_id": "imgtask_contactsheet",
+        "status": "completed",
+        "result": {"data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}]},
+    }).encode("utf-8"), status=202)
+    first = make_png(tmp_path / "first.png")
+    second = make_png(tmp_path / "second.png")
+
+    make_client(
+        base_url="https://image.hapiopen.cc",
+        async_edits=True,
+    ).generate_edit(
+        "prompt",
+        [first, second],
+        tmp_path / "out.png",
+    )
+
+    request = build_opener.return_value.open.call_args.args[0]
+    assert request.data.count(b'name="image"; filename=') == 1
+    assert b'hapi-reference-sheet-' in request.data
+    assert b'name="image[]"' not in request.data
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_generic_openai_multiple_reference_images_remain_separate_files(
+    build_opener,
+    tmp_path,
+):
+    build_opener.return_value.open.return_value = fake_png_response()
+
+    make_client(base_url="https://gateway.test/v1").generate_edit(
+        "prompt",
+        [make_png(tmp_path / "first.png"), make_png(tmp_path / "second.png")],
+        tmp_path / "out.png",
+    )
+
+    request = build_opener.return_value.open.call_args.args[0]
+    assert request.data.count(b'name="image[]"; filename=') == 2
+
+
 @pytest.mark.parametrize(
     ("status", "content_type", "body"),
     [
