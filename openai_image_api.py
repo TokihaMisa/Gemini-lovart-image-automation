@@ -102,6 +102,7 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
     max_attempts: int = 4
     retry_delays: tuple[float, ...] = (3.0, 6.0, 12.0)
     async_edits: bool = False
+    merge_reference_images: bool = False
 
     def __init__(
         self,
@@ -113,6 +114,7 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
         max_attempts: int = 4,
         retry_delays: tuple[float, ...] = (3.0, 6.0, 12.0),
         async_edits: bool = False,
+        merge_reference_images: bool = False,
     ) -> None:
         object.__setattr__(self, "_api_key", api_key)
         object.__setattr__(self, "base_url", base_url)
@@ -122,6 +124,11 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
         object.__setattr__(self, "max_attempts", max_attempts)
         object.__setattr__(self, "retry_delays", retry_delays)
         object.__setattr__(self, "async_edits", bool(async_edits))
+        object.__setattr__(
+            self,
+            "merge_reference_images",
+            bool(merge_reference_images),
+        )
 
     @classmethod
     def from_config(
@@ -141,12 +148,17 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
 
         model = str(section.get("model") or "gpt-image-2").strip() or "gpt-image-2"
         base_url = normalize_openai_image_base_url(section.get("base_url"))
+        merge_reference_images = _config_boolean(
+            section.get("merge_reference_images"),
+            default=_is_hapi_image_service(base_url),
+        )
         return cls(
             api_key=resolved_key,
             base_url=base_url,
             model=model,
             resolution=resolution,
             async_edits=_is_hapi_image_service(base_url),
+            merge_reference_images=merge_reference_images,
         )
 
 
@@ -194,6 +206,19 @@ def _is_hapi_image_service(base_url: str) -> bool:
         } and parsed.path.rstrip("/") in {"", "/v1"}
     except ValueError:
         return False
+
+
+def _config_boolean(value: object, *, default: bool) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    return bool(default)
 
 
 def _hapi_images_endpoint(base_url: str, suffix: str) -> str:
@@ -287,11 +312,12 @@ class OpenAIImageAPI:
     ) -> GeneratedImage:
         files = _validated_image_paths(image_paths)
         use_hapi_async = bool(self.config.async_edits)
-        image_field = "image" if use_hapi_async else "image[]"
+        merge_references = bool(self.config.merge_reference_images)
+        image_field = "image" if use_hapi_async or merge_references else "image[]"
         temporary_upload: Path | None = None
         upload_files = files
-        if use_hapi_async and len(files) > 1:
-            temporary_upload = _build_hapi_reference_sheet(files)
+        if merge_references and len(files) > 1:
+            temporary_upload = _build_reference_sheet(files)
             upload_files = [temporary_upload]
         try:
             body, content_type = encode_multipart(
@@ -1035,10 +1061,10 @@ def _validated_image_paths(image_paths: Sequence[str | Path]) -> list[Path]:
     return paths
 
 
-def _build_hapi_reference_sheet(image_paths: Sequence[Path]) -> Path:
-    """Flatten multiple references into HAPI's documented single `image` upload."""
+def _build_reference_sheet(image_paths: Sequence[Path]) -> Path:
+    """Flatten multiple references for providers that accept one `image` upload."""
     descriptor, raw_path = tempfile.mkstemp(
-        prefix="hapi-reference-sheet-",
+        prefix="merged-reference-sheet-",
         suffix=".png",
     )
     os.close(descriptor)
@@ -1083,7 +1109,7 @@ def _build_hapi_reference_sheet(image_paths: Sequence[Path]) -> Path:
             pass
         raise OpenAIImageAPIError(
             "invalid_input_image",
-            "Could not combine source images for the HAPI image edit request.",
+            "Could not combine source images for the image edit request.",
         ) from None
 
 

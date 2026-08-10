@@ -62,6 +62,9 @@ openai_image:
   model: gpt-image-2
   # The gateway-supported options are 1K, 2K, and 4K.
   resolution: 1K
+  # Enable for gateways that accept only one image file per edit request.
+  # HAPI defaults to enabled automatically when this field is absent.
+  merge_reference_images: false
 
 image_generation:
   # Support and final-detail providers are independent; failures never auto-fallback.

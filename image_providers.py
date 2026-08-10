@@ -166,6 +166,9 @@ class OpenAIImageProvider:
             ),
             "model": str(getattr(config, "model", "gpt-image-2") or "gpt-image-2").strip(),
             "resolution": str(getattr(config, "resolution", "1K") or "1K").upper(),
+            "merge_reference_images": bool(
+                getattr(config, "merge_reference_images", False)
+            ),
         }
 
     def generate_support_image(self, request: SupportImageRequest) -> ImageProviderResult:

@@ -547,6 +547,7 @@ def test_detail_execution_settings_are_explicit_and_never_include_openai_key():
         "base_url": "https://images.example",
         "model": "gpt-image-custom",
         "resolution": "4K",
+        "merge_reference_images": False,
     }
     assert "top-secret-key" not in json.dumps(settings)
 

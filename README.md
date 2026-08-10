@@ -86,6 +86,8 @@ GPT Image is an optional image-generation provider; it does not replace Gemini/N
 
 Set `openai_image.base_url` to the Base URL supplied by your OpenAI-compatible gateway. Root endpoints such as `https://image.hapiopen.cc` and endpoints ending in `/v1` are both supported; the application does not insert `/v1`. The WebUI leaves this field empty and shows `https://api.openai.com/v1` only as a gray example. The default model is `gpt-image-2`; choose `1K`, `2K`, or `4K` as the gateway-supported resolution. In the WebUI, **白底图和场景图来源** and **最终套图来源** are independent selectors, so either route may use Lovart or `openai_image`.
 
+Enable **将多张参考图合并为一张上传** when a gateway accepts only one `image` file per edit request. The application builds a temporary local contact sheet and uploads that single file without modifying the source images. Legacy HAPI configurations default this option on; other gateways default it off, and the saved switch always takes precedence.
+
 The saved detail-page count controls how many final GPT Image screens are requested. That target is snapshotted when a product starts, so changing the setting later does not alter an in-progress or resumed product. Completed detail screens are retained and a resume generates only missing screens. Provider failures stop on the selected provider: there is no automatic switch to the other provider.
 
 The failed-task compensation policy applies to every routing combination, including an all-GPT-Image run. Retryable GPT Image service errors and transient Gemini page-control failures are retried after the current queue, while completed support/detail images are reused.

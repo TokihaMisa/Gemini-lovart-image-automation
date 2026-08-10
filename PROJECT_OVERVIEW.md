@@ -146,6 +146,8 @@ Excel 默认字段含义：
 
 `openai_image` 使用本地 `.env` 中的 `OPENAI_IMAGE_API_KEY`。`openai_image.base_url` 按服务商提供的地址填写，既支持 `https://image.hapiopen.cc` 这类根地址，也支持以 `/v1` 结尾的地址；程序不会自动追加 `/v1`。WebUI 默认留空，只用灰色占位文字提示官方地址示例 `https://api.openai.com/v1`。默认模型为 `gpt-image-2`，分辨率可选 `1K`、`2K` 或 `4K`。真实兼容性测试会调用标准 `/images/edits` 图像编辑端点，因此一次点击可能产生图片费用；保存设置、构建 UI、dry-run 和自动测试都不会发送该请求。
 
+`openai_image.merge_reference_images` 对应 WebUI 的“将多张参考图合并为一张上传”开关。开启时，白底图、场景图、配件图、尺寸图和参考图会先在本地合成临时参考拼图，再作为唯一的 `image` 文件上传；原始文件不会被修改。HAPI 旧配置未写该字段时默认开启，其他 OpenAI-compatible 地址默认关闭，用户保存的显式开关优先。
+
 详情屏数取自提示词设置，并在商品开始时写入 `detail_page_count_snapshot`。续跑时保持该快照，已经完成的 GPT Image 屏幕不再生成，只补缺失屏幕。历史 Lovart 状态仍可通过 `lovart_white_bg_local_path`、`lovart_scene_local_path` 或 `lovart_final_images` 复用旧的白底图和场景图。无论支持图还是详情图选择哪家供应商，失败都会保留状态供人工修复和续跑，不做自动 provider fallback。
 
 失败任务补偿策略对所有供应商组合生效，包括全 GPT Image 路由。GPT Image 服务端临时错误和 Gemini 页面控件短暂缺失会在当前队列结束后进入有上限的补偿轮次，已完成的支持图和详情屏不会重复生成。

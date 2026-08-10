@@ -7,6 +7,7 @@ import atexit
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import gradio as gr
 import yaml
@@ -804,6 +805,29 @@ def normalize_resolution(resolution) -> str:
     return normalized
 
 
+def default_merge_reference_images(base_url) -> bool:
+    try:
+        hostname = (
+            urlsplit(str(base_url or "").strip()).hostname or ""
+        ).rstrip(".").lower()
+    except ValueError:
+        return False
+    return hostname in {"hapiopen.cc", "image.hapiopen.cc"}
+
+
+def resolve_merge_reference_images(value, base_url) -> bool:
+    if value is None:
+        return default_merge_reference_images(base_url)
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    return default_merge_reference_images(base_url)
+
+
 def begin_openai_image_test():
     """Immediately acknowledge the paid test and prevent duplicate submissions."""
     return (
@@ -818,7 +842,13 @@ def reset_openai_image_test_button():
     return gr.update(value=OPENAI_IMAGE_TEST_BUTTON_LABEL, interactive=True)
 
 
-def test_openai_image_edit(api_key, base_url, model, resolution) -> str:
+def test_openai_image_edit(
+    api_key,
+    base_url,
+    model,
+    resolution,
+    merge_reference_images=None,
+) -> str:
     """Run the explicitly requested, potentially billable GPT Image edit probe."""
     try:
         config = {
@@ -826,6 +856,12 @@ def test_openai_image_edit(api_key, base_url, model, resolution) -> str:
                 "base_url": base_url,
                 "model": model,
                 "resolution": resolution,
+                "merge_reference_images": (
+                    resolve_merge_reference_images(
+                        merge_reference_images,
+                        base_url,
+                    )
+                ),
             }
         }
         client = OpenAIImageAPI(
@@ -849,13 +885,28 @@ def persist_openai_image_settings(
     resolution,
     support_provider,
     detail_provider,
+    merge_reference_images=None,
 ):
     updated = deepcopy(config)
+    normalized_base_url = normalize_openai_image_base_url(base_url)
+    if merge_reference_images is None:
+        existing = updated.get("openai_image", {})
+        if isinstance(existing, dict) and "merge_reference_images" in existing:
+            merge_reference_images = resolve_merge_reference_images(
+                existing["merge_reference_images"],
+                normalized_base_url,
+            )
+        else:
+            merge_reference_images = default_merge_reference_images(normalized_base_url)
     updated["openai_image"] = {
         **updated.get("openai_image", {}),
-        "base_url": normalize_openai_image_base_url(base_url),
+        "base_url": normalized_base_url,
         "model": str(model or "gpt-image-2").strip() or "gpt-image-2",
         "resolution": normalize_resolution(resolution),
+        "merge_reference_images": resolve_merge_reference_images(
+            merge_reference_images,
+            normalized_base_url,
+        ),
     }
     updated["openai_image"].pop("api_key", None)
     updated["image_generation"] = {
@@ -895,6 +946,7 @@ def save_api_settings(
     support_provider,
     detail_provider,
     clear_openai_image_key=False,
+    merge_reference_images=None,
     config_path="config.yaml",
     env_path=".env",
 ):
@@ -914,6 +966,7 @@ def save_api_settings(
             openai_image_resolution,
             support_provider,
             detail_provider,
+            merge_reference_images,
         )
         _save_config_and_env_transaction(
             updated,
@@ -1185,6 +1238,7 @@ def run_process(
     support_provider="lovart",
     detail_provider="lovart",
     clear_openai_image_key=False,
+    merge_reference_images=None,
     *,
     config_path="config.yaml",
     env_path=".env",
@@ -1236,6 +1290,7 @@ def run_process(
                 openai_image_resolution,
                 support_provider,
                 detail_provider,
+                merge_reference_images,
             )
         if "lovart" not in config:
             config["lovart"] = {}
@@ -1995,6 +2050,7 @@ def save_api_settings_from_ui(
     support_provider,
     detail_provider,
     clear_openai_image_key,
+    merge_reference_images=None,
     *,
     config_path="config.yaml",
     env_path=".env",
@@ -2015,6 +2071,7 @@ def save_api_settings_from_ui(
         support_provider,
         detail_provider,
         clear_openai_image_key=clear_openai_image_key,
+        merge_reference_images=merge_reference_images,
         config_path=config_path,
         env_path=env_path,
     )
@@ -2042,6 +2099,7 @@ def run_process_from_ui(
     support_provider,
     detail_provider,
     clear_openai_image_key,
+    merge_reference_images=None,
     *,
     config_path="config.yaml",
     env_path=".env",
@@ -2066,6 +2124,7 @@ def run_process_from_ui(
         support_provider,
         detail_provider,
         clear_openai_image_key,
+        merge_reference_images,
         config_path=config_path,
         env_path=env_path,
     )
@@ -2111,6 +2170,11 @@ def build_ui():
     openai_image_config = config.get("openai_image", {}) or {}
     if not isinstance(openai_image_config, dict):
         openai_image_config = {}
+    configured_merge_references = openai_image_config.get("merge_reference_images")
+    merge_reference_images_value = resolve_merge_reference_images(
+        configured_merge_references,
+        openai_image_config.get("base_url", ""),
+    )
     image_generation_config = config.get("image_generation", {}) or {}
     if not isinstance(image_generation_config, dict):
         image_generation_config = {}
@@ -2400,6 +2464,14 @@ def build_ui():
                             value=openai_image_config.get("resolution", "1K"),
                             label="GPT Image 分辨率",
                         )
+                    merge_reference_images = gr.Checkbox(
+                        label="将多张参考图合并为一张上传",
+                        value=merge_reference_images_value,
+                        info=(
+                            "兼容只接受单个 image 文件的代理。开启后会先在本地生成参考拼图；"
+                            "HAPI 地址默认开启，其他 OpenAI 兼容地址默认关闭。"
+                        ),
+                    )
                     openai_image_test_status = gr.Markdown(
                         "点击下方按钮后，这里会立即显示生成状态和进度。"
                     )
@@ -2420,6 +2492,7 @@ def build_ui():
                             openai_image_base_url,
                             openai_image_model,
                             openai_image_resolution,
+                            merge_reference_images,
                         ],
                         outputs=openai_image_test_status,
                         api_name="test_openai_image_edit",
@@ -2617,6 +2690,7 @@ def build_ui():
                             support_provider,
                             detail_provider,
                             clear_openai_image_key,
+                            merge_reference_images,
                         ],
                         outputs=[
                             save_status,
@@ -2853,6 +2927,7 @@ def build_ui():
                 openai_image_key, openai_image_base_url, openai_image_model,
                 openai_image_resolution, support_provider, detail_provider,
                 clear_openai_image_key,
+                merge_reference_images,
             ],
             outputs=[
                 progress_dashboard,

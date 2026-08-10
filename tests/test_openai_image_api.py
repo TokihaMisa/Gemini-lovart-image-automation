@@ -156,6 +156,7 @@ def make_client(*, sleep=None, **overrides) -> OpenAIImageAPI:
         "timeout": 12.5,
         "retry_delays": (0.0,),
         "async_edits": False,
+        "merge_reference_images": False,
     }
     settings.update(overrides)
     config = OpenAIImageAPIConfig(
@@ -281,6 +282,29 @@ def test_config_enables_async_edits_only_for_hapi(base_url, expected):
     )
 
     assert config.async_edits is expected
+
+
+@pytest.mark.parametrize(
+    ("base_url", "configured", "expected"),
+    [
+        ("https://image.hapiopen.cc", None, True),
+        ("https://hapiopen.cc/v1", None, True),
+        ("https://gateway.test/v1", None, False),
+        ("https://gateway.test/v1", True, True),
+        ("https://image.hapiopen.cc", False, False),
+    ],
+)
+def test_config_resolves_reference_merge_switch(base_url, configured, expected):
+    section = {"base_url": base_url}
+    if configured is not None:
+        section["merge_reference_images"] = configured
+
+    config = OpenAIImageAPIConfig.from_config(
+        {"openai_image": section},
+        api_key="test-key",
+    )
+
+    assert config.merge_reference_images is expected
 
 
 def test_config_rejects_unsupported_resolution_without_disclosing_key():
@@ -530,6 +554,7 @@ def test_hapi_multiple_reference_images_are_uploaded_as_one_contact_sheet(
     make_client(
         base_url="https://image.hapiopen.cc",
         async_edits=True,
+        merge_reference_images=True,
     ).generate_edit(
         "prompt",
         [first, second],
@@ -538,7 +563,7 @@ def test_hapi_multiple_reference_images_are_uploaded_as_one_contact_sheet(
 
     request = build_opener.return_value.open.call_args.args[0]
     assert request.data.count(b'name="image"; filename=') == 1
-    assert b'hapi-reference-sheet-' in request.data
+    assert b'merged-reference-sheet-' in request.data
     assert b'name="image[]"' not in request.data
 
 
@@ -557,6 +582,25 @@ def test_generic_openai_multiple_reference_images_remain_separate_files(
 
     request = build_opener.return_value.open.call_args.args[0]
     assert request.data.count(b'name="image[]"; filename=') == 2
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_generic_merge_switch_uploads_one_contact_sheet(build_opener, tmp_path):
+    build_opener.return_value.open.return_value = fake_png_response()
+
+    make_client(
+        base_url="https://gateway.test/v1",
+        merge_reference_images=True,
+    ).generate_edit(
+        "prompt",
+        [make_png(tmp_path / "first.png"), make_png(tmp_path / "second.png")],
+        tmp_path / "out.png",
+    )
+
+    request = build_opener.return_value.open.call_args.args[0]
+    assert request.data.count(b'name="image"; filename=') == 1
+    assert b'merged-reference-sheet-' in request.data
+    assert b'name="image[]"' not in request.data
 
 
 @pytest.mark.parametrize(

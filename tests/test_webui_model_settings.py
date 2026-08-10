@@ -142,13 +142,18 @@ class WebUIModelSettingsTests(unittest.TestCase):
             {"1K", "2K", "4K"},
         )
         self.assertFalse(by_label["清除已保存 GPT Image 密钥"]["props"]["value"])
+        self.assertFalse(
+            by_label["将多张参考图合并为一张上传"]["props"]["value"]
+        )
 
         run_labels = {labels[item] for item in dependencies["run_process"]["inputs"]}
         self.assertIn("白底图和场景图来源", run_labels)
         self.assertIn("最终套图来源", run_labels)
         self.assertIn("清除已保存 GPT Image 密钥", run_labels)
+        self.assertIn("将多张参考图合并为一张上传", run_labels)
         save_labels = {labels[item] for item in dependencies["save_api_settings"]["inputs"]}
         self.assertIn("清除已保存 GPT Image 密钥", save_labels)
+        self.assertIn("将多张参考图合并为一张上传", save_labels)
         markdown_values = [
             str(item.get("props", {}).get("value", ""))
             for item in components
@@ -159,7 +164,13 @@ class WebUIModelSettingsTests(unittest.TestCase):
         paid_test = dependencies["test_openai_image_edit"]
         self.assertGreaterEqual(
             {labels[item] for item in paid_test["inputs"]},
-            {"GPT Image API 密钥", "GPT Image API 地址", "GPT Image 模型", "GPT Image 分辨率"},
+            {
+                "GPT Image API 密钥",
+                "GPT Image API 地址",
+                "GPT Image 模型",
+                "GPT Image 分辨率",
+                "将多张参考图合并为一张上传",
+            },
         )
         paid_test_index = demo.config["dependencies"].index(paid_test)
         paid_test_start = demo.config["dependencies"][paid_test["trigger_after"]]
@@ -194,6 +205,22 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertIn(
             "清除已保存 GPT Image 密钥",
             {labels[item] for item in dependencies["run_process"]["outputs"]},
+        )
+
+    @patch(
+        "webui.load_config",
+        return_value={"openai_image": {"base_url": "https://image.hapiopen.cc"}},
+    )
+    def test_hapi_legacy_config_defaults_reference_merge_switch_on(self, _load_config):
+        demo = build_ui()
+        by_label = {
+            item.get("props", {}).get("label"): item
+            for item in demo.config["components"]
+            if item.get("props", {}).get("label")
+        }
+
+        self.assertTrue(
+            by_label["将多张参考图合并为一张上传"]["props"]["value"]
         )
 
     def test_save_ui_clear_flow_updates_indicator_resets_checkbox_and_allows_replacement(self):
@@ -294,6 +321,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
         )
         self.assertEqual(config["openai_image"]["base_url"], "")
         self.assertEqual(config["openai_image"]["model"], "gpt-image-2")
+        self.assertFalse(config["openai_image"]["merge_reference_images"])
 
     def test_blank_openai_image_key_preserves_existing_value(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -351,11 +379,25 @@ class WebUIModelSettingsTests(unittest.TestCase):
             "base_url": "https://hapiopen.cc",
             "model": "custom-image",
             "resolution": "2K",
+            "merge_reference_images": True,
         })
         self.assertEqual(updated["image_generation"], {
             "support_provider": "openai_image",
             "detail_provider": "lovart",
         })
+
+    def test_persist_openai_image_settings_allows_merge_switch_for_any_gateway(self):
+        updated = webui.persist_openai_image_settings(
+            {},
+            "https://gateway.test/v1",
+            "custom-image",
+            "1K",
+            "openai_image",
+            "openai_image",
+            True,
+        )
+
+        self.assertTrue(updated["openai_image"]["merge_reference_images"])
 
     def test_persist_openai_image_settings_preserves_unrelated_image_routing_fields(self):
         original = {
