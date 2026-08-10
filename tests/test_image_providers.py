@@ -80,6 +80,52 @@ def test_openai_detail_set_skips_valid_completed_indexes(tmp_path: Path):
     assert api.generate_edit.call_count == 1
 
 
+def test_openai_detail_resume_rebases_checkpoint_after_product_directory_moves(
+    tmp_path: Path,
+):
+    from types import SimpleNamespace
+
+    from image_providers import (
+        DetailSetRequest,
+        OpenAIImageProvider,
+        detail_screen_prompt_hash,
+        record_detail_checkpoint,
+    )
+    from utils import read_status
+
+    product_dir = tmp_path / "3_处理中" / "SKU-MOVED"
+    screen = DetailScreen(1, "hero")
+    canonical = write_valid_png(product_dir / "gpt_image" / "detail" / "01.png")
+    prompt_hash = detail_screen_prompt_hash(screen, 1, "1:1")
+    record_detail_checkpoint(
+        product_dir,
+        1,
+        "done",
+        str(tmp_path / "SKU-MOVED" / "gpt_image" / "detail" / "01.png"),
+        input_fingerprint="same-inputs",
+        prompt_hash=prompt_hash,
+    )
+    api = Mock()
+    api.config = SimpleNamespace(model="gpt-image-2")
+    provider = OpenAIImageProvider(api)
+
+    result = provider.generate_detail_set(DetailSetRequest(
+        product_id="SKU-MOVED",
+        product_dir=product_dir,
+        screens=(screen,),
+        image_paths=(write_valid_png(product_dir / "reference.png"),),
+        image_size="1:1",
+        target_count=1,
+        input_fingerprint="same-inputs",
+    ))
+
+    assert result.succeeded is True
+    assert result.local_paths == (canonical,)
+    api.generate_edit.assert_not_called()
+    checkpoint = read_status(product_dir)["detail_checkpoints"]["1"]
+    assert checkpoint["local_path"] == canonical
+
+
 def test_completed_indexes_ignore_checkpoint_with_invalid_image(tmp_path: Path):
     from image_providers import read_completed_detail_indexes, record_detail_checkpoint
 

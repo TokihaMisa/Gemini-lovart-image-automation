@@ -208,6 +208,20 @@ def _detail_execution_settings(provider) -> dict[str, object]:
     return dict(settings) if isinstance(settings, Mapping) else {}
 
 
+def _detail_fingerprint_execution_settings(
+    settings: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Treat HAPI's standard and image-only gateways as the same image backend."""
+    normalized = dict(settings or {})
+    base_url = str(normalized.get("base_url") or "").rstrip("/").lower()
+    if base_url in {
+        "https://image.hapiopen.cc",
+        "https://image.hapiopen.cc/v1",
+    }:
+        normalized["base_url"] = "https://hapiopen.cc/v1"
+    return normalized
+
+
 def _compose_detail_request_screens(
     screens,
     provider_name,
@@ -496,6 +510,11 @@ def _find_support_image(
             found = _existing_path(final_images[final_index])
             if found:
                 return found
+
+    if provider_name == PROVIDER_OPENAI_IMAGE:
+        canonical = product_dir / "gpt_image" / "support" / f"{step_name}.png"
+        if is_valid_image_file(canonical):
+            return str(canonical)
 
     step_dir = product_dir / "lovart_steps" / step_name
     if include_lovart_legacy and step_dir.exists():
@@ -1111,7 +1130,9 @@ def _process_products_once(
                     "reference_images": tuple(reference_images),
                     "reference_sheet": (reference_sheet,) if reference_sheet else (),
                 },
-                detail_execution_settings=_detail_execution_settings(detail_provider),
+                detail_execution_settings=_detail_fingerprint_execution_settings(
+                    _detail_execution_settings(detail_provider)
+                ),
             )
             _prepare_detail_input_state(
                 product_dir,

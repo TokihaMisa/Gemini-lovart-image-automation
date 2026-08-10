@@ -120,8 +120,11 @@ def read_completed_detail_indexes(
     if not isinstance(checkpoints, Mapping):
         return set()
     completed: set[int] = set()
+    repaired_checkpoints = dict(checkpoints)
+    repaired = False
     for index in range(1, max(0, int(expected_count)) + 1):
         checkpoint = _checkpoint_for_index(checkpoints, index)
+        resolved_path = _resolved_detail_checkpoint_path(product_dir, index, checkpoint)
         if (
             isinstance(checkpoint, Mapping)
             and checkpoint.get("state") == "done"
@@ -130,9 +133,20 @@ def read_completed_detail_indexes(
                 checkpoint,
                 _expected_prompt_hash(screen_prompt_hashes, index),
             )
-            and is_valid_image_file(checkpoint.get("local_path"))
+            and resolved_path is not None
         ):
             completed.add(index)
+            if str(checkpoint.get("local_path") or "") != str(resolved_path):
+                updated_checkpoint = dict(checkpoint)
+                updated_checkpoint["local_path"] = str(resolved_path)
+                repaired_checkpoints[str(index)] = updated_checkpoint
+                repaired = True
+    if repaired:
+        update_status(
+            product_dir,
+            "detail_checkpoint_paths_rebased",
+            **{_CHECKPOINT_FIELD: repaired_checkpoints},
+        )
     return completed
 
 
@@ -607,6 +621,7 @@ def _completed_paths(
     paths: list[str] = []
     for index in range(1, max(0, int(expected_count)) + 1):
         checkpoint = _checkpoint_for_index(checkpoints, index)
+        resolved_path = _resolved_detail_checkpoint_path(product_dir, index, checkpoint)
         if (
             isinstance(checkpoint, Mapping)
             and checkpoint.get("state") == "done"
@@ -615,10 +630,24 @@ def _completed_paths(
                 checkpoint,
                 _expected_prompt_hash(screen_prompt_hashes, index),
             )
-            and is_valid_image_file(checkpoint.get("local_path"))
+            and resolved_path is not None
         ):
-            paths.append(str(checkpoint["local_path"]))
+            paths.append(str(resolved_path))
     return tuple(paths)
+
+
+def _resolved_detail_checkpoint_path(
+    product_dir: str | Path,
+    index: int,
+    checkpoint: object,
+) -> Path | None:
+    if not isinstance(checkpoint, Mapping):
+        return None
+    saved_path = Path(str(checkpoint.get("local_path") or ""))
+    if is_valid_image_file(saved_path):
+        return saved_path
+    canonical = Path(product_dir) / "gpt_image" / "detail" / f"{index:02d}.png"
+    return canonical if is_valid_image_file(canonical) else None
 
 
 def _json_safe_setting(value: object) -> object:

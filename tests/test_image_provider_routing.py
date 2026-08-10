@@ -318,6 +318,55 @@ def test_partial_detail_failure_keeps_completed_images_and_resumes_only_missing(
     assert summary[0]["used_model"] == "gpt-image-2"
 
 
+def test_hapi_image_endpoint_switch_resumes_only_missing_detail_screen(tmp_path):
+    first = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=4,
+        fail_indexes={4},
+        openai_base_url="https://hapiopen.cc/v1",
+    )
+
+    assert first.generated_indexes == (1, 2, 3)
+
+    second = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=4,
+        openai_base_url="https://image.hapiopen.cc",
+    )
+
+    assert second.generated_indexes == (4,)
+    assert second.registry.providers["openai_image"].support.support_steps == []
+    assert read_status(second.product_dir)["detail_completed_count"] == 4
+
+
+def test_openai_support_resume_finds_canonical_file_after_product_directory_moves(tmp_path):
+    from main import _find_support_image
+
+    product_dir = tmp_path / "3_处理中" / "SKU-MOVED"
+    canonical = write_valid_png(
+        product_dir / "gpt_image" / "support" / "white_bg.png"
+    )
+    status = {
+        "white_bg_local_path": str(tmp_path / "SKU-MOVED" / "gpt_image" / "support" / "white_bg.png"),
+        "white_bg_provider": "openai_image",
+    }
+
+    found = _find_support_image(
+        product_dir,
+        status,
+        "white_bg",
+        0,
+        include_lovart_legacy=False,
+        provider_name="openai_image",
+    )
+
+    assert found == canonical
+
+
 def test_detail_fingerprint_change_from_support_content_regenerates_prompt_and_set(
     tmp_path,
 ):
