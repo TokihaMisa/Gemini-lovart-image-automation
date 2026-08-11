@@ -1,6 +1,7 @@
 import re
 import zipfile
 from dataclasses import dataclass
+from datetime import time
 from pathlib import Path
 from typing import Dict, List, Optional
 from xml.etree import ElementTree
@@ -20,6 +21,13 @@ class ProductRow:
     selling_points: str
     image_paths: List[str]
     reference_images_are_product: bool = False
+
+
+def _normalize_image_size_cell(value) -> str:
+    """Restore ratios such as 11:15 that spreadsheet apps store as a time."""
+    if isinstance(value, time):
+        return f"{value.hour}:{value.minute}"
+    return str(value or "").strip()
 
 
 def _load_sheet(wb: openpyxl.Workbook, sheet_spec):
@@ -163,7 +171,11 @@ def read_products(config: dict, logger, limit: int | None = None) -> List[Produc
             continue
 
         name_cn = str(ws.cell(row=row_idx, column=name_col).value or "").strip()
-        image_size = str(ws.cell(row=row_idx, column=image_size_col).value or "").strip() if image_size_col else ""
+        image_size = (
+            _normalize_image_size_cell(ws.cell(row=row_idx, column=image_size_col).value)
+            if image_size_col
+            else ""
+        )
         language = str(ws.cell(row=row_idx, column=lang_col).value or "").strip()
         selling_points = str(ws.cell(row=row_idx, column=sp_col).value or "").strip()
         reference_images_are_product = (

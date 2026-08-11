@@ -271,7 +271,28 @@ def _provider_image_size(base_url: str, resolution: str, image_size: str) -> str
         if width > 0 and height > 0:
             target_ratio = width / height
     candidates = _PIXEL_SIZES_BY_RESOLUTION[resolution]
-    return min(candidates, key=lambda item: abs(item[0] - target_ratio))[1]
+    candidate_ratio, candidate_size = min(
+        candidates,
+        key=lambda item: abs(item[0] - target_ratio),
+    )
+    if not match or abs(candidate_ratio - target_ratio) < 1e-9:
+        return candidate_size
+
+    candidate_width, candidate_height = (
+        int(part) for part in candidate_size.split("x", 1)
+    )
+    if target_ratio < 1:
+        adjusted_width = candidate_width
+        adjusted_height = max(16, round(candidate_width / target_ratio / 16) * 16)
+    else:
+        adjusted_height = candidate_height
+        adjusted_width = max(16, round(candidate_height * target_ratio / 16) * 16)
+    if (
+        1 / 3 <= adjusted_width / adjusted_height <= 3
+        and 655_360 <= adjusted_width * adjusted_height <= 8_294_400
+    ):
+        return f"{adjusted_width}x{adjusted_height}"
+    return candidate_size
 
 
 def _config_boolean(value: object, *, default: bool) -> bool:

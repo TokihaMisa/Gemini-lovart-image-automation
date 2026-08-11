@@ -5,6 +5,7 @@ import ssl
 import tempfile
 import unittest
 import zipfile
+from datetime import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from unittest.mock import patch
@@ -442,7 +443,9 @@ class LowPriorityBehaviorTests(unittest.TestCase):
             ws = wb.active
             ws.append(["产品ID", "中文名", "图片尺寸", "语言", "卖点", "产品图"])
             ws.append(["SKU-1", "产品", "4:5", "Portuguese", "卖点", None])
+            ws.append(["SKU-2", "产品2", time(11, 15), "Spanish", "卖点2", None])
             ws.add_image(openpyxl.drawing.image.Image(str(image_path)), "F2")
+            ws.add_image(openpyxl.drawing.image.Image(str(image_path)), "F3")
             wb.save(workbook_path)
 
             config = {
@@ -467,10 +470,11 @@ class LowPriorityBehaviorTests(unittest.TestCase):
             finally:
                 os.chdir(cwd)
 
-        self.assertEqual(len(products), 1)
+        self.assertEqual(len(products), 2)
         self.assertEqual(products[0].image_size, "4:5")
         self.assertEqual(products[0].language, "Portuguese")
         self.assertEqual(products[0].selling_points, "卖点")
+        self.assertEqual(products[1].image_size, "11:15")
 
 
 if __name__ == "__main__":

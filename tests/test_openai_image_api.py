@@ -591,7 +591,7 @@ def test_generic_openai_multiple_reference_images_remain_separate_files(
         ("1K", "1:1", b"1024x1024"),
         ("2K", "4:5", b"2048x2560"),
         ("4K", "16:9", b"3840x2160"),
-        ("1K", "11:15", b"960x1280"),
+        ("1K", "11:15", b"960x1312"),
     ],
 )
 @patch("openai_image_api.urllib.request.build_opener")
