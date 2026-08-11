@@ -1,7 +1,7 @@
 {
-  "version": "1.3.13",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.13/update.zip",
-  "changelog": "修复部分 Win10、Clash、企业代理或安全软件环境下 OTA 下载提示 TLS 证书验证失败的问题：更新器同时使用 Windows 系统证书库与内置 certifi 公共 CA；仍保持严格证书校验和 HTTPS 防降级。若 GitHub Release 附件域名未走代理，错误信息会明确提示将 github.com 与 release-assets.githubusercontent.com 加入同一 Clash 代理规则。",
-  "sha256": "e55c193029fb4d858b7127dbdd485847568ba6e44e938a234dc1e5c7e05573df",
-  "size": 129520214
+  "version": "1.3.14",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.14/update.zip",
+  "changelog": "新增 OpenAI 兼容 GPT Image 生图模式：白底图、场景图和详情套图可独立选择 Lovart 或 GPT Image；支持自定义 API 地址、密钥、模型、分辨率、真实付费测试与实时任务进度。兼容 HAPI 异步图片接口及单张参考拼图上传，支持逐屏断点续跑、失败重试和完成后自动归档，并加强远程结果图片下载安全校验。",
+  "sha256": "5faf63e87584d9ff78dcd5a5f1f0666ca81ad94d3ce668bb968a3b0656a022d4",
+  "size": 129593167
 }
