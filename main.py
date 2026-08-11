@@ -746,6 +746,8 @@ def _generate_support_images(
     provider,
     prompt_settings,
     existing_status,
+    *,
+    force_regenerate: bool = False,
 ) -> tuple[str, str]:
     product_dir = Path(product_dir)
     image_roles = split_image_roles(product.image_paths)
@@ -766,14 +768,16 @@ def _generate_support_images(
         stage = "support_white" if step_name == "white_bg" else "support_scene"
         label = "白底图" if step_name == "white_bg" else "场景图"
         status = read_status(product_dir)
-        existing_path = _find_support_image(
-            product_dir,
-            status,
-            step_name,
-            final_index,
-            include_lovart_legacy=is_lovart_provider and not restart,
-            provider_name=provider_name,
-        )
+        existing_path = ""
+        if not force_regenerate:
+            existing_path = _find_support_image(
+                product_dir,
+                status,
+                step_name,
+                final_index,
+                include_lovart_legacy=is_lovart_provider and not restart,
+                provider_name=provider_name,
+            )
         if existing_path:
             _emit_ui_status(product.id, stage, f"♻️ 正在复用已完成{label}")
             update_status(
@@ -840,6 +844,19 @@ def _generate_support_images(
     if callable(complete):
         complete(product_dir)
     return white_image, scene_image
+
+
+def _support_image_size_changed(status: dict, current_image_size: str) -> bool:
+    previous_image_size = str(status.get("image_size") or "").strip()
+    has_support_artifacts = bool(
+        status.get("white_bg_local_path")
+        or status.get("scene_local_path")
+        or status.get("lovart_white_bg_local_path")
+        or status.get("lovart_scene_local_path")
+        or status.get("support_images_ready")
+        or status.get("lovart_support_images_ready")
+    )
+    return has_support_artifacts and previous_image_size != str(current_image_size or "").strip()
 
 
 def _backfill_result_project_urls(results_path: str | Path = None) -> int:
@@ -953,12 +970,18 @@ def _process_products_once(
 
         started = time.time()
         product_dir = product_output_dir(product.id)
+        previous_status = read_status(product_dir)
+        current_image_size = getattr(product, "image_size", "")
+        regenerate_support_for_size = _support_image_size_changed(
+            previous_status,
+            current_image_size,
+        )
         update_status(
             product_dir,
             "parsed",
             product_id=product.id,
             product_name=product.name_cn,
-            image_size=getattr(product, "image_size", ""),
+            image_size=current_image_size,
             language=product.language,
             image_count=len(product.image_paths),
         )
@@ -1026,6 +1049,7 @@ def _process_products_once(
                     support_provider,
                     prompt_settings,
                     read_status(product_dir),
+                    force_regenerate=regenerate_support_for_size,
                 )
             except _SupportImageGenerationError as support_error:
                 raw_result = support_error.result.raw_result or {}

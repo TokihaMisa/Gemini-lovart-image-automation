@@ -1351,6 +1351,44 @@ def test_openai_support_does_not_resume_lovart_only_artifacts(tmp_path):
     assert scene != old_scene
 
 
+def test_support_images_regenerate_when_spreadsheet_ratio_changes(tmp_path):
+    from main import _generate_support_images, _support_image_size_changed
+
+    old_white = write_valid_png(tmp_path / "gpt_image" / "support" / "white_bg.png")
+    old_scene = write_valid_png(tmp_path / "gpt_image" / "support" / "scene.png")
+    product_image = write_valid_png(tmp_path / "product.png")
+    previous_status = update_status(
+        tmp_path,
+        "support_images_ready",
+        image_size="11:15:00",
+        white_bg_local_path=old_white,
+        scene_local_path=old_scene,
+        white_bg_provider="openai_image",
+        scene_provider="openai_image",
+    )
+    product = Mock(
+        id="SKU-RATIO",
+        name_cn="Product",
+        language="English",
+        selling_points="",
+        image_size="11:15",
+        image_paths=[product_image],
+    )
+    provider = RecordingImageProvider("openai_image")
+
+    white, scene = _generate_support_images(
+        product,
+        tmp_path,
+        provider,
+        {},
+        previous_status,
+        force_regenerate=_support_image_size_changed(previous_status, product.image_size),
+    )
+
+    assert provider.support_steps == ["white_bg", "scene"]
+    assert (white, scene) != (old_white, old_scene)
+
+
 def test_lovart_restart_reuses_only_new_white_after_scene_timeout(tmp_path):
     from main import _SupportImageGenerationError, _generate_support_images
     from image_providers import LovartImageProvider
