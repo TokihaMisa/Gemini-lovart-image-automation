@@ -13,6 +13,7 @@ import json
 import mimetypes
 import os
 from pathlib import Path
+import re
 import secrets
 import socket
 import ssl
@@ -30,6 +31,48 @@ from network_retry import PERMANENT_TLS_GUIDANCE, RetryKind, classify_network_er
 
 DEFAULT_OPENAI_IMAGE_BASE_URL: Final = "https://api.openai.com/v1"
 _VALID_RESOLUTIONS: Final = {"1K", "2K", "4K"}
+_LK888_IMAGE_HOSTS: Final = {"api.lk888.ai"}
+_PIXEL_SIZES_BY_RESOLUTION: Final = {
+    "1K": (
+        (1 / 2, "960x1920"),
+        (2 / 3, "1024x1536"),
+        (3 / 4, "960x1280"),
+        (4 / 5, "1024x1280"),
+        (1.0, "1024x1024"),
+        (5 / 4, "1280x1024"),
+        (4 / 3, "1280x960"),
+        (3 / 2, "1536x1024"),
+        (2.0, "1920x960"),
+        (9 / 16, "1088x1920"),
+        (16 / 9, "1920x1088"),
+    ),
+    "2K": (
+        (1 / 2, "1280x2560"),
+        (2 / 3, "2048x3072"),
+        (3 / 4, "1920x2560"),
+        (4 / 5, "2048x2560"),
+        (1.0, "2048x2048"),
+        (5 / 4, "2560x2048"),
+        (4 / 3, "2560x1920"),
+        (3 / 2, "3072x2048"),
+        (2.0, "2560x1280"),
+        (9 / 16, "1440x2560"),
+        (16 / 9, "2560x1440"),
+    ),
+    "4K": (
+        (1 / 2, "1920x3840"),
+        (2 / 3, "2304x3456"),
+        (3 / 4, "2400x3200"),
+        (4 / 5, "2560x3200"),
+        (1.0, "2880x2880"),
+        (5 / 4, "3200x2560"),
+        (4 / 3, "3200x2400"),
+        (3 / 2, "3456x2304"),
+        (2.0, "3840x1920"),
+        (9 / 16, "2160x3840"),
+        (16 / 9, "3840x2160"),
+    ),
+}
 _UNSAFE_IPV6_TRANSITION_NETWORKS: Final = (
     ipaddress.IPv6Network("::/96"),  # deprecated IPv4-compatible addresses
     ipaddress.IPv6Network("::ffff:0:0/96"),  # IPv4-mapped addresses
@@ -208,6 +251,29 @@ def _is_hapi_image_service(base_url: str) -> bool:
         return False
 
 
+def _is_lk888_image_service(base_url: str) -> bool:
+    try:
+        return (urlsplit(base_url).hostname or "").rstrip(".").lower() in _LK888_IMAGE_HOSTS
+    except ValueError:
+        return False
+
+
+def _provider_image_size(base_url: str, resolution: str, image_size: str) -> str:
+    """Translate UI quality tiers to lk888's documented pixel-size values."""
+    if not _is_lk888_image_service(base_url):
+        return resolution
+    ratio_text = str(image_size or "").strip().replace("：", ":").replace("×", "x")
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*[:xX]\s*(\d+(?:\.\d+)?)", ratio_text)
+    target_ratio = 1.0
+    if match:
+        width = float(match.group(1))
+        height = float(match.group(2))
+        if width > 0 and height > 0:
+            target_ratio = width / height
+    candidates = _PIXEL_SIZES_BY_RESOLUTION[resolution]
+    return min(candidates, key=lambda item: abs(item[0] - target_ratio))[1]
+
+
 def _config_boolean(value: object, *, default: bool) -> bool:
     if value is None:
         return bool(default)
@@ -313,18 +379,26 @@ class OpenAIImageAPI:
         files = _validated_image_paths(image_paths)
         use_hapi_async = bool(self.config.async_edits)
         merge_references = bool(self.config.merge_reference_images)
-        image_field = "image" if use_hapi_async or merge_references else "image[]"
         temporary_upload: Path | None = None
         upload_files = files
         if merge_references and len(files) > 1:
             temporary_upload = _build_reference_sheet(files)
             upload_files = [temporary_upload]
+        image_field = "image" if (
+            use_hapi_async
+            or merge_references
+            or _is_lk888_image_service(self.config.base_url) and len(upload_files) == 1
+        ) else "image[]"
         try:
             body, content_type = encode_multipart(
                 fields={
                     "model": self.config.model,
                     "prompt": append_aspect_instruction(prompt, image_size),
-                    "size": self.config.resolution,
+                    "size": _provider_image_size(
+                        self.config.base_url,
+                        self.config.resolution,
+                        image_size,
+                    ),
                 },
                 files=[(image_field, path) for path in upload_files],
             )

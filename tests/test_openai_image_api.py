@@ -584,6 +584,44 @@ def test_generic_openai_multiple_reference_images_remain_separate_files(
     assert request.data.count(b'name="image[]"; filename=') == 2
 
 
+@pytest.mark.parametrize(
+    ("resolution", "image_size", "expected_size"),
+    [
+        ("1K", "", b"1024x1024"),
+        ("1K", "1:1", b"1024x1024"),
+        ("2K", "4:5", b"2048x2560"),
+        ("4K", "16:9", b"3840x2160"),
+        ("1K", "11:15", b"960x1280"),
+    ],
+)
+@patch("openai_image_api.urllib.request.build_opener")
+def test_lk888_uses_documented_openai_edit_fields_and_pixel_sizes(
+    build_opener,
+    resolution,
+    image_size,
+    expected_size,
+    tmp_path,
+):
+    build_opener.return_value.open.return_value = fake_png_response()
+
+    make_client(
+        base_url="https://api.lk888.ai/v1",
+        resolution=resolution,
+    ).generate_edit(
+        "prompt",
+        [make_png(tmp_path / "source.png")],
+        tmp_path / "out.png",
+        image_size=image_size,
+    )
+
+    request = build_opener.return_value.open.call_args.args[0]
+    assert request.full_url == "https://api.lk888.ai/v1/images/edits"
+    assert b'name="size"' in request.data
+    assert expected_size in request.data
+    assert b'name="image"; filename="source.png"' in request.data
+    assert b'name="image[]"' not in request.data
+
+
 @patch("openai_image_api.urllib.request.build_opener")
 def test_generic_merge_switch_uploads_one_contact_sheet(build_opener, tmp_path):
     build_opener.return_value.open.return_value = fake_png_response()
