@@ -1,7 +1,7 @@
 {
-  "version": "1.3.15",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.15/update.zip",
-  "changelog": "新增问鼎数据（api.lk888.ai）GPT Image 2 兼容：自动使用文档要求的 image 上传字段，并根据商品比例把 1K、2K、4K 档位转换为对应像素尺寸，解决 /v1/images/edits 返回 HTTP 400 的问题；HAPI 与其他既有图片接口行为保持不变。",
-  "sha256": "ca87f945b4d3518536a2331882abf307ad1e25d9b860d297f0fc9f77b9fed41b",
-  "size": 129593582
+  "version": "1.3.16",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.16/update.zip",
+  "changelog": "修复 Excel 将 11:15 等图片比例自动存成时间后被误判为 1:1 的问题：现在会恢复原始比例，并为问鼎 GPT Image 生成符合 16 倍数规则的对应像素尺寸。比例发生变化时，旧白底图、场景图和详情图会全部失效并重新生成，不再复用错误比例的历史图片。",
+  "sha256": "0d188652cf2b15b7bb478ab47b5704d382fbe17f384ec654474f8078ee760cc8",
+  "size": 129595226
 }
