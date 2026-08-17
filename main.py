@@ -939,6 +939,31 @@ def _dry_run_products(products, logger, run_dir, output_dir=None):
     return 0, 0, len(products), 0
 
 
+def _rebase_product_image_paths(product, product_dir: Path, logger=None) -> list[str]:
+    """Repoint extracted workbook images after a product category directory moves."""
+
+    rebased = []
+    changed = 0
+    for value in getattr(product, "image_paths", ()):
+        if not value:
+            rebased.append(value)
+            continue
+        original = Path(value)
+        replacement = product_dir / original.name
+        if not original.is_file() and replacement.is_file():
+            rebased.append(str(replacement))
+            changed += 1
+        else:
+            rebased.append(str(original))
+    product.image_paths = rebased
+    if changed and logger is not None:
+        logger.info(
+            f"Rebased {changed} workbook image path(s) for {product.id} "
+            f"after output directory move"
+        )
+    return rebased
+
+
 def _process_products_once(
     products,
     gemini,
@@ -970,6 +995,7 @@ def _process_products_once(
 
         started = time.time()
         product_dir = product_output_dir(product.id)
+        _rebase_product_image_paths(product, product_dir, logger)
         previous_status = read_status(product_dir)
         current_image_size = getattr(product, "image_size", "")
         regenerate_support_for_size = _support_image_size_changed(

@@ -1,7 +1,9 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import main
 from failed_retry import (
@@ -84,6 +86,55 @@ class FailedRetryQueueTests(unittest.TestCase):
         self.assertEqual(result, (2, 0, 0, 0))
         self.assertEqual([row["status"] for row in final_rows], ["success", "success"])
         self.assertEqual(len(logger.warnings), 2)
+
+    def test_process_round_rebases_excel_images_after_category_move(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "output"
+            product_id = "NW2605411N"
+            stale_image = base / "3_处理中" / product_id / "image_5.png"
+            current_dir = base / "4_异常" / product_id
+            current_dir.mkdir(parents=True)
+            current_image = current_dir / "image_5.png"
+            current_image.write_bytes(b"image")
+            product = SimpleNamespace(
+                id=product_id,
+                name_cn="Product",
+                image_size="1:1",
+                language="English",
+                selling_points="",
+                image_paths=[str(stale_image)],
+                reference_images_are_product=False,
+            )
+            registry = SimpleNamespace(get=lambda _name: object())
+            routing = SimpleNamespace(
+                support_provider="lovart",
+                detail_provider="lovart",
+                detail_page_count=3,
+            )
+            observed_paths = []
+
+            def stop_after_image_resolution(paths):
+                observed_paths.append(list(paths))
+                raise RuntimeError("stop after image resolution")
+
+            with patch.dict(
+                os.environ, {"LOVART_OUTPUT_DIR": str(base)}
+            ), patch(
+                "main.split_image_roles", side_effect=stop_after_image_resolution
+            ):
+                main._process_products_once(
+                    [product],
+                    object(),
+                    object(),
+                    Mock(),
+                    Path(tmp) / "run",
+                    resume=True,
+                    image_registry=registry,
+                    routing=routing,
+                )
+
+        self.assertEqual(observed_paths, [[str(current_image)]])
+        self.assertEqual(product.image_paths, [str(current_image)])
 
     def test_explicit_policy_retries_without_constructing_lovart(self):
         product = _Product("SKU-OPENAI")
