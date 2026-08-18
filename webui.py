@@ -440,6 +440,8 @@ lovart:
   max_auto_confirm_credits: 10
   wait_timeout: 10800
   poll_interval: 10
+  poll_confirmation_interval: 30
+  poll_error_backoff_max: 60
   poll_request_timeout: 10
   poll_request_attempts: 1
   timeout: 600

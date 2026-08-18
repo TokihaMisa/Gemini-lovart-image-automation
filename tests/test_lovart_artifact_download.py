@@ -296,6 +296,129 @@ class LovartArtifactDownloadTests(unittest.TestCase):
         self.assertEqual(bot.logger.warning.call_count, 1)
         self.assertTrue(any("recovered" in str(call.args[0]) for call in bot.logger.info.call_args_list))
 
+    def test_running_poll_only_checks_result_at_confirmation_interval(self):
+        bot = LovartBot.__new__(LovartBot)
+        bot.cfg = {
+            "wait_timeout": 60,
+            "poll_interval": 10,
+            "poll_confirmation_interval": 30,
+            "artifact_result_attempts": 1,
+        }
+        bot.logger = Mock()
+        bot._fast_mode = False
+
+        class Skill:
+            def __init__(self):
+                self.statuses = iter(["running", "running", "running", "done", "done"])
+                self.result_calls = 0
+
+            def get_status(self, _thread_id):
+                return {"status": next(self.statuses)}
+
+            def get_result(self, _thread_id):
+                self.result_calls += 1
+                return {
+                    "items": [
+                        {
+                            "artifacts": [
+                                {"type": "image", "content": "https://a.lovart.ai/image.png"}
+                            ]
+                        }
+                    ]
+                }
+
+        bot.skill = Skill()
+        with patch("lovart_bot.time.sleep"), patch("builtins.print"):
+            result = bot._poll_with_progress("thread-id", "project-id")
+
+        self.assertTrue(result["generation_succeeded"])
+        self.assertEqual(bot.skill.result_calls, 2)
+
+    def test_confirmation_probe_failure_does_not_mark_status_connection_failed(self):
+        bot = LovartBot.__new__(LovartBot)
+        bot.cfg = {
+            "wait_timeout": 60,
+            "poll_interval": 10,
+            "poll_confirmation_interval": 30,
+            "artifact_result_attempts": 1,
+        }
+        bot.logger = Mock()
+        bot._fast_mode = False
+
+        class Skill:
+            def __init__(self):
+                self.statuses = iter(["running", "running", "running", "done", "done"])
+                self.result_calls = 0
+
+            def get_status(self, _thread_id):
+                return {"status": next(self.statuses)}
+
+            def get_result(self, _thread_id):
+                self.result_calls += 1
+                if self.result_calls == 1:
+                    raise AgentSkillError("temporary result error")
+                return {
+                    "items": [
+                        {
+                            "artifacts": [
+                                {"type": "image", "content": "https://a.lovart.ai/image.png"}
+                            ]
+                        }
+                    ]
+                }
+
+        bot.skill = Skill()
+        with patch("lovart_bot.time.sleep"), patch("builtins.print") as output:
+            result = bot._poll_with_progress("thread-id", "project-id")
+
+        self.assertTrue(result["generation_succeeded"])
+        reconnect_calls = [
+            call for call in output.call_args_list
+            if call.args and "持续重试中" in str(call.args[0])
+        ]
+        self.assertEqual(reconnect_calls, [])
+        self.assertEqual(bot.skill.result_calls, 2)
+
+    def test_poll_connection_errors_use_bounded_exponential_backoff(self):
+        bot = LovartBot.__new__(LovartBot)
+        bot.cfg = {
+            "wait_timeout": 60,
+            "poll_interval": 2,
+            "poll_error_backoff_max": 8,
+            "artifact_result_attempts": 1,
+        }
+        bot.logger = Mock()
+        bot._fast_mode = False
+
+        class Skill:
+            def __init__(self):
+                self.status_calls = 0
+
+            def get_status(self, _thread_id):
+                self.status_calls += 1
+                if self.status_calls <= 3:
+                    raise AgentSkillError("network unavailable")
+                return {"status": "done"}
+
+            @staticmethod
+            def get_result(_thread_id):
+                return {
+                    "items": [
+                        {
+                            "artifacts": [
+                                {"type": "image", "content": "https://a.lovart.ai/image.png"}
+                            ]
+                        }
+                    ]
+                }
+
+        bot.skill = Skill()
+        with patch("lovart_bot.time.sleep") as sleep, patch("builtins.print"):
+            result = bot._poll_with_progress("thread-id", "project-id")
+
+        self.assertTrue(result["generation_succeeded"])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list[:3]], [2, 4, 8])
+
     def test_legacy_submitted_status_resumes_original_thread_after_restart(self):
         bot = LovartBot.__new__(LovartBot)
         bot.cfg = {}

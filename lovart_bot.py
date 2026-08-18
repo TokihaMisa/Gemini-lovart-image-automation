@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 import time
@@ -1042,9 +1043,63 @@ class LovartBot:
             return "\n".join(part for part in nested if part)
         return ""
 
+    def _pending_confirmation_result(
+        self,
+        result: dict,
+        thread_id: str,
+        project_id: str,
+        product_dir: Path | None,
+    ) -> dict | None:
+        pending_confirmation = result.get("pending_confirmation")
+        if not pending_confirmation:
+            return None
+
+        estimated_cost = self._confirmation_estimated_cost(pending_confirmation)
+        if estimated_cost is not None and not self._fast_mode:
+            print()
+            confirmation_text = ""
+            if product_dir:
+                confirmation_text = self._save_pending_confirmation(product_dir, pending_confirmation)
+                update_status(
+                    product_dir,
+                    "lovart_credit_prompt_waiting",
+                    project_id=project_id,
+                    thread_id=thread_id,
+                    pending_confirmation_file=str(product_dir / "pending_confirmation.json"),
+                    pending_confirmation_text=confirmation_text,
+                    pending_confirmation_estimated_cost=estimated_cost,
+                    needs_manual_action=True,
+                    reason=(
+                        f"Lovart showed a {estimated_cost:g}-credit confirmation in unlimited mode; "
+                        "left unconfirmed for manual review."
+                    ),
+                )
+            self.logger.warning(
+                f"Lovart API: {estimated_cost:g}-credit confirmation appeared in unlimited mode; "
+                "not confirming; manual action required"
+            )
+            result["warning"] = (
+                f"Lovart showed a {estimated_cost:g}-credit confirmation in unlimited mode; "
+                "left unconfirmed for manual review."
+            )
+            return self._normalize_result(result, "pending_confirmation", project_id)
+
+        print()
+        self.logger.warning("Lovart API: pending confirmation")
+        return self._normalize_result(result, "pending_confirmation", project_id)
+
     def _poll_with_progress(self, thread_id: str, project_id: str, product_dir: Path | None = None) -> dict:
         timeout = max(1.0, float(self.cfg.get("wait_timeout", 10800) or 10800))
         interval = max(0.1, float(self.cfg.get("poll_interval", 10) or 10))
+        confirmation_interval = max(
+            interval,
+            float(self.cfg.get("poll_confirmation_interval", 30) or 30),
+        )
+        confirmation_every = max(1, math.ceil(confirmation_interval / interval))
+        max_error_backoff = max(
+            interval,
+            float(self.cfg.get("poll_error_backoff_max", 60) or 60),
+        )
         deadline = time.time() + timeout
         status_names = {
             "pending": "排队中...",
@@ -1054,15 +1109,18 @@ class LovartBot:
         }
         start = time.time()
         poll_error_count = 0
+        status_poll_count = 0
+        result_probe_error_count = 0
 
         while time.time() < deadline:
+            sleep_delay = interval
             try:
                 status_info = self.skill.get_status(thread_id)
                 status = status_info.get("status", "unknown")
+                status_poll_count += 1
                 elapsed = int(time.time() - start)
                 dots = "." * ((elapsed // max(1, int(interval))) % 4)
 
-                result = self.skill.get_result(thread_id)
                 if poll_error_count:
                     if os.environ.get("UI_MODE") != "1":
                         print()
@@ -1078,40 +1136,6 @@ class LovartBot:
                             poll_elapsed_seconds=elapsed,
                         )
                     poll_error_count = 0
-                pending_confirmation = result.get("pending_confirmation")
-                if pending_confirmation:
-                    estimated_cost = self._confirmation_estimated_cost(pending_confirmation)
-                    if estimated_cost is not None and not self._fast_mode:
-                        print()
-                        confirmation_text = ""
-                        if product_dir:
-                            confirmation_text = self._save_pending_confirmation(product_dir, pending_confirmation)
-                            update_status(
-                                product_dir,
-                                "lovart_credit_prompt_waiting",
-                                project_id=project_id,
-                                thread_id=thread_id,
-                                pending_confirmation_file=str(product_dir / "pending_confirmation.json"),
-                                pending_confirmation_text=confirmation_text,
-                                pending_confirmation_estimated_cost=estimated_cost,
-                                needs_manual_action=True,
-                                reason=(
-                                    f"Lovart showed a {estimated_cost:g}-credit confirmation in unlimited mode; "
-                                    "left unconfirmed for manual review."
-                                ),
-                            )
-                        self.logger.warning(
-                            f"Lovart API: {estimated_cost:g}-credit confirmation appeared in unlimited mode; "
-                            "not confirming; manual action required"
-                        )
-                        result["warning"] = (
-                            f"Lovart showed a {estimated_cost:g}-credit confirmation in unlimited mode; "
-                            "left unconfirmed for manual review."
-                        )
-                        return self._normalize_result(result, "pending_confirmation", project_id)
-                    print()
-                    self.logger.warning("Lovart API: pending confirmation")
-                    return self._normalize_result(result, "pending_confirmation", project_id)
 
                 if status == "done":
                     time.sleep(5)
@@ -1120,6 +1144,11 @@ class LovartBot:
                         print()
                         self.logger.info(f"Lovart API: done ({elapsed}s)")
                         final_result = self.skill.get_result(thread_id)
+                        pending_result = self._pending_confirmation_result(
+                            final_result, thread_id, project_id, product_dir
+                        )
+                        if pending_result is not None:
+                            return pending_result
                         if confirm.get("status") == "done":
                             final_result = self._wait_for_result_artifacts(thread_id, final_result)
                         return self._normalize_result(final_result, confirm.get("status"), project_id)
@@ -1127,7 +1156,30 @@ class LovartBot:
                 if status == "abort":
                     print()
                     self.logger.warning("Lovart API: aborted")
+                    result = self.skill.get_result(thread_id)
                     return self._normalize_result(result, "abort", project_id)
+
+                if status == "running" and status_poll_count % confirmation_every == 0:
+                    try:
+                        probe_result = self.skill.get_result(thread_id)
+                        if result_probe_error_count:
+                            self.logger.info(
+                                "Lovart pending-confirmation check recovered after "
+                                f"{result_probe_error_count} failed checks"
+                            )
+                        result_probe_error_count = 0
+                        pending_result = self._pending_confirmation_result(
+                            probe_result, thread_id, project_id, product_dir
+                        )
+                        if pending_result is not None:
+                            return pending_result
+                    except Exception as exc:
+                        result_probe_error_count += 1
+                        if result_probe_error_count == 1:
+                            self.logger.warning(
+                                "Lovart pending-confirmation check temporarily unavailable; "
+                                f"status polling continues: {exc}"
+                            )
 
                 ui_mode = os.environ.get("UI_MODE") == "1"
                 if ui_mode:
@@ -1136,6 +1188,10 @@ class LovartBot:
                     print(f"\r  [{elapsed}s] {status_names.get(status, status)}{dots}   ", end="", flush=True)
             except Exception as exc:
                 poll_error_count += 1
+                sleep_delay = min(
+                    max_error_backoff,
+                    interval * (2 ** min(poll_error_count - 1, 10)),
+                )
                 elapsed = int(time.time() - start)
                 retry_text = f"连接失败，持续重试中（第 {poll_error_count} 次）"
                 if poll_error_count == 1:
@@ -1156,7 +1212,7 @@ class LovartBot:
                 else:
                     print(f"\r  [{elapsed}s] {retry_text}   ", end="", flush=True)
 
-            time.sleep(interval)
+            time.sleep(sleep_delay)
 
         print()
         self.logger.warning(

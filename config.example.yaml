@@ -111,8 +111,12 @@ lovart:
   max_auto_confirm_credits: 10
   wait_timeout: 10800
   poll_interval: 10
-  # Keep polling responsive when the network stalls. Each status/result request
-  # returns control to the progress loop after at most this many seconds.
+  # Check the result endpoint less often while running; status remains every 10s.
+  poll_confirmation_interval: 30
+  # Consecutive polling failures back off gradually up to this many seconds.
+  poll_error_backoff_max: 60
+  # Keep polling responsive when the network stalls. Each polling request returns
+  # control to the progress loop after at most this many seconds.
   poll_request_timeout: 10
   poll_request_attempts: 1
   timeout: 600
