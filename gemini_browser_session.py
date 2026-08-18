@@ -139,6 +139,7 @@ class LoginRuntimePaths:
 class LoginHelperOwner:
     pid: int
     token: str
+    created_at: float | None = None
 
 
 def login_runtime_paths(config_path: str | Path) -> LoginRuntimePaths:
@@ -380,14 +381,64 @@ def process_is_alive(pid: int | None) -> bool:
     return True
 
 
+def process_started_at(pid: int | None) -> float | None:
+    """Return the Windows process creation time as a Unix timestamp when available."""
+    if os.name != "nt" or not pid or pid <= 0:
+        return None
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            creation = wintypes.FILETIME()
+            exit_time = wintypes.FILETIME()
+            kernel_time = wintypes.FILETIME()
+            user_time = wintypes.FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel_time),
+                ctypes.byref(user_time),
+            ):
+                return None
+            ticks = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+            return ticks / 10_000_000 - 11_644_473_600
+        finally:
+            kernel32.CloseHandle(handle)
+    except OSError:
+        return None
+
+
+def _process_matches_timestamp(pid: int | None, recorded_at: float | None) -> bool:
+    if not process_is_alive(pid):
+        return False
+    if recorded_at is None:
+        return True
+    started_at = process_started_at(pid)
+    if started_at is None:
+        return True
+    return started_at <= recorded_at + 1.0
+
+
 def _read_login_helper_owner(path: str | Path) -> LoginHelperOwner | None:
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
         pid = int(value["pid"])
         token = str(value["token"])
+        created_at = (
+            float(value["created_at"])
+            if value.get("created_at") is not None
+            else None
+        )
     except (OSError, ValueError, TypeError, KeyError):
         return None
-    return LoginHelperOwner(pid=pid, token=token) if pid > 0 and token else None
+    return (
+        LoginHelperOwner(pid=pid, token=token, created_at=created_at)
+        if pid > 0 and token
+        else None
+    )
 
 
 def acquire_login_helper_owner(paths: LoginRuntimePaths) -> LoginHelperOwner | None:
@@ -395,7 +446,11 @@ def acquire_login_helper_owner(paths: LoginRuntimePaths) -> LoginHelperOwner | N
     lock_path = paths.owner_lock_path
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     for _attempt in range(2):
-        owner = LoginHelperOwner(pid=os.getpid(), token=os.urandom(16).hex())
+        owner = LoginHelperOwner(
+            pid=os.getpid(),
+            token=os.urandom(16).hex(),
+            created_at=time.time(),
+        )
         try:
             descriptor = os.open(
                 lock_path,
@@ -404,7 +459,9 @@ def acquire_login_helper_owner(paths: LoginRuntimePaths) -> LoginHelperOwner | N
             )
         except FileExistsError:
             existing = _read_login_helper_owner(lock_path)
-            if existing is None or process_is_alive(existing.pid):
+            if existing is None or _process_matches_timestamp(
+                existing.pid, existing.created_at
+            ):
                 return None
             # Only a positively identified dead owner is recoverable. Re-read the
             # metadata before removal so a replacement owner is never cleaned up.
@@ -419,7 +476,11 @@ def acquire_login_helper_owner(paths: LoginRuntimePaths) -> LoginHelperOwner | N
             continue
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(
-                {"pid": owner.pid, "token": owner.token, "created_at": time.time()},
+                {
+                    "pid": owner.pid,
+                    "token": owner.token,
+                    "created_at": owner.created_at,
+                },
                 handle,
                 ensure_ascii=False,
             )
@@ -443,15 +504,17 @@ def release_login_helper_owner(paths: LoginRuntimePaths, owner: LoginHelperOwner
 
 def login_helper_is_active(paths: LoginRuntimePaths) -> bool:
     owner = _read_login_helper_owner(paths.owner_lock_path)
-    if owner is not None and process_is_alive(owner.pid):
+    if owner is not None and _process_matches_timestamp(owner.pid, owner.created_at):
         return True
     status = read_login_status(paths.status_path)
-    return bool(status and process_is_alive(status.pid))
+    return bool(
+        status and _process_matches_timestamp(status.pid, status.updated_at)
+    )
 
 
 def clear_stale_login_runtime(paths: LoginRuntimePaths) -> bool:
     status = read_login_status(paths.status_path)
-    if status is None or process_is_alive(status.pid):
+    if status is None or _process_matches_timestamp(status.pid, status.updated_at):
         return False
     removed = False
     for path in (paths.status_path, paths.close_request_path):
@@ -567,16 +630,33 @@ def _write_helper_status(
     return return_status
 
 
+def _login_parent_pid() -> int | None:
+    try:
+        pid = int(os.environ.get("LOVART_LOGIN_PARENT_PID", ""))
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
 def run_login_helper(config_path: str | Path) -> int:
     """Own one configured Gemini profile until the ready helper is asked to close."""
     paths = login_runtime_paths(config_path)
     owner = acquire_login_helper_owner(paths)
     if owner is None:
         return 1
+    parent_pid = _login_parent_pid()
     context = None
     page = None
     try:
         clear_stale_login_runtime(paths)
+        if parent_pid is not None and not process_is_alive(parent_pid):
+            _write_helper_status(
+                paths,
+                GeminiPageState.CLOSED,
+                False,
+                "Gemini login helper parent process has closed.",
+            )
+            return 0
         _write_helper_status(paths, GeminiPageState.STARTING, False, "Starting Gemini login helper.")
         config = _read_helper_config(config_path)
         policy = retry_policy_from_config(config)
@@ -592,6 +672,15 @@ def run_login_helper(config_path: str | Path) -> int:
             write_login_status(paths.status_path, status)
 
             while True:
+                if parent_pid is not None and not process_is_alive(parent_pid):
+                    _write_helper_status(
+                        paths,
+                        GeminiPageState.CLOSED,
+                        False,
+                        "Gemini login helper parent process has closed.",
+                        page=page,
+                    )
+                    return 0
                 if paths.close_request_path.exists() and status.ready:
                     _write_helper_status(paths, GeminiPageState.CLOSING, False, "Closing Gemini login helper.", page=page)
                     context.close()
@@ -644,6 +733,7 @@ __all__ = [
     "login_runtime_paths",
     "navigate_gemini_with_retry",
     "process_is_alive",
+    "process_started_at",
     "read_login_status",
     "release_login_helper_owner",
     "request_login_helper_close",

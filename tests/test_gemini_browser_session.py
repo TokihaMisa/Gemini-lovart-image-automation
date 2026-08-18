@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 import ssl
@@ -19,6 +20,7 @@ from gemini_browser_session import (
     build_login_helper_command,
     clear_stale_login_runtime,
     inspect_gemini_page,
+    login_helper_is_active,
     login_runtime_paths,
     navigate_gemini_with_retry,
     process_is_alive,
@@ -594,6 +596,77 @@ class GeminiBrowserSessionTests(unittest.TestCase):
             self.assertIsNotNone(owner)
             self.assertNotEqual(owner.token, "dead-owner")
             release_login_helper_owner(paths, owner)
+
+    @patch("gemini_browser_session.process_is_alive", return_value=True)
+    def test_reused_pid_does_not_report_stale_profile_owner_active(self, _is_alive):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = login_runtime_paths(Path(tmp) / "config.yaml")
+            paths.owner_lock_path.parent.mkdir(parents=True)
+            paths.owner_lock_path.write_text(
+                '{"pid": 4242, "token": "old-owner", "created_at": 100}',
+                encoding="utf-8",
+            )
+            write_login_status(
+                paths.status_path,
+                LoginStatus(
+                    pid=4242,
+                    state=GeminiPageState.READY,
+                    ready=True,
+                    url="https://gemini.google.com/app",
+                    language="en",
+                    message="ready",
+                    updated_at=100,
+                ),
+            )
+
+            with patch(
+                "gemini_browser_session.process_started_at",
+                return_value=200,
+                create=True,
+            ):
+                self.assertFalse(login_helper_is_active(paths))
+
+    @patch("gemini_browser_session.process_is_alive", return_value=True)
+    def test_reused_pid_owner_lock_is_reclaimed(self, _is_alive):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = login_runtime_paths(Path(tmp) / "config.yaml")
+            paths.owner_lock_path.parent.mkdir(parents=True)
+            paths.owner_lock_path.write_text(
+                '{"pid": 4242, "token": "old-owner", "created_at": 100}',
+                encoding="utf-8",
+            )
+
+            with patch(
+                "gemini_browser_session.process_started_at",
+                return_value=200,
+                create=True,
+            ):
+                owner = acquire_login_helper_owner(paths)
+
+            self.assertIsNotNone(owner)
+            self.assertNotEqual(owner.token, "old-owner")
+            release_login_helper_owner(paths, owner)
+
+    @patch(
+        "gemini_browser_session.sync_playwright",
+        side_effect=AssertionError("browser must not launch for an orphan helper"),
+    )
+    @patch("gemini_browser_session.process_is_alive", return_value=False)
+    def test_login_helper_exits_when_parent_process_is_gone(
+        self, _is_alive, sync_playwright
+    ):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ, {"LOVART_LOGIN_PARENT_PID": "4242"}
+        ):
+            paths = login_runtime_paths(Path(tmp) / "config.yaml")
+
+            result = run_login_helper(Path(tmp) / "config.yaml")
+
+            status = read_login_status(paths.status_path)
+            self.assertEqual(result, 0)
+            self.assertEqual(status.state, GeminiPageState.CLOSED)
+            self.assertFalse(paths.owner_lock_path.exists())
+            sync_playwright.assert_not_called()
 
     @patch("gemini_browser_session.navigate_gemini_with_retry")
     @patch("gemini_browser_session.build_browser_launch_options")

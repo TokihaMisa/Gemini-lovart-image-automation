@@ -1,9 +1,12 @@
+import os
 import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
+
+import webui
 
 from gemini_browser_session import (
     GeminiPageState,
@@ -48,6 +51,21 @@ class WebUIGeminiLoginTests(unittest.TestCase):
 
         self.assertEqual(popen.call_count, 1)
         self.assertIn("登录浏览器已打开", message)
+
+    @patch("webui.subprocess.Popen")
+    @patch("webui.login_helper_is_active", return_value=False)
+    def test_open_button_registers_login_helper_for_exit_cleanup(self, _active, popen):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            webui, "active_processes", []
+        ):
+            config = Path(tmp) / "config.yaml"
+            open_gemini_login_browser(config)
+
+            self.assertIn(popen.return_value, webui.active_processes)
+            self.assertEqual(
+                popen.call_args.kwargs["env"].get("LOVART_LOGIN_PARENT_PID"),
+                str(os.getpid()),
+            )
 
     @patch("webui.login_helper_is_active", return_value=True)
     def test_open_button_does_not_start_duplicate_helper(self, _active):

@@ -104,14 +104,16 @@ def open_gemini_login_browser(config_path: str | Path = "config.yaml") -> str:
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
+        env["LOVART_LOGIN_PARENT_PID"] = str(os.getpid())
         kwargs: dict[str, object] = {"env": env}
         import sys
         if os.name == "nt" and getattr(sys, "frozen", False):
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         try:
-            subprocess.Popen(build_login_helper_command(config_path), **kwargs)
+            process = subprocess.Popen(build_login_helper_command(config_path), **kwargs)
         except OSError:
             return "无法打开 Gemini 登录浏览器，请检查本地安装后重试。"
+        active_processes.append(process)
         _gemini_login_launches[launch_key] = now
     return "Gemini 登录浏览器已打开，请在新窗口中完成登录后再检查。"
 

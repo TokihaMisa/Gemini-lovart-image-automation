@@ -1,7 +1,7 @@
 {
-  "version": "1.3.17",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.17/update.zip",
-  "changelog": "修复失败任务补偿重试时找不到 Excel 输入图片的问题：商品目录在 3_处理中、4_异常等分类之间移动后，每一轮都会根据商品 ID 重新定位当前目录，并自动重定向 image_*.png 输入路径，不再继续读取移动前的旧路径。",
-  "sha256": "b3ce1e148f150691877198349cbb2a0a37072020d4518aabf7a55554ad1cd390",
-  "size": 131958935
+  "version": "1.3.18",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.18/update.zip",
+  "changelog": "修复关闭 Gemini 浏览器和重启软件后仍提示账户目录正在使用的问题：锁检测现在会同时校验 PID 与进程启动时间，自动恢复被 Windows 复用 PID 的失效锁；登录助手会跟随主软件退出并纳入统一子进程清理。不会删除 browser_profile，Gemini Cookie 和登录状态保持不变。",
+  "sha256": "acfb5e25bac8c7c91eb6b2928f91ce44cee751c3e7fdd422fc035fae46858569",
+  "size": 131961001
 }
