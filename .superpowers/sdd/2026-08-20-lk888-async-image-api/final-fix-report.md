@@ -48,4 +48,4 @@ Base: `bc540a2`
 - No version, release hash, ZIP, tag, remote branch, or GitHub release was modified in this fix wave.
 - Code concerns remaining: none identified after focused and full verification.
 
-Commit: to be recorded after commit creation.
+Commit: `78b3ce3` (`fix: close async image release safety gaps`).
