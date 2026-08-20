@@ -48,6 +48,40 @@ class HighPriorityBehaviorTests(unittest.TestCase):
         self.assertIn("detail_page_count_snapshot", overview)
         self.assertNotIn("生成 12 屏详情页提示词", overview)
 
+    def test_gpt_image_examples_document_the_async_media_task_migration(self):
+        config = Path("config.example.yaml").read_text(encoding="utf-8")
+        env = Path(".env.example").read_text(encoding="utf-8")
+        readme = Path("README.md").read_text(encoding="utf-8")
+
+        self.assertIn('base_url: ""', config)
+        self.assertIn('model: "gpt-image-2"', config)
+        self.assertIn('resolution: "1K"', config)
+        self.assertIn('merge_reference_images: false', config)
+        self.assertIn("with and without `/v1`", readme)
+        self.assertIn("`/v1/media/generate`", readme)
+        self.assertIn("`/v1/media/status`", readme)
+        self.assertIn("14 direct Data URL", readme)
+        self.assertIn("optional merge", readme)
+        self.assertIn("submit once", readme)
+        self.assertIn("task ID", readme)
+        self.assertIn("5 seconds, then 10 seconds", readme)
+        self.assertIn("600-second", readme)
+        self.assertIn("only in your local `.env`", readme)
+        self.assertIn("without task IDs", readme)
+        self.assertIn("not recoverable", readme)
+        self.assertIn("migrated once", readme)
+        self.assertIn("OPENAI_IMAGE_API_KEY=your_openai_image_api_key", env)
+
+        forbidden = (
+            "hapi",
+            "openai-compatible",
+            "/images/" + "edits",
+            "async_" + "edits",
+            "sync fallback",
+        )
+        for path, source in (("config.example.yaml", config), ("README.md", readme)):
+            self.assertTrue(all(token not in source.lower() for token in forbidden), path)
+
     def test_env_or_config_prefers_environment(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": "from-env"}):
             value = env_or_config({"api_key": "from-config"}, "api_key", "GEMINI_API_KEY")

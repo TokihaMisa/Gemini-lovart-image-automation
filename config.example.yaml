@@ -59,11 +59,10 @@ openai_image:
   # Both root endpoints and endpoints ending in /v1 are supported.
   # Leave this empty to avoid silently selecting a provider.
   base_url: ""
-  model: gpt-image-2
+  model: "gpt-image-2"
   # The gateway-supported options are 1K, 2K, and 4K.
-  resolution: 1K
-  # Enable for gateways that accept only one image file per edit request.
-  # HAPI defaults to enabled automatically when this field is absent.
+  resolution: "1K"
+  # Enable to combine references into one Data URL before submitting the task.
   merge_reference_images: false
 
 image_generation:

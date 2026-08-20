@@ -1107,7 +1107,6 @@ def persist_openai_image_settings(
         ),
     }
     updated["openai_image"].pop("api_key", None)
-    updated["openai_image"].pop("async_edits", None)
     updated["image_generation"] = {
         **updated.get("image_generation", {}),
         "support_provider": normalize_image_provider(support_provider),
@@ -1121,7 +1120,6 @@ def persist_image_routing_settings(config, support_provider, detail_provider):
     openai_image = updated.get("openai_image")
     if isinstance(openai_image, dict):
         openai_image.pop("api_key", None)
-        openai_image.pop("async_edits", None)
     updated["image_generation"] = {
         **updated.get("image_generation", {}),
         "support_provider": normalize_image_provider(support_provider),

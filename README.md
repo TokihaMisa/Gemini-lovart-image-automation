@@ -10,7 +10,7 @@ This project reads product data and images from an Excel workbook, sends the pro
 - **Auto Folder Picker**: Directly browse your local PC for output folders using a native dialog window (no typing required!).
 - **Multi-Model Support**: Automatically choose between `gemini_api`, `gemini_browser`, and `nvidia` for prompt generation.
 - **Lovart Automation**: Submit generated prompts directly to Lovart's image generation engines with real-time tracking.
-- **Independent image routes**: Choose Lovart or an OpenAI-compatible GPT Image gateway independently for support images and the final detail-image set.
+- **Independent image routes**: Choose Lovart or the GPT Image media-task provider independently for support images and the final detail-image set.
 - **Smart Data Handling**: Upload your `.xlsx` task tables directly via the web interface.
 
 ## First-Time Setup
@@ -84,15 +84,15 @@ You can also input and save these keys directly via the **"⚙️ 系统设置" 
 
 GPT Image is an optional image-generation provider; it does not replace Gemini/NVIDIA prompt generation. Keep `OPENAI_IMAGE_API_KEY` only in your local `.env` (or save it through System Settings, which writes the local `.env`); never put it in `config.yaml` or commit it.
 
-Set `openai_image.base_url` to the Base URL supplied by your OpenAI-compatible gateway. Root endpoints such as `https://image.hapiopen.cc` and endpoints ending in `/v1` are both supported; the application does not insert `/v1`. The WebUI leaves this field empty and shows `https://api.openai.com/v1` only as a gray example. The default model is `gpt-image-2`; choose `1K`, `2K`, or `4K` as the gateway-supported resolution. In the WebUI, **白底图和场景图来源** and **最终套图来源** are independent selectors, so either route may use Lovart or `openai_image`.
+Set `openai_image.base_url` to the Base URL supplied by your GPT Image provider; values with and without `/v1` are supported. The application always uses the fixed media-task endpoints `/v1/media/generate` and `/v1/media/status`, removing one trailing `/v1` from the configured Base URL before composing them. The example Base URL is intentionally empty, so no live provider is selected silently; the WebUI may show `https://api.lk888.ai` as a hint. The default model is `gpt-image-2`; choose `1K`, `2K`, or `4K` as supported by the provider. In the WebUI, **白底图和场景图来源** and **最终套图来源** are independent selectors, so either route may use Lovart or `openai_image`.
 
-Enable **将多张参考图合并为一张上传** when a gateway accepts only one `image` file per edit request. The application builds a temporary local contact sheet and uploads that single file without modifying the source images. Legacy HAPI configurations default this option on; other gateways default it off, and the saved switch always takes precedence.
+The media-task request accepts up to 14 direct Data URL references. Enable **将多张参考图合并为一张上传** only when you prefer the optional merge: the application builds one temporary local contact sheet, then submits its Data URL without modifying source images. The saved merge switch defaults to off.
 
-The saved detail-page count controls how many final GPT Image screens are requested. That target is snapshotted when a product starts, so changing the setting later does not alter an in-progress or resumed product. Completed detail screens are retained and a resume generates only missing screens. Provider failures stop on the selected provider: there is no automatic switch to the other provider.
+The app will submit once: if the response is ambiguous, it does not submit again because it cannot safely determine whether billing occurred. After a task ID is saved, resume uses that task ID rather than creating another task. Polling waits 5 seconds, then 10 seconds after the initial period, within a 600-second local wait window. The saved detail-page count controls how many final GPT Image screens are requested. That target is snapshotted when a product starts, so changing the setting later does not alter an in-progress or resumed product. Completed detail screens are retained and a resume generates only missing screens. Provider failures stop on the selected provider: there is no automatic switch to the other provider.
 
-The failed-task compensation policy applies to every routing combination, including an all-GPT-Image run. Retryable GPT Image service errors and transient Gemini page-control failures are retried after the current queue, while completed support/detail images are reused.
+Old synchronous checkpoints without task IDs are not recoverable: they are migrated once by treating the old incomplete work as needing a new task, then persisting the returned task ID for subsequent resumes. The failed-task compensation policy applies to every routing combination, including an all-GPT-Image run. Retryable GPT Image service errors and transient Gemini page-control failures are retried after the current queue, while completed support/detail images are reused.
 
-The **真实图像编辑测试（可能产生一次图片费用）** button is deliberately billable. It sends one real compatibility request to the standard `/images/edits` endpoint; saving configuration, opening the UI, dry-runs, and automated tests do not call the image API.
+The **真实图像编辑测试（可能产生一次图片费用）** button is deliberately billable. It submits one real media task; saving configuration, opening the UI, dry-runs, and automated tests do not call the image API.
 
 ## Prompt-model and prompt-settings workflow
 

@@ -1,4 +1,4 @@
-"""Validated configuration primitives for OpenAI Images-compatible APIs."""
+"""Validated configuration primitives for the GPT Image media-task API."""
 
 from __future__ import annotations
 

@@ -421,11 +421,10 @@ class WebUIModelSettingsTests(unittest.TestCase):
                         webui.resolve_merge_reference_images(stored_value, base_url)
                     )
 
-    def test_openai_settings_scrub_legacy_protocol_and_secret_fields(self):
+    def test_openai_settings_scrub_secret_fields(self):
         original = {
             "openai_image": {
                 "api_key": "legacy-secret",
-                "async_edits": True,
                 "future_protocol_option": "keep-me",
             }
         }
@@ -440,7 +439,6 @@ class WebUIModelSettingsTests(unittest.TestCase):
         )
 
         self.assertNotIn("api_key", updated["openai_image"])
-        self.assertNotIn("async_edits", updated["openai_image"])
         self.assertEqual(
             updated["openai_image"]["future_protocol_option"], "keep-me"
         )
@@ -449,7 +447,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path, env_path = Path(tmp) / "config.yaml", Path(tmp) / ".env"
             config_path.write_text(
-                "openai_image:\n  async_edits: true\n  api_key: legacy-secret\n",
+                "openai_image:\n  api_key: legacy-secret\n",
                 encoding="utf-8",
             )
 
@@ -473,7 +471,6 @@ class WebUIModelSettingsTests(unittest.TestCase):
 
         self.assertEqual(unused_status, webui.API_SETTINGS_SAVE_SUCCESS)
         self.assertEqual(saved["openai_image"]["base_url"], "")
-        self.assertNotIn("async_edits", saved["openai_image"])
         self.assertNotIn("api_key", saved["openai_image"])
         self.assertIn("保存失败", selected_status)
 

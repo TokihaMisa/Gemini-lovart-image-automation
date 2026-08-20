@@ -335,6 +335,25 @@ def test_media_endpoints_strip_exactly_one_trailing_v1(base_url, create_url, sta
     assert _media_endpoint(base_url, "status", task_id="abc-123") == status_url
 
 
+def test_production_transport_has_no_legacy_protocol_fallbacks():
+    """Only the media-task transport may remain in production code."""
+    sources = {
+        path: Path(path).read_text(encoding="utf-8")
+        for path in ("openai_image_api.py", "webui.py")
+    }
+    forbidden = (
+        "/images/" + "edits",
+        "/images/" + "tasks/",
+        "_request_" + "hapi",
+        "_is_" + "hapi_image_service",
+        "async_" + "edits",
+        "sync fallback",
+    )
+
+    for path, source in sources.items():
+        assert all(token not in source.lower() for token in forbidden), path
+
+
 def test_build_create_body_uses_documented_json_contract():
     encoded_images = ["data:image/png;base64,cG5n"]
     prompt = append_aspect_instruction("sell it", "2:3")
