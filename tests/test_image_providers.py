@@ -5,8 +5,19 @@ import pytest
 from PIL import Image
 
 from image_generation import DetailScreen
-from openai_image_api import GeneratedImage
+from openai_image_api import GeneratedImage, ImageTaskSnapshot
 from tests.image_test_helpers import write_truncated_png, write_valid_png
+
+
+def completed_image_task() -> ImageTaskSnapshot:
+    return ImageTaskSnapshot(
+        task_id="test-task",
+        state="success",
+        is_final=True,
+        task_created_at=0.0,
+        result_url="https://cdn.example/result.png",
+        result_type="image",
+    )
 
 
 def test_registry_does_not_build_lovart_for_all_openai_run():
@@ -60,7 +71,7 @@ def test_openai_detail_set_skips_valid_completed_indexes(tmp_path: Path):
 
     def generate_second(*, output_path, **_kwargs):
         path = write_valid_png(Path(output_path))
-        return GeneratedImage(path, "gpt-image-2")
+        return GeneratedImage(path, "gpt-image-2", completed_image_task())
 
     api.generate_edit.side_effect = generate_second
     provider = OpenAIImageProvider(api, logger=Mock())
@@ -146,7 +157,9 @@ def test_openai_detail_set_regenerates_a_header_valid_truncated_checkpoint(tmp_p
     record_detail_checkpoint(tmp_path, 1, "done", corrupted_path)
     replacement_path = write_valid_png(tmp_path / "replacement.png")
     api = Mock()
-    api.generate_edit.return_value = GeneratedImage(replacement_path, "gpt-image-2")
+    api.generate_edit.return_value = GeneratedImage(
+        replacement_path, "gpt-image-2", completed_image_task()
+    )
     request = DetailSetRequest(
         product_id="P1",
         product_dir=tmp_path,
@@ -172,7 +185,7 @@ def test_openai_detail_set_keeps_paid_success_when_later_screen_fails(tmp_path: 
     def generate_until_failure(*, output_path, **_kwargs):
         if Path(output_path).stem == "01":
             path = write_valid_png(Path(output_path))
-            return GeneratedImage(path, "gpt-image-2")
+            return GeneratedImage(path, "gpt-image-2", completed_image_task())
         raise RuntimeError("temporary upstream failure")
 
     api.generate_edit.side_effect = generate_until_failure
@@ -207,7 +220,7 @@ def test_openai_detail_set_stops_after_first_exhausted_screen_and_resumes_in_ord
         index = int(Path(output_path).stem)
         if index == 1:
             path = write_valid_png(Path(output_path))
-            return GeneratedImage(path, "gpt-image-2")
+            return GeneratedImage(path, "gpt-image-2", completed_image_task())
         if index == 2:
             raise RuntimeError("screen 2 exhausted retries")
         raise AssertionError("screen 3 must not be called in the failed run")
@@ -238,7 +251,7 @@ def test_openai_detail_set_stops_after_first_exhausted_screen_and_resumes_in_ord
 
     def finish_missing(*, output_path, **_kwargs):
         path = write_valid_png(Path(output_path))
-        return GeneratedImage(path, "gpt-image-2")
+        return GeneratedImage(path, "gpt-image-2", completed_image_task())
 
     resumed_api.generate_edit.side_effect = finish_missing
     resumed = OpenAIImageProvider(resumed_api).generate_detail_set(request)
@@ -276,7 +289,7 @@ def test_openai_detail_set_no_resume_replaces_all_prior_checkpoints(tmp_path: Pa
 
     def regenerate(*, output_path, **_kwargs):
         path = write_valid_png(Path(output_path))
-        return GeneratedImage(path, "gpt-image-2")
+        return GeneratedImage(path, "gpt-image-2", completed_image_task())
 
     api.generate_edit.side_effect = regenerate
     request = DetailSetRequest(
@@ -354,7 +367,9 @@ def test_openai_detail_set_reconciles_only_matching_running_canonical_output(
         prompt_hash=detail_screen_prompt_hash(wrong_screen, 1, "1:1"),
     )
     wrong_api = Mock()
-    wrong_api.generate_edit.return_value = GeneratedImage(other_canonical, "gpt-image-2")
+    wrong_api.generate_edit.return_value = GeneratedImage(
+        other_canonical, "gpt-image-2", completed_image_task()
+    )
     wrong_request = DetailSetRequest(
         product_id="P2",
         product_dir=other_product,
@@ -433,7 +448,7 @@ def test_new_running_checkpoint_cannot_reconcile_stale_canonical_after_crash(
 
     def save_current(*, output_path, **_kwargs):
         path = write_valid_png(Path(output_path))
-        return GeneratedImage(path, "gpt-image-2")
+        return GeneratedImage(path, "gpt-image-2", completed_image_task())
 
     resumed_api.generate_edit.side_effect = save_current
 
@@ -457,7 +472,9 @@ def test_openai_detail_set_regenerates_legacy_done_checkpoint_without_prompt_has
         input_fingerprint="inputs-v1",
     )
     api = Mock()
-    api.generate_edit.return_value = GeneratedImage(canonical, "gpt-image-2")
+    api.generate_edit.return_value = GeneratedImage(
+        canonical, "gpt-image-2", completed_image_task()
+    )
     request = DetailSetRequest(
         product_id="P1",
         product_dir=tmp_path,
@@ -511,7 +528,9 @@ def test_openai_detail_set_reuses_only_identical_final_screen_prompt(tmp_path: P
     assert identical.succeeded is True
 
     changed_api = Mock()
-    changed_api.generate_edit.return_value = GeneratedImage(canonical, "gpt-image-2")
+    changed_api.generate_edit.return_value = GeneratedImage(
+        canonical, "gpt-image-2", completed_image_task()
+    )
     changed_request = DetailSetRequest(
         product_id="P1",
         product_dir=tmp_path,

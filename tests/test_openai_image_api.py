@@ -3,6 +3,8 @@ import io
 import json
 import socket
 import ssl
+import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
 from urllib.error import HTTPError
@@ -51,15 +53,26 @@ class FakeResponse:
         self.body = body
         self.status = status
         self.headers = {"Content-Type": content_type}
+        self._offset = 0
 
     def __enter__(self):
+        self._offset = 0
         return self
 
     def __exit__(self, exc_type, exc, traceback):
         return False
 
-    def read(self) -> bytes:
-        return self.body
+    def read(self, _amount=None) -> bytes:
+        if _amount is None:
+            chunk = self.body[self._offset:]
+            self._offset = len(self.body)
+            return chunk
+        chunk = self.body[self._offset:self._offset + _amount]
+        self._offset += len(chunk)
+        return chunk
+
+    def read1(self, amount=None) -> bytes:
+        return self.read(amount)
 
 
 class TrackingBytesIO(io.BytesIO):
@@ -605,6 +618,20 @@ def test_create_normalizes_root_or_nested_task_id_and_persists_before_poll(
     assert result.task.state == "success"
 
 
+@patch("openai_image_api.urllib.request.build_opener")
+def test_create_prefers_root_task_id_when_data_is_unrelated_mapping(build_opener, tmp_path):
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(b'{"task_id":"root-1","data":{"request":"accepted"}}'),
+        FakeResponse(b'{"task_id":"root-1","state":"success","is_final":true,"result_url":"https://cdn.example/result.png","result_type":"image"}'),
+    ]
+
+    result = make_client().generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+    )
+
+    assert result.task.task_id == "root-1"
+
+
 @pytest.mark.parametrize(
     ("side_effect", "expected_code"),
     [
@@ -724,6 +751,95 @@ def test_final_failed_task_is_terminal_sanitized_and_not_resubmitted(build_opene
     assert build_opener.return_value.open.call_count == 2
 
 
+@patch("openai_image_api.urllib.request.build_opener")
+def test_provider_fields_and_nested_cost_are_redacted_before_callbacks(build_opener, tmp_path):
+    secret = "test-key"
+    callbacks = []
+    statuses = []
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(b'{"task_id":"t-1"}'),
+        FakeResponse(json.dumps({
+            "task_id": "t-1",
+            "state": "running",
+            "is_final": False,
+            "progress": f"45% {secret}",
+            "status": f"processing {secret}",
+            "status_group": f"active {secret}",
+            "result_url": f"https://cdn.example/result.png?token={secret}",
+            "result_type": f"image/{secret}",
+            "error": f"warning {secret}",
+            "cost": {f"key-{secret}": [secret, {"nested": secret}]},
+        }).encode()),
+        FakeResponse(b'{"task_id":"t-1","state":"success","is_final":true,"result_url":"https://cdn.example/result.png","result_type":"image"}'),
+    ]
+
+    make_client().generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png",
+        task_callback=callbacks.append, status_callback=statuses.append,
+    )
+
+    assert secret not in repr(callbacks)
+    assert secret not in json.dumps([asdict(task) for task in callbacks])
+    assert all(secret not in message for message in statuses)
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_stale_resume_fields_and_nested_cost_are_redacted_before_callbacks(build_opener, tmp_path):
+    secret = "test-key"
+    callbacks = []
+    statuses = []
+    resume = ImageTaskSnapshot(
+        "t-1", "running", False, 1787200000.0,
+        progress=f"45% {secret}", status=f"processing {secret}",
+        status_group=f"active {secret}",
+        result_url=f"https://cdn.example/result.png?token={secret}",
+        result_type=f"image/{secret}", error=f"warning {secret}",
+        cost={f"key-{secret}": [secret, {"nested": secret}]},
+    )
+    build_opener.return_value.open.return_value = FakeResponse(
+        b'{"task_id":"t-1","state":"success","is_final":true,"result_url":"https://cdn.example/result.png","result_type":"image"}'
+    )
+
+    make_client().generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png",
+        resume_task=resume, task_callback=callbacks.append,
+        status_callback=statuses.append,
+    )
+
+    assert secret not in repr(callbacks)
+    assert secret not in json.dumps([asdict(task) for task in callbacks])
+    assert all(secret not in message for message in statuses)
+
+
+@pytest.mark.parametrize("resume", [False, True])
+@patch("openai_image_api.urllib.request.build_opener")
+def test_api_key_cannot_be_persisted_as_provider_or_stale_task_id(
+    build_opener, resume, tmp_path
+):
+    callbacks = []
+    source = make_png(tmp_path / "source.png")
+    kwargs = {}
+    if resume:
+        kwargs["resume_task"] = ImageTaskSnapshot(
+            "test-key", "running", False, 1787200000.0
+        )
+    else:
+        build_opener.return_value.open.return_value = FakeResponse(
+            b'{"task_id":"test-key"}'
+        )
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client().generate_edit(
+            "prompt", [source], tmp_path / "out.png",
+            task_callback=callbacks.append, **kwargs,
+        )
+
+    assert ctx.value.code == "invalid_response"
+    assert "test-key" not in str(ctx.value)
+    assert "test-key" not in repr(ctx.value)
+    assert callbacks == []
+
+
 @patch("openai_image_api.time.monotonic")
 @patch("openai_image_api.urllib.request.build_opener")
 def test_polling_uses_five_seconds_through_120_then_ten(build_opener, monotonic, tmp_path):
@@ -772,6 +888,112 @@ def test_600_second_deadline_raises_last_snapshot_without_new_post(build_opener,
     assert ctx.value.task == callbacks[-1]
     assert ctx.value.task.progress == "45%"
     assert sum(call.args[0].method == "POST" for call in build_opener.return_value.open.call_args_list) == 1
+
+
+@patch("openai_image_api.time.monotonic")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_poll_deadline_bounds_slow_active_get_to_remaining_window(build_opener, monotonic, tmp_path):
+    now = [0.0]
+    monotonic.side_effect = lambda: now[0]
+    requests = []
+    get_timeouts = []
+
+    class SlowResponse(FakeResponse):
+        def __init__(self, timeout):
+            super().__init__(b"")
+            self.timeout = timeout
+
+        def read(self, _amount=None):
+            now[0] += self.timeout
+            raise socket.timeout("slow status body")
+
+        def read1(self, amount=None):
+            return self.read(amount)
+
+    def open_request(request, *, timeout):
+        requests.append(request)
+        if request.method == "POST":
+            return FakeResponse(b'{"task_id":"t-1"}')
+        get_timeouts.append(timeout)
+        return SlowResponse(timeout)
+
+    build_opener.return_value.open.side_effect = open_request
+
+    with pytest.raises(ImageTaskStillRunning) as ctx:
+        make_client(timeout=1000.0, max_attempts=4).generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+        )
+
+    assert ctx.value.task.task_id == "t-1"
+    assert get_timeouts == [600.0]
+    assert now[0] == 600.0
+    assert [request.method for request in requests] == ["POST", "GET"]
+
+
+@patch("openai_image_api.TASK_WAIT_LIMIT_SECONDS", 0.05)
+@patch("openai_image_api.urllib.request.build_opener")
+def test_poll_deadline_returns_while_get_is_still_dribbling(build_opener, tmp_path):
+    release = threading.Event()
+    worker_finished = threading.Event()
+
+    def open_request(request, *, timeout):
+        if request.method == "POST":
+            return FakeResponse(b'{"task_id":"t-1"}')
+        try:
+            release.wait(1.0)
+            return FakeResponse(
+                b'{"task_id":"t-1","state":"running","is_final":false}'
+            )
+        finally:
+            worker_finished.set()
+
+    build_opener.return_value.open.side_effect = open_request
+    started = time.monotonic()
+    try:
+        with pytest.raises(ImageTaskStillRunning):
+            make_client(timeout=1000.0, max_attempts=4).generate_edit(
+                "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+            )
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        worker_finished.wait(1.0)
+
+    assert elapsed < 0.5
+    requests = [call.args[0] for call in build_opener.return_value.open.call_args_list]
+    assert [request.method for request in requests] == ["POST", "GET"]
+
+
+@patch("openai_image_api.time.monotonic")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_poll_deadline_caps_retry_backoff_and_prevents_next_get(build_opener, monotonic, tmp_path):
+    now = [0.0]
+    monotonic.side_effect = lambda: now[0]
+    sleeps = []
+
+    def sleep(delay):
+        sleeps.append(delay)
+        now[0] += delay
+
+    def open_request(request, *, timeout):
+        if request.method == "POST":
+            return FakeResponse(b'{"task_id":"t-1"}')
+        now[0] = 599.0
+        raise HTTPError(request.full_url, 429, "busy", {}, None)
+
+    build_opener.return_value.open.side_effect = open_request
+
+    with pytest.raises(ImageTaskStillRunning):
+        make_client(
+            timeout=1000.0, max_attempts=4, retry_delays=(10.0,), sleep=sleep
+        ).generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+        )
+
+    requests = [call.args[0] for call in build_opener.return_value.open.call_args_list]
+    assert [request.method for request in requests] == ["POST", "GET"]
+    assert sleeps == [1.0]
+    assert now[0] == 600.0
 
 
 @pytest.mark.parametrize("failure", [socket.timeout("slow"), HTTPError("url", 429, "busy", {}, None), HTTPError("url", 503, "down", {}, None)])
@@ -856,6 +1078,11 @@ def test_resume_failed_is_terminal_without_network(build_opener, tmp_path):
 
     assert ctx.value.code == "task_failed"
     build_opener.assert_not_called()
+
+
+def test_generated_image_requires_task_snapshot():
+    with pytest.raises(TypeError):
+        GeneratedImage("out.png", "gpt-image-2")
 
 
 @patch("openai_image_api.urllib.request.build_opener")

@@ -12,12 +12,14 @@ import json
 import math
 import os
 from pathlib import Path
+import queue
 import re
 import socket
 import ssl
 import tempfile
+import threading
 import time
-from typing import Any, Callable, Final, Sequence
+from typing import Any, Callable, Final, Sequence, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
 import urllib.request
@@ -111,7 +113,7 @@ class OpenAIImageAPIError(Exception):
 class GeneratedImage:
     local_path: str
     model: str
-    task: ImageTaskSnapshot | None = None
+    task: ImageTaskSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +138,10 @@ class ImageTaskStillRunning(OpenAIImageAPIError):
             "task_still_running",
             "GPT Image task is still running on the provider; its saved task ID can be resumed.",
         )
+
+
+class _InvocationDeadlineExceeded(Exception):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +355,8 @@ def _normalize_task_id(value: object) -> str:
 
 
 def _task_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    if "task_id" in payload:
+        return payload
     nested = payload.get("data")
     return nested if isinstance(nested, Mapping) else payload
 
@@ -372,7 +380,54 @@ def _validate_task_state(task: ImageTaskSnapshot) -> ImageTaskSnapshot:
     )
 
 
-def _validate_resume_task(task: ImageTaskSnapshot) -> ImageTaskSnapshot:
+def _redact_snapshot_value(value: object, api_key: str) -> object:
+    if not api_key:
+        return value
+    if isinstance(value, str):
+        return value.replace(api_key, "[redacted]")
+    if isinstance(value, Mapping):
+        return {
+            _redact_snapshot_value(key, api_key): _redact_snapshot_value(item, api_key)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_snapshot_value(item, api_key) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_snapshot_value(item, api_key) for item in value)
+    if isinstance(value, set):
+        return {_redact_snapshot_value(item, api_key) for item in value}
+    if api_key in repr(value):
+        return repr(value).replace(api_key, "[redacted]")
+    return value
+
+
+def _sanitize_task_snapshot(
+    task: ImageTaskSnapshot,
+    api_key: str,
+) -> ImageTaskSnapshot:
+    if api_key and api_key in task.task_id:
+        raise OpenAIImageAPIError(
+            "invalid_response", "GPT Image API returned an unsafe task ID."
+        )
+    return ImageTaskSnapshot(
+        task_id=task.task_id,
+        state=str(_redact_snapshot_value(task.state, api_key)),
+        is_final=task.is_final,
+        task_created_at=task.task_created_at,
+        progress=str(_redact_snapshot_value(task.progress, api_key)),
+        status=str(_redact_snapshot_value(task.status, api_key)),
+        status_group=str(_redact_snapshot_value(task.status_group, api_key)),
+        result_url=str(_redact_snapshot_value(task.result_url, api_key)),
+        result_type=str(_redact_snapshot_value(task.result_type, api_key)),
+        error=str(_redact_snapshot_value(task.error, api_key)),
+        cost=_redact_snapshot_value(task.cost, api_key),
+    )
+
+
+def _validate_resume_task(
+    task: ImageTaskSnapshot,
+    api_key: str,
+) -> ImageTaskSnapshot:
     if not isinstance(task, ImageTaskSnapshot):
         raise OpenAIImageAPIError("invalid_response", "Saved GPT Image task data is invalid.")
     task_id = _normalize_task_id(task.task_id)
@@ -380,7 +435,7 @@ def _validate_resume_task(task: ImageTaskSnapshot) -> ImageTaskSnapshot:
         raise OpenAIImageAPIError("invalid_response", "Saved GPT Image task data is invalid.")
     if not isinstance(task.is_final, bool) or not _is_valid_timestamp(task.task_created_at):
         raise OpenAIImageAPIError("invalid_response", "Saved GPT Image task data is invalid.")
-    return _validate_task_state(task)
+    return _validate_task_state(_sanitize_task_snapshot(task, api_key))
 
 
 def _is_valid_timestamp(value: object) -> bool:
@@ -416,6 +471,49 @@ def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
         return max(1.0, min(60.0, float(raw_value)))
     except (TypeError, ValueError):
         return None
+
+
+def _deadline_remaining(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _InvocationDeadlineExceeded
+    return remaining
+
+
+def _set_response_read_timeout(response: Any, timeout: float) -> None:
+    candidates = [response]
+    current = response
+    for attribute in ("fp", "raw", "_sock"):
+        current = getattr(current, attribute, None)
+        if current is None:
+            break
+        candidates.append(current)
+    for candidate in reversed(candidates):
+        setter = getattr(candidate, "settimeout", None)
+        if callable(setter):
+            setter(timeout)
+            return
+
+
+def _read_response_body(response: Any, deadline: float | None) -> bytes:
+    if deadline is None:
+        return response.read()
+    read_chunk = getattr(response, "read1", None)
+    if not callable(read_chunk):
+        read_chunk = response.read
+    chunks: list[bytes] = []
+    while True:
+        remaining = _deadline_remaining(deadline)
+        assert remaining is not None
+        _set_response_read_timeout(response, remaining)
+        chunk = read_chunk(64 * 1024)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    _deadline_remaining(deadline)
+    return b"".join(chunks)
 
 
 class OpenAIImageAPI:
@@ -454,7 +552,7 @@ class OpenAIImageAPI:
         if resume_task is None:
             task = self._submit_task_once(body)
         else:
-            task = _validate_resume_task(resume_task)
+            task = _validate_resume_task(resume_task, self.config.api_key)
         _notify_task(task_callback, task)
 
         if task.state == "failed":
@@ -515,20 +613,54 @@ class OpenAIImageAPI:
         self,
         url: str,
         status_callback: Callable[[str], None] | None = None,
+        *,
+        deadline: float | None = None,
     ) -> tuple[dict[str, Any], float | None]:
         request = urllib.request.Request(url, method="GET")
         request.add_header("Accept", "application/json")
         request.add_header("Authorization", f"Bearer {self.config.api_key}")
         opener = urllib.request.build_opener(_RejectRedirectHandler())
-        response_headers: dict[str, str] = {}
-        raw_response = self._request_bytes(
-            request,
-            opener.open,
-            "json",
-            status_callback=status_callback,
-            response_headers=response_headers,
-        )
-        return _decode_json_response(raw_response), _retry_after_seconds(response_headers)
+        result_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+
+        def request_status() -> None:
+            response_headers: dict[str, str] = {}
+            try:
+                raw_response = self._request_bytes(
+                    request,
+                    opener.open,
+                    "json",
+                    status_callback=status_callback,
+                    response_headers=response_headers,
+                    deadline=deadline,
+                )
+                result = (
+                    _decode_json_response(raw_response),
+                    _retry_after_seconds(response_headers),
+                )
+            except Exception as exc:
+                result_queue.put(("error", exc))
+            else:
+                result_queue.put(("result", result))
+
+        # A status GET is idempotent. Running it in a daemon worker gives the
+        # caller a hard invocation deadline even if urllib is stuck parsing a
+        # peer that dribbles response headers without ever timing out a read.
+        threading.Thread(
+            target=request_status,
+            name="gpt-image-status-get",
+            daemon=True,
+        ).start()
+        remaining = _deadline_remaining(deadline)
+        try:
+            result_type, value = result_queue.get(timeout=remaining)
+        except queue.Empty:
+            raise _InvocationDeadlineExceeded from None
+        _deadline_remaining(deadline)
+        if result_type == "error":
+            if isinstance(value, BaseException):
+                raise value
+            raise RuntimeError("image status worker returned an invalid error")
+        return cast(tuple[dict[str, Any], float | None], value)
 
     def _submit_task_once(self, body: bytes) -> ImageTaskSnapshot:
         try:
@@ -546,11 +678,14 @@ class OpenAIImageAPI:
                 ) from None
             raise
         task_id = _normalize_task_id(_task_payload(payload).get("task_id"))
-        return ImageTaskSnapshot(
-            task_id=task_id,
-            state="pending",
-            is_final=False,
-            task_created_at=time.time(),
+        return _sanitize_task_snapshot(
+            ImageTaskSnapshot(
+                task_id=task_id,
+                state="pending",
+                is_final=False,
+                task_created_at=time.time(),
+            ),
+            self.config.api_key,
         )
 
     def _parse_status_task(
@@ -584,14 +719,12 @@ class OpenAIImageAPI:
             status_group=_task_text(values.get("status_group"), limit=160),
             result_url=_task_text(values.get("result_url"), limit=4096),
             result_type=_task_text(values.get("result_type"), limit=80),
-            error=(
-                _task_text(values.get("error")).replace(self.config.api_key, "[redacted]")
-                if self.config.api_key
-                else _task_text(values.get("error"))
-            ),
+            error=_task_text(values.get("error")),
             cost=values.get("cost"),
         )
-        return _validate_task_state(task)
+        return _validate_task_state(
+            _sanitize_task_snapshot(task, self.config.api_key)
+        )
 
     def _poll_task(
         self,
@@ -605,10 +738,16 @@ class OpenAIImageAPI:
         while True:
             if time.monotonic() >= deadline:
                 raise ImageTaskStillRunning(task)
-            payload, _retry_after = self._request_json_url(
-                status_url,
-                status_callback=status_callback,
-            )
+            try:
+                payload, _retry_after = self._request_json_url(
+                    status_url,
+                    status_callback=status_callback,
+                    deadline=deadline,
+                )
+            except _InvocationDeadlineExceeded:
+                raise ImageTaskStillRunning(task) from None
+            if time.monotonic() >= deadline:
+                raise ImageTaskStillRunning(task)
             task = self._parse_status_task(payload, task)
             _notify_task(task_callback, task)
             elapsed = max(0.0, time.monotonic() - started_at)
@@ -666,6 +805,7 @@ class OpenAIImageAPI:
         max_attempts: int | None = None,
         status_callback: Callable[[str], None] | None = None,
         response_headers: dict[str, str] | None = None,
+        deadline: float | None = None,
     ) -> bytes:
         attempts = max(
             1,
@@ -674,8 +814,12 @@ class OpenAIImageAPI:
         request_opener = open_request or urllib.request.urlopen
         for attempt in range(1, attempts + 1):
             try:
-                with request_opener(request, timeout=self.config.timeout) as response:
-                    response_body = response.read()
+                remaining = _deadline_remaining(deadline)
+                request_timeout = float(self.config.timeout)
+                if remaining is not None:
+                    request_timeout = min(request_timeout, remaining)
+                with request_opener(request, timeout=request_timeout) as response:
+                    response_body = _read_response_body(response, deadline)
                     if expected_content_type is not None:
                         _validate_response_contract(
                             response, response_body, expected_content_type
@@ -688,10 +832,16 @@ class OpenAIImageAPI:
                         )
                     return response_body
             except (HTTPError, URLError, TimeoutError, socket.timeout, OSError, http.client.HTTPException) as exc:
+                _deadline_remaining(deadline)
                 error = _transport_error(exc)
                 if not error.retryable or attempt >= attempts:
                     raise error from None
-                self._notice_retry(attempt, attempts, status_callback=status_callback)
+                self._notice_retry(
+                    attempt,
+                    attempts,
+                    status_callback=status_callback,
+                    deadline=deadline,
+                )
         raise RuntimeError("image request retry loop exhausted")
 
     def _notice_retry(
@@ -699,6 +849,7 @@ class OpenAIImageAPI:
         attempt: int,
         attempts: int,
         status_callback: Callable[[str], None] | None = None,
+        deadline: float | None = None,
     ) -> None:
         delay = _retry_delay(self.config.retry_delays, attempt)
         if self.logger is not None:
@@ -707,7 +858,11 @@ class OpenAIImageAPI:
             status_callback,
             f"🔄 GPT Image 请求失败，正在重试（{attempt}/{attempts}）",
         )
+        remaining = _deadline_remaining(deadline)
+        if remaining is not None:
+            delay = min(delay, remaining)
         self._sleep(delay)
+        _deadline_remaining(deadline)
 
 
 
