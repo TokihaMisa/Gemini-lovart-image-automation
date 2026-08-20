@@ -15,9 +15,9 @@
 
 - **Gemini API 路径**：直接调用 Gemini API，速度更稳，不依赖浏览器登录。
 - **Gemini 浏览器路径**：用 Playwright 打开 Gemini 网页，复用本地 Chrome profile 登录态。
-- **NVIDIA API 路径**：调用 NVIDIA NIM 的 OpenAI-compatible Chat Completions API，当前只保留支持商品图片输入的 Kimi K2.5。
+- **NVIDIA API 路径**：调用 NVIDIA NIM Chat Completions API，当前只保留支持商品图片输入的 Kimi K2.5。
 
-Lovart 当前主要走 OpenAPI/AgentSkill 方式，不再主要依赖手动浏览器点击。图片生成还可以为“白底图和场景图”与“最终详情套图”分别选择 Lovart 或 OpenAI-compatible GPT Image；两条选择彼此独立，不会在失败时自动切换到另一家供应商。
+Lovart 当前主要走 OpenAPI/AgentSkill 方式，不再主要依赖手动浏览器点击。图片生成还可以为“白底图和场景图”与“最终详情套图”分别选择 Lovart 或 GPT Image 媒体任务；两条选择彼此独立，不会在失败时自动切换到另一家供应商。
 
 ## 输入与输出
 
@@ -142,13 +142,13 @@ Excel 默认字段含义：
 
 如果某个商品在 Gemini 或最终 Lovart 阶段失败，但白底图、场景图和 Lovart project 已经存在，下次默认 `--resume` 运行时会先校验旧 Lovart project 是否仍可访问。校验通过时才复用这些中间结果继续后续流程，不会重新创建项目，也不会重新生成白底图/场景图。旧状态文件也会通过 `lovart_final_images` 或 `lovart_steps/white_bg`、`lovart_steps/scene` 目录反查可复用图片。若旧 Lovart 链接/project 已失效，程序会把当前商品当作新任务重新开始：创建新的 Lovart project，并重新生成白底图、场景图和后续详情图。
 
-### 5. OpenAI-compatible GPT Image 生成与迁移
+### 5. GPT Image 媒体任务生成与迁移
 
-`openai_image` 使用本地 `.env` 中的 `OPENAI_IMAGE_API_KEY`。`openai_image.base_url` 按服务商提供的地址填写，既支持 `https://image.hapiopen.cc` 这类根地址，也支持以 `/v1` 结尾的地址；程序不会自动追加 `/v1`。WebUI 默认留空，只用灰色占位文字提示官方地址示例 `https://api.openai.com/v1`。默认模型为 `gpt-image-2`，分辨率可选 `1K`、`2K` 或 `4K`。真实兼容性测试会调用标准 `/images/edits` 图像编辑端点，因此一次点击可能产生图片费用；保存设置、构建 UI、dry-run 和自动测试都不会发送该请求。
+`openai_image` 使用本地 `.env` 中的 `OPENAI_IMAGE_API_KEY`。`openai_image.base_url` 按服务商提供的地址填写，可带或不带 `/v1`；程序固定调用 `/v1/media/generate` 与 `/v1/media/status`。WebUI 默认留空，只作 `https://api.lk888.ai` 提示，不会静默选中生产服务。默认模型为 `gpt-image-2`，分辨率可选 `1K`、`2K` 或 `4K`。真实测试会提交一个媒体任务，因此可能产生图片费用；保存设置、构建 UI、dry-run 和自动测试都不会发送请求。
 
-`openai_image.merge_reference_images` 对应 WebUI 的“将多张参考图合并为一张上传”开关。开启时，白底图、场景图、配件图、尺寸图和参考图会先在本地合成临时参考拼图，再作为唯一的 `image` 文件上传；原始文件不会被修改。HAPI 旧配置未写该字段时默认开启，其他 OpenAI-compatible 地址默认关闭，用户保存的显式开关优先。
+`openai_image.merge_reference_images` 对应 WebUI 的“将多张参考图合并为一张上传”开关。一个媒体任务最多可提交 14 个直接 Data URL 参考图；开启开关后，程序先在本地合成临时参考拼图，再提交一个 Data URL，不会修改原始文件。该开关默认关闭，用户保存的显式设置优先。
 
-详情屏数取自提示词设置，并在商品开始时写入 `detail_page_count_snapshot`。续跑时保持该快照，已经完成的 GPT Image 屏幕不再生成，只补缺失屏幕。历史 Lovart 状态仍可通过 `lovart_white_bg_local_path`、`lovart_scene_local_path` 或 `lovart_final_images` 复用旧的白底图和场景图。无论支持图还是详情图选择哪家供应商，失败都会保留状态供人工修复和续跑，不做自动 provider fallback。
+提交只做一次：如果响应不明确，为避免重复计费不会自动重提。任务 ID 保存后可继续续跑；本地等待窗口为 600 秒，前期每 5 秒轮询，后续每 10 秒轮询。旧同步断点没有任务 ID 无法恢复；会仅迁移一次为新任务并保存新 ID。详情屏数取自提示词设置，并在商品开始时写入 `detail_page_count_snapshot`。续跑时保持该快照，已经完成的 GPT Image 屏幕不再生成，只补缺失屏幕。历史 Lovart 状态仍可通过 `lovart_white_bg_local_path`、`lovart_scene_local_path` 或 `lovart_final_images` 复用旧的白底图和场景图。无论支持图还是详情图选择哪家供应商，失败都会保留状态供人工修复和续跑，不做自动 provider fallback。
 
 失败任务补偿策略对所有供应商组合生效，包括全 GPT Image 路由。GPT Image 服务端临时错误和 Gemini 页面控件短暂缺失会在当前队列结束后进入有上限的补偿轮次，已完成的支持图和详情屏不会重复生成。
 

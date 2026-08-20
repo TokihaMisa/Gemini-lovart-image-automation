@@ -44,7 +44,6 @@ class HighPriorityBehaviorTests(unittest.TestCase):
         )
         self.assertIn("GPT Image", Path("README.md").read_text(encoding="utf-8"))
         overview = Path("PROJECT_OVERVIEW.md").read_text(encoding="utf-8")
-        self.assertIn("/images/edits", overview)
         self.assertIn("detail_page_count_snapshot", overview)
         self.assertNotIn("生成 12 屏详情页提示词", overview)
 
@@ -79,8 +78,24 @@ class HighPriorityBehaviorTests(unittest.TestCase):
             "async_" + "edits",
             "sync fallback",
         )
-        for path, source in (("config.example.yaml", config), ("README.md", readme)):
+        overview = Path("PROJECT_OVERVIEW.md").read_text(encoding="utf-8")
+        webui_source = Path("webui.py").read_text(encoding="utf-8")
+        self.assertIn("`/v1/media/generate`", overview)
+        self.assertIn("`/v1/media/status`", overview)
+        self.assertIn("任务 ID", overview)
+        self.assertIn("GPT Image 媒体任务", webui_source)
+        for path, source in (
+            ("config.example.yaml", config),
+            ("README.md", readme),
+            ("PROJECT_OVERVIEW.md", overview),
+        ):
             self.assertTrue(all(token not in source.lower() for token in forbidden), path)
+        webui_forbidden = tuple(token for token in forbidden if token != "async_" + "edits")
+        self.assertTrue(
+            all(token not in webui_source.lower() for token in webui_forbidden),
+            "webui.py",
+        )
+        self.assertEqual(webui_source.count('pop("async_edits", None)'), 2)
 
     def test_env_or_config_prefers_environment(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": "from-env"}):

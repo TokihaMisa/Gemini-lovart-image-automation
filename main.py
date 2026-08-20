@@ -251,15 +251,8 @@ def _detail_execution_settings(provider) -> dict[str, object]:
 def _detail_fingerprint_execution_settings(
     settings: Mapping[str, object] | None,
 ) -> dict[str, object]:
-    """Treat HAPI's standard and image-only gateways as the same image backend."""
-    normalized = dict(settings or {})
-    base_url = str(normalized.get("base_url") or "").rstrip("/").lower()
-    if base_url in {
-        "https://image.hapiopen.cc",
-        "https://image.hapiopen.cc/v1",
-    }:
-        normalized["base_url"] = "https://hapiopen.cc/v1"
-    return normalized
+    """Preserve provider execution settings exactly for resume fingerprints."""
+    return dict(settings or {})
 
 
 def _support_execution_settings(provider) -> dict[str, object]:

@@ -335,23 +335,14 @@ def test_media_endpoints_strip_exactly_one_trailing_v1(base_url, create_url, sta
     assert _media_endpoint(base_url, "status", task_id="abc-123") == status_url
 
 
-def test_production_transport_has_no_legacy_protocol_fallbacks():
-    """Only the media-task transport may remain in production code."""
-    sources = {
-        path: Path(path).read_text(encoding="utf-8")
-        for path in ("openai_image_api.py", "webui.py")
-    }
-    forbidden = (
-        "/images/" + "edits",
-        "/images/" + "tasks/",
-        "_request_" + "hapi",
-        "_is_" + "hapi_image_service",
-        "async_" + "edits",
-        "sync fallback",
-    )
-
-    for path, source in sources.items():
-        assert all(token not in source.lower() for token in forbidden), path
+def test_static_backstop_allows_only_the_legacy_config_migration_boundary():
+    """Dead protocol helpers and user-facing fallback notices must not return."""
+    source = Path("openai_image_api.py").read_text(encoding="utf-8")
+    assert "def _request_" + "hapi" not in source.lower()
+    assert "def _is_" + "hapi_image_service" not in source.lower()
+    assert "/images/" + "edits" not in source.lower()
+    assert "/images/" + "tasks/" not in source.lower()
+    assert "sync fallback" not in source.lower()
 
 
 def test_build_create_body_uses_documented_json_contract():
@@ -717,6 +708,28 @@ def test_running_task_polls_same_id_then_downloads_and_reports_progress(build_op
     assert any("45%" in message and "处理中" in message and "已等待" in message and "abc123" in message for message in statuses)
     assert all("task-secret-prefix" not in message for message in statuses)
     assert isinstance(result, GeneratedImage)
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_status_service_error_never_falls_back_to_another_paid_submit(build_opener, tmp_path):
+    task_id = "task-123"
+    status_url = "https://api.lk888.ai/v1/media/status?task_id=task-123"
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(json.dumps({"task_id": task_id}).encode()),
+        HTTPError(status_url, 503, "unavailable", {}, None),
+    ]
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client(max_attempts=1).generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+        )
+
+    requests = [call.args[0] for call in build_opener.return_value.open.call_args_list]
+    assert ctx.value.code == "server_error"
+    assert [(request.method, request.full_url) for request in requests] == [
+        ("POST", "https://api.lk888.ai/v1/media/generate"),
+        ("GET", status_url),
+    ]
 
 
 @patch("openai_image_api.urllib.request.build_opener")

@@ -542,14 +542,14 @@ def test_partial_detail_failure_keeps_completed_images_and_resumes_only_missing(
     assert summary[0]["used_model"] == "gpt-image-2"
 
 
-def test_hapi_image_endpoint_switch_resumes_only_missing_detail_screen(tmp_path):
+def test_same_gateway_resume_preserves_completed_screens_and_generates_only_missing(tmp_path):
     first = run_product_pipeline(
         tmp_path,
         "openai_image",
         "openai_image",
         detail_count=4,
         fail_indexes={4},
-        openai_base_url="https://hapiopen.cc/v1",
+        openai_base_url="https://gateway.example/v1",
     )
 
     assert first.generated_indexes == (1, 2, 3)
@@ -559,12 +559,29 @@ def test_hapi_image_endpoint_switch_resumes_only_missing_detail_screen(tmp_path)
         "openai_image",
         "openai_image",
         detail_count=4,
-        openai_base_url="https://image.hapiopen.cc",
+        openai_base_url="https://gateway.example/v1",
     )
 
     assert second.generated_indexes == (4,)
     assert second.registry.providers["openai_image"].support.support_steps == []
     assert read_status(second.product_dir)["detail_completed_count"] == 4
+
+
+def test_detail_fingerprint_keeps_each_configured_gateway_distinct():
+    from main import _detail_fingerprint_execution_settings
+
+    first = _detail_fingerprint_execution_settings(
+        {"base_url": "https://gateway-one.example/v1", "model": "gpt-image-2"}
+    )
+    second = _detail_fingerprint_execution_settings(
+        {"base_url": "https://gateway-two.example/v1", "model": "gpt-image-2"}
+    )
+
+    assert first != second
+    assert first["base_url"] == "https://gateway-one.example/v1"
+    assert second["base_url"] == "https://gateway-two.example/v1"
+    source = Path("main.py").read_text(encoding="utf-8")
+    assert "ha" + "pi" not in source.lower()
 
 
 def test_openai_support_resume_finds_canonical_file_after_product_directory_moves(tmp_path):
