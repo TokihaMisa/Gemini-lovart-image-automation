@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import binascii
 from collections.abc import Mapping
 from dataclasses import dataclass
 import http.client
@@ -13,12 +12,10 @@ import json
 import math
 import os
 from pathlib import Path
-import queue
 import re
 import socket
 import ssl
 import tempfile
-import threading
 import time
 from typing import Any, Callable, Final, Sequence
 from urllib.error import HTTPError, URLError
@@ -35,6 +32,8 @@ MAX_REFERENCE_IMAGES: Final = 14
 MAX_REFERENCE_BYTES: Final = 10 * 1024 * 1024
 MAX_REFERENCE_TOTAL_BYTES: Final = 30 * 1024 * 1024
 MAX_CREATE_BODY_BYTES: Final = 50 * 1024 * 1024
+TASK_WAIT_LIMIT_SECONDS: Final = 600.0
+MAX_TASK_ID_LENGTH: Final = 128
 _VALID_RESOLUTIONS: Final = {"1K", "2K", "4K"}
 _PIXEL_SIZES_BY_RESOLUTION: Final = {
     "1K": (
@@ -112,6 +111,31 @@ class OpenAIImageAPIError(Exception):
 class GeneratedImage:
     local_path: str
     model: str
+    task: ImageTaskSnapshot | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ImageTaskSnapshot:
+    task_id: str
+    state: str
+    is_final: bool
+    task_created_at: float
+    progress: str = ""
+    status: str = ""
+    status_group: str = ""
+    result_url: str = ""
+    result_type: str = ""
+    error: str = ""
+    cost: object = None
+
+
+class ImageTaskStillRunning(OpenAIImageAPIError):
+    def __init__(self, task: ImageTaskSnapshot) -> None:
+        self.task = task
+        super().__init__(
+            "task_still_running",
+            "GPT Image task is still running on the provider; its saved task ID can be resumed.",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +327,84 @@ def _notify_status(callback: Callable[[str], None] | None, message: str) -> None
         callback(str(message))
 
 
+def _notify_task(
+    callback: Callable[[ImageTaskSnapshot], None] | None,
+    task: ImageTaskSnapshot,
+) -> None:
+    if callback is not None:
+        callback(task)
+
+
+def _normalize_task_id(value: object) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise OpenAIImageAPIError("invalid_response", "GPT Image API returned no valid task ID.")
+    task_id = str(value).strip()
+    if (
+        not task_id
+        or len(task_id) > MAX_TASK_ID_LENGTH
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", task_id) is None
+    ):
+        raise OpenAIImageAPIError("invalid_response", "GPT Image API returned no valid task ID.")
+    return task_id
+
+
+def _task_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    nested = payload.get("data")
+    return nested if isinstance(nested, Mapping) else payload
+
+
+def _task_text(value: object, *, limit: int = 500) -> str:
+    if value is None:
+        return ""
+    text = " ".join(str(value).split())
+    return text[:limit]
+
+
+def _validate_task_state(task: ImageTaskSnapshot) -> ImageTaskSnapshot:
+    if task.state in {"pending", "running"} and task.is_final is False:
+        return task
+    if task.state == "success" and task.is_final is True and task.result_url:
+        return task
+    if task.state == "failed" and task.is_final is True:
+        return task
+    raise OpenAIImageAPIError(
+        "invalid_response", "GPT Image API returned an invalid task state."
+    )
+
+
+def _validate_resume_task(task: ImageTaskSnapshot) -> ImageTaskSnapshot:
+    if not isinstance(task, ImageTaskSnapshot):
+        raise OpenAIImageAPIError("invalid_response", "Saved GPT Image task data is invalid.")
+    task_id = _normalize_task_id(task.task_id)
+    if task_id != task.task_id:
+        raise OpenAIImageAPIError("invalid_response", "Saved GPT Image task data is invalid.")
+    if not isinstance(task.is_final, bool) or not _is_valid_timestamp(task.task_created_at):
+        raise OpenAIImageAPIError("invalid_response", "Saved GPT Image task data is invalid.")
+    return _validate_task_state(task)
+
+
+def _is_valid_timestamp(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return number >= 0.0 and math.isfinite(number)
+
+
+def _task_failed_error(task: ImageTaskSnapshot, api_key: str) -> OpenAIImageAPIError:
+    provider_error = _task_text(task.error)
+    if api_key:
+        provider_error = provider_error.replace(api_key, "[redacted]")
+    message = "GPT Image task failed."
+    if provider_error:
+        message = f"{message} Provider message: {provider_error}"
+    error = OpenAIImageAPIError("task_failed", message)
+    error.task = task
+    return error
+
+
 def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
     raw_value = next(
         (value for name, value in headers.items() if name.lower() == "retry-after"),
@@ -336,6 +438,8 @@ class OpenAIImageAPI:
         output_path: str | Path,
         image_size: str = "",
         status_callback: Callable[[str], None] | None = None,
+        task_callback: Callable[[ImageTaskSnapshot], None] | None = None,
+        resume_task: ImageTaskSnapshot | None = None,
     ) -> GeneratedImage:
         images = _encode_reference_images(
             image_paths,
@@ -347,16 +451,19 @@ class OpenAIImageAPI:
             _provider_image_size(self.config.resolution, image_size),
             images,
         )
-        payload = self._request_sync_edit(
-            _media_endpoint(self.config.base_url, "generate"),
-            body,
-            "application/json",
-            status_callback=status_callback,
-        )
-        image_bytes = self._extract_image_bytes(payload, status_callback=status_callback)
-        target = Path(output_path)
-        atomic_save_validated_image(image_bytes, target)
-        return GeneratedImage(local_path=str(target), model=self.config.model)
+        if resume_task is None:
+            task = self._submit_task_once(body)
+        else:
+            task = _validate_resume_task(resume_task)
+        _notify_task(task_callback, task)
+
+        if task.state == "failed":
+            raise _task_failed_error(task, self.config.api_key)
+        if task.is_final and task.state == "success":
+            return self._download_task_result(task, output_path, status_callback)
+
+        task = self._poll_task(task, status_callback, task_callback)
+        return self._download_task_result(task, output_path, status_callback)
 
     def test_edit(self, output_dir: str | Path) -> GeneratedImage:
         directory = Path(output_dir)
@@ -423,72 +530,132 @@ class OpenAIImageAPI:
         )
         return _decode_json_response(raw_response), _retry_after_seconds(response_headers)
 
-    def _request_sync_edit(
-        self,
-        endpoint: str,
-        body: bytes,
-        content_type: str,
-        *,
-        status_callback: Callable[[str], None] | None = None,
-    ) -> dict[str, Any]:
-        _notify_status(
-            status_callback,
-            "📨 GPT Image 请求已提交，正在等待服务返回"
-            f"（最长 {_wait_limit_text(self.config.timeout)}）",
+    def _submit_task_once(self, body: bytes) -> ImageTaskSnapshot:
+        try:
+            payload = self._request_json(
+                _media_endpoint(self.config.base_url, "generate"),
+                body,
+                "application/json",
+                max_attempts=1,
+            )
+        except OpenAIImageAPIError as exc:
+            if exc.status_code is None and exc.code in {"timeout", "network"}:
+                raise OpenAIImageAPIError(
+                    "ambiguous_submission",
+                    "GPT Image task submission may have reached the provider, but no task ID was returned; automatic resubmission is disabled.",
+                ) from None
+            raise
+        task_id = _normalize_task_id(_task_payload(payload).get("task_id"))
+        return ImageTaskSnapshot(
+            task_id=task_id,
+            state="pending",
+            is_final=False,
+            task_created_at=time.time(),
         )
-        result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
 
-        def request_once() -> None:
-            try:
-                result = self._request_json(
-                    endpoint,
-                    body,
-                    content_type,
-                    max_attempts=1,
-                    status_callback=status_callback,
-                )
-            except Exception as exc:  # delivered back to the calling thread
-                result_queue.put(("error", exc))
-            else:
-                result_queue.put(("result", result))
+    def _parse_status_task(
+        self,
+        payload: Mapping[str, Any],
+        previous: ImageTaskSnapshot,
+    ) -> ImageTaskSnapshot:
+        values = _task_payload(payload)
+        task_id = _normalize_task_id(values.get("task_id"))
+        if task_id != previous.task_id:
+            raise OpenAIImageAPIError(
+                "invalid_response", "GPT Image API returned a mismatched task ID."
+            )
+        state_value = values.get("state")
+        if not isinstance(state_value, str) or not state_value.strip():
+            raise OpenAIImageAPIError(
+                "invalid_response", "GPT Image API returned no task state."
+            )
+        is_final = values.get("is_final")
+        if not isinstance(is_final, bool):
+            raise OpenAIImageAPIError(
+                "invalid_response", "GPT Image API returned no final-state flag."
+            )
+        task = ImageTaskSnapshot(
+            task_id=task_id,
+            state=state_value.strip().lower(),
+            is_final=is_final,
+            task_created_at=previous.task_created_at,
+            progress=_task_text(values.get("progress"), limit=80),
+            status=_task_text(values.get("status"), limit=160),
+            status_group=_task_text(values.get("status_group"), limit=160),
+            result_url=_task_text(values.get("result_url"), limit=4096),
+            result_type=_task_text(values.get("result_type"), limit=80),
+            error=(
+                _task_text(values.get("error")).replace(self.config.api_key, "[redacted]")
+                if self.config.api_key
+                else _task_text(values.get("error"))
+            ),
+            cost=values.get("cost"),
+        )
+        return _validate_task_state(task)
 
-        # urllib's timeout applies to individual socket operations, not to the
-        # whole response.  A provider can therefore keep a paid request alive
-        # indefinitely by periodically sending bytes.  A daemon worker lets us
-        # enforce a strict wall-clock deadline without submitting a second POST.
-        threading.Thread(
-            target=request_once,
-            name="gpt-image-sync-request",
-            daemon=True,
-        ).start()
-
+    def _poll_task(
+        self,
+        task: ImageTaskSnapshot,
+        status_callback: Callable[[str], None] | None,
+        task_callback: Callable[[ImageTaskSnapshot], None] | None,
+    ) -> ImageTaskSnapshot:
         started_at = time.monotonic()
-        deadline = started_at + float(self.config.timeout)
-        heartbeat_seconds = min(10.0, max(1.0, float(self.config.timeout) / 4))
+        deadline = started_at + TASK_WAIT_LIMIT_SECONDS
+        status_url = _media_endpoint(self.config.base_url, "status", task_id=task.task_id)
         while True:
+            if time.monotonic() >= deadline:
+                raise ImageTaskStillRunning(task)
+            payload, _retry_after = self._request_json_url(
+                status_url,
+                status_callback=status_callback,
+            )
+            task = self._parse_status_task(payload, task)
+            _notify_task(task_callback, task)
+            elapsed = max(0.0, time.monotonic() - started_at)
+            if task.state == "failed":
+                raise _task_failed_error(task, self.config.api_key)
+            if task.is_final:
+                _notify_status(status_callback, "✅ GPT Image 生成完成，正在安全下载图片")
+                return task
+
+            display = task.status or task.status_group or task.state
+            progress = f" · {task.progress}" if task.progress else ""
+            suffix = task.task_id[-6:]
+            _notify_status(
+                status_callback,
+                f"⏳ GPT Image {display}{progress} · 已等待 {int(elapsed)} 秒 · 任务 …{suffix}",
+            )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise _ambiguous_sync_submission_error()
-            try:
-                result_type, value = result_queue.get(
-                    timeout=min(heartbeat_seconds, remaining)
-                )
-            except queue.Empty:
-                _notify_status(
-                    status_callback,
-                    "⏳ GPT Image 同步请求仍在等待"
-                    f"（已等待 {_wait_limit_text(time.monotonic() - started_at)}，"
-                    f"最长 {_wait_limit_text(self.config.timeout)}）",
-                )
-                continue
+                raise ImageTaskStillRunning(task)
+            delay = 5.0 if elapsed <= 120.0 else 10.0
+            self._sleep(min(delay, remaining))
 
-            if result_type == "result":
-                return value
-            if isinstance(value, OpenAIImageAPIError):
-                if value.status_code is None and value.code in {"timeout", "network"}:
-                    raise _ambiguous_sync_submission_error() from None
-                raise value
-            raise value
+    def _download_task_result(
+        self,
+        task: ImageTaskSnapshot,
+        output_path: str | Path,
+        status_callback: Callable[[str], None] | None = None,
+    ) -> GeneratedImage:
+        task = _validate_task_state(task)
+        if task.state != "success":
+            raise OpenAIImageAPIError(
+                "invalid_response", "GPT Image task has no downloadable result."
+            )
+        resolved_url = validate_remote_image_url(task.result_url)
+        image_bytes = _download_resolved_image(
+            resolved_url,
+            self.config.timeout,
+            self.config.max_attempts,
+            lambda attempt, attempts: self._notice_retry(
+                attempt,
+                attempts,
+                status_callback=status_callback,
+            ),
+        )
+        target = Path(output_path)
+        atomic_save_validated_image(image_bytes, target)
+        return GeneratedImage(local_path=str(target), model=self.config.model, task=task)
 
     def _request_bytes(
         self,
@@ -542,40 +709,6 @@ class OpenAIImageAPI:
         )
         self._sleep(delay)
 
-    def _extract_image_bytes(
-        self,
-        payload: dict[str, Any],
-        *,
-        status_callback: Callable[[str], None] | None = None,
-    ) -> bytes:
-        data = payload.get("data")
-        if not isinstance(data, list) or not data:
-            raise OpenAIImageAPIError("invalid_response", "GPT Image API returned no image.")
-        first = data[0]
-        if not isinstance(first, dict):
-            raise OpenAIImageAPIError("invalid_response", "GPT Image API returned an invalid image.")
-        encoded = first.get("b64_json")
-        if isinstance(encoded, str) and encoded:
-            try:
-                return base64.b64decode(encoded, validate=True)
-            except (ValueError, binascii.Error):
-                raise OpenAIImageAPIError(
-                    "invalid_response", "GPT Image API returned invalid image data."
-                ) from None
-        remote_url = first.get("url")
-        if not isinstance(remote_url, str) or not remote_url:
-            raise OpenAIImageAPIError("invalid_response", "GPT Image API returned no image data.")
-        resolved_url = validate_remote_image_url(remote_url)
-        return _download_resolved_image(
-            resolved_url,
-            self.config.timeout,
-            self.config.max_attempts,
-            lambda attempt, attempts: self._notice_retry(
-                attempt,
-                attempts,
-                status_callback=status_callback,
-            ),
-        )
 
 
 def append_aspect_instruction(prompt: str, image_size: str) -> str:
@@ -1096,24 +1229,6 @@ def _transport_error(exc: BaseException) -> OpenAIImageAPIError:
     if kind is RetryKind.TRANSIENT:
         return OpenAIImageAPIError("network", "Could not reach GPT Image API.", retryable=True)
     return OpenAIImageAPIError("network", "Could not reach GPT Image API.")
-
-
-def _wait_limit_text(timeout: object) -> str:
-    total_seconds = max(1, math.ceil(float(timeout)))
-    minutes, seconds = divmod(total_seconds, 60)
-    if minutes and seconds:
-        return f"{minutes} 分 {seconds:02d} 秒"
-    if minutes:
-        return f"{minutes} 分钟"
-    return f"{seconds} 秒"
-
-
-def _ambiguous_sync_submission_error() -> OpenAIImageAPIError:
-    return OpenAIImageAPIError(
-        "ambiguous_submission",
-        "GPT Image 同步请求已提交但未收到响应，结果未知；"
-        "已停止自动重试。请先在 API 平台后台确认任务和扣费状态，再手动重试。",
-    )
 
 
 def _retry_delay(delays: Sequence[float], failed_attempt: int) -> float:

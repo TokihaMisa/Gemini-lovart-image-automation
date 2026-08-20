@@ -3,8 +3,6 @@ import io
 import json
 import socket
 import ssl
-import threading
-import time
 from dataclasses import asdict
 from pathlib import Path
 from urllib.error import HTTPError
@@ -14,6 +12,9 @@ import pytest
 from PIL import Image
 
 from openai_image_api import (
+    GeneratedImage,
+    ImageTaskSnapshot,
+    ImageTaskStillRunning,
     MAX_CREATE_BODY_BYTES,
     MAX_REFERENCE_BYTES,
     MAX_REFERENCE_IMAGES,
@@ -153,10 +154,45 @@ def make_png(path: Path) -> Path:
 
 
 def fake_png_response() -> FakeResponse:
+    return fake_task_response("https://cdn.example/result.png")
+
+
+def fake_task_response(result_url: str) -> FakeResponse:
     return FakeResponse(json.dumps({
-        "created": 1,
-        "data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}],
+        "task_id": "task-test-1",
+        "state": "success",
+        "is_final": True,
+        "result_url": result_url,
+        "result_type": "image",
     }).encode("utf-8"))
+
+
+@pytest.fixture(autouse=True)
+def stub_default_result_download(monkeypatch):
+    """Keep transport tests local while security tests use their explicit result host."""
+    import openai_image_api as module
+
+    real_validate = module.validate_remote_image_url
+    real_download = module._download_resolved_image
+    sentinel = object()
+    corrupt_sentinel = object()
+
+    def validate(url):
+        if url == "https://cdn.example/result.png":
+            return sentinel
+        if url == "https://cdn.example/corrupt.png":
+            return corrupt_sentinel
+        return real_validate(url)
+
+    def download(resolved, timeout, max_attempts, notice_retry):
+        if resolved is sentinel:
+            return base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
+        if resolved is corrupt_sentinel:
+            return b"not an image"
+        return real_download(resolved, timeout, max_attempts, notice_retry)
+
+    monkeypatch.setattr(module, "validate_remote_image_url", validate)
+    monkeypatch.setattr(module, "_download_resolved_image", download)
 
 
 def make_client(*, sleep=None, **overrides) -> OpenAIImageAPI:
@@ -514,7 +550,7 @@ def test_generate_edit_posts_json_create_body_and_saves_b64_png(build_opener, tm
         image_size="4:5",
     )
 
-    request = build_opener.return_value.open.call_args.args[0]
+    request = build_opener.return_value.open.call_args_list[0].args[0]
     body = request.data
     assert request.full_url == "https://api.lk888.ai/v1/media/generate"
     assert request.get_header("Authorization") == "Bearer test-key"
@@ -538,230 +574,288 @@ def test_generate_edit_posts_json_create_body_and_saves_b64_png(build_opener, tm
     assert build_opener.return_value.open.call_args.kwargs == {"timeout": 12.5}
 
 
+@pytest.mark.parametrize("create_payload", [{"task_id": " t-1 "}, {"data": {"task_id": 42}}])
 @patch("openai_image_api.urllib.request.build_opener")
-@pytest.mark.skip(reason="HAPI multipart async protocol was removed")
-def test_generate_edit_uses_provider_root_without_inserting_v1(build_opener, tmp_path):
+def test_create_normalizes_root_or_nested_task_id_and_persists_before_poll(
+    build_opener, create_payload, tmp_path
+):
+    callbacks = []
     build_opener.return_value.open.side_effect = [
+        FakeResponse(json.dumps(create_payload).encode()),
         FakeResponse(json.dumps({
-            "task_id": "imgtask_test123",
-            "status": "processing",
-            "poll_url": "/images/tasks/imgtask_test123",
-        }).encode("utf-8"), status=202),
-        FakeResponse(json.dumps({
-            "task_id": "imgtask_test123",
-            "status": "completed",
-            "result": {
-                "data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}],
-            },
-        }).encode("utf-8")),
+            "task_id": "t-1" if isinstance(create_payload["task_id"] if "task_id" in create_payload else create_payload["data"]["task_id"], str) else "42",
+            "state": "success",
+            "is_final": True,
+            "result_url": "https://cdn.example/result.png",
+            "result_type": "image",
+        }).encode()),
     ]
 
-    sleeps = []
-    make_client(
-        base_url="https://image.hapiopen.cc",
-        sleep=sleeps.append,
-        async_edits=True,
-    ).generate_edit(
-        "prompt",
-        [make_png(tmp_path / "source.png")],
-        tmp_path / "out.png",
-    )
-
-    submit = build_opener.return_value.open.call_args_list[0].args[0]
-    poll = build_opener.return_value.open.call_args_list[1].args[0]
-    assert submit.full_url == "https://image.hapiopen.cc/images/edits/async"
-    assert submit.method == "POST"
-    assert b'name="image"; filename="source.png"' in submit.data
-    assert b'name="image[]"' not in submit.data
-    assert poll.full_url == "https://image.hapiopen.cc/images/tasks/imgtask_test123"
-    assert poll.method == "GET"
-    assert poll.get_header("Authorization") == "Bearer test-key"
-    assert sleeps == []
-
-
-@patch("openai_image_api.urllib.request.build_opener")
-@pytest.mark.skip(reason="HAPI multipart async protocol was removed")
-def test_hapi_main_root_async_edit_inserts_documented_v1_image_path(build_opener, tmp_path):
-    build_opener.return_value.open.side_effect = [
-        FakeResponse(json.dumps({
-            "task_id": "imgtask_mainroot",
-            "status": "processing",
-        }).encode("utf-8"), status=202),
-        FakeResponse(json.dumps({
-            "task_id": "imgtask_mainroot",
-            "status": "completed",
-            "result": {"data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}]},
-        }).encode("utf-8")),
-    ]
-
-    make_client(
-        base_url="https://hapiopen.cc",
-        async_edits=True,
-    ).generate_edit(
-        "prompt",
-        [make_png(tmp_path / "source.png")],
-        tmp_path / "out.png",
+    result = make_client(max_attempts=4).generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png",
+        task_callback=callbacks.append,
     )
 
     requests = [call.args[0] for call in build_opener.return_value.open.call_args_list]
-    assert requests[0].full_url == "https://hapiopen.cc/v1/images/edits/async"
-    assert requests[1].full_url == "https://hapiopen.cc/v1/images/tasks/imgtask_mainroot"
+    assert [request.method for request in requests] == ["POST", "GET"]
+    assert callbacks[0].state == "pending"
+    assert callbacks[0].task_id in {"t-1", "42"}
+    assert "test-key" not in repr(callbacks[0])
+    assert "test-key" not in json.dumps(asdict(callbacks[0]))
+    assert result.task.state == "success"
+
+
+@pytest.mark.parametrize(
+    ("side_effect", "expected_code"),
+    [
+        (socket.timeout("submitted but response lost"), "ambiguous_submission"),
+        (HTTPError("https://api.lk888.ai/v1/media/generate", 400, "bad", {}, None), "invalid_request"),
+    ],
+)
+@patch("openai_image_api.urllib.request.build_opener")
+def test_create_failure_never_repeats_paid_post(build_opener, side_effect, expected_code, tmp_path):
+    build_opener.return_value.open.side_effect = side_effect
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client(max_attempts=4).generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+        )
+
+    assert ctx.value.code == expected_code
+    assert ctx.value.retryable is False
+    assert build_opener.return_value.open.call_count == 1
+
+
+@pytest.mark.parametrize("payload", [b"not-json", b"{}", b'{"task_id":"bad/id"}', json.dumps({"task_id": "x" * 129}).encode()])
+@patch("openai_image_api.urllib.request.build_opener")
+def test_invalid_create_response_does_not_poll_or_resubmit(build_opener, payload, tmp_path):
+    build_opener.return_value.open.return_value = FakeResponse(payload)
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client().generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+        )
+
+    assert ctx.value.code == "invalid_response"
+    assert build_opener.return_value.open.call_count == 1
 
 
 @patch("openai_image_api.urllib.request.build_opener")
-@pytest.mark.skip(reason="HAPI multipart async protocol was removed")
-def test_hapi_async_edit_polls_processing_task_without_resubmitting(build_opener, tmp_path):
-    processing_response = FakeResponse(json.dumps({
-        "task_id": "imgtask_slow456",
-        "status": "processing",
-    }).encode("utf-8"))
-    processing_response.headers["Retry-After"] = "5"
-    build_opener.return_value.open.side_effect = [
-        FakeResponse(json.dumps({
-            "task_id": "imgtask_slow456",
-            "status": "processing",
-            "poll_url": "/images/tasks/imgtask_slow456",
-        }).encode("utf-8"), status=202),
-        processing_response,
-        FakeResponse(json.dumps({
-            "task_id": "imgtask_slow456",
-            "status": "completed",
-            "result": {
-                "data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}],
-            },
-        }).encode("utf-8")),
-    ]
-    sleeps = []
+def test_running_task_polls_same_id_then_downloads_and_reports_progress(build_opener, tmp_path):
+    task_id = "task-secret-prefix-abc123"
+    callbacks = []
     statuses = []
+    sleeps = []
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(json.dumps({"task_id": task_id}).encode()),
+        FakeResponse(json.dumps({
+            "task_id": task_id, "state": "running", "is_final": False,
+            "progress": "45%", "status": "处理中",
+        }).encode()),
+        FakeResponse(json.dumps({
+            "task_id": task_id, "state": "success", "is_final": True,
+            "result_url": "https://cdn.example/result.png", "result_type": "image",
+        }).encode()),
+    ]
 
-    result = make_client(
-        base_url="https://image.hapiopen.cc",
-        sleep=sleeps.append,
-        async_edits=True,
-    ).generate_edit(
-        "prompt",
-        [make_png(tmp_path / "source.png")],
-        tmp_path / "out.png",
-        status_callback=statuses.append,
+    result = make_client(sleep=sleeps.append).generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png",
+        status_callback=statuses.append, task_callback=callbacks.append,
     )
 
     requests = [call.args[0] for call in build_opener.return_value.open.call_args_list]
     assert [request.method for request in requests] == ["POST", "GET", "GET"]
-    assert sum(request.full_url.endswith("/images/edits/async") for request in requests) == 1
+    assert all(requests[index].full_url.endswith("task_id=task-secret-prefix-abc123") for index in (1, 2))
     assert sleeps == [5.0]
-    assert statuses == [
-        "📨 GPT Image 任务已提交，正在等待生成",
-        "⏳ GPT Image 正在生成（状态检查 1/4）",
-        "✅ GPT Image 生成完成，正在保存图片",
-    ]
-    assert result.local_path == str(tmp_path / "out.png")
+    assert [task.state for task in callbacks] == ["pending", "running", "success"]
+    assert any("45%" in message and "处理中" in message and "已等待" in message and "abc123" in message for message in statuses)
+    assert all("task-secret-prefix" not in message for message in statuses)
+    assert isinstance(result, GeneratedImage)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"task_id": "wrong", "state": "running", "is_final": False},
+        {"task_id": "t-1", "state": "running"},
+        {"task_id": "t-1", "is_final": False},
+        {"task_id": "t-1", "state": "success", "is_final": False, "result_url": "https://cdn.example/result.png"},
+        {"task_id": "t-1", "state": "success", "is_final": True},
+        {"task_id": "t-1", "state": "failed", "is_final": False},
+    ],
+)
 @patch("openai_image_api.urllib.request.build_opener")
-@pytest.mark.skip(reason="HAPI multipart async protocol was removed")
-def test_hapi_async_edit_surfaces_failed_task_reason(build_opener, tmp_path):
+def test_invalid_poll_state_is_terminal_without_resubmission(build_opener, payload, tmp_path):
     build_opener.return_value.open.side_effect = [
-        FakeResponse(json.dumps({
-            "task_id": "imgtask_failed789",
-            "status": "processing",
-            "poll_url": "/images/tasks/imgtask_failed789",
-        }).encode("utf-8"), status=202),
-        FakeResponse(json.dumps({
-            "task_id": "imgtask_failed789",
-            "status": "failed",
-            "http_status": 503,
-            "error": {"message": "upstream image model unavailable"},
-        }).encode("utf-8")),
+        FakeResponse(b'{"task_id":"t-1"}'),
+        FakeResponse(json.dumps(payload).encode()),
     ]
 
     with pytest.raises(OpenAIImageAPIError) as ctx:
-        make_client(
-            base_url="https://image.hapiopen.cc",
-            async_edits=True,
-        ).generate_edit(
-            "prompt",
-            [make_png(tmp_path / "source.png")],
-            tmp_path / "out.png",
+        make_client().generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
         )
 
-    assert ctx.value.code == "server_error"
-    assert ctx.value.status_code == 503
-    assert "upstream image model unavailable" in str(ctx.value)
+    assert ctx.value.code == "invalid_response"
+    assert [call.args[0].method for call in build_opener.return_value.open.call_args_list] == ["POST", "GET"]
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_final_failed_task_is_terminal_sanitized_and_not_resubmitted(build_opener, tmp_path):
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(b'{"task_id":"t-1"}'),
+        FakeResponse(json.dumps({
+            "task_id": "t-1", "state": "failed", "is_final": True,
+            "error": "provider rejected task\nBearer test-key", "cost": 0,
+        }).encode()),
+    ]
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client().generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+        )
+
+    assert ctx.value.code == "task_failed"
+    assert ctx.value.retryable is False
+    assert "provider rejected task" in str(ctx.value)
+    assert "test-key" not in str(ctx.value)
+    assert "test-key" not in repr(ctx.value.task)
+    assert ctx.value.task.cost == 0
     assert build_opener.return_value.open.call_count == 2
 
 
+@patch("openai_image_api.time.monotonic")
 @patch("openai_image_api.urllib.request.build_opener")
-@pytest.mark.skip(reason="HAPI multipart async protocol was removed")
-def test_hapi_async_disabled_falls_back_to_sync_once_per_client(build_opener, tmp_path):
-    build_opener.return_value.open.side_effect = [
-        HTTPError(
-            "https://image.hapiopen.cc/images/edits/async",
-            404,
-            "async image tasks are not enabled",
-            {},
-            None,
-        ),
-        fake_png_response(),
-        fake_png_response(),
-    ]
-    statuses = []
-    client = make_client(
-        base_url="https://image.hapiopen.cc",
-        async_edits=True,
-    )
-    source = make_png(tmp_path / "source.png")
+def test_polling_uses_five_seconds_through_120_then_ten(build_opener, monotonic, tmp_path):
+    now = [0.0]
+    monotonic.side_effect = lambda: now[0]
+    sleeps = []
 
-    client.generate_edit(
-        "first",
-        [source],
-        tmp_path / "first.png",
-        status_callback=statuses.append,
+    def sleep(delay):
+        sleeps.append(delay)
+        now[0] += delay
+
+    running = FakeResponse(b'{"task_id":"t-1","state":"running","is_final":false}')
+    success = FakeResponse(b'{"task_id":"t-1","state":"success","is_final":true,"result_url":"https://cdn.example/result.png","result_type":"image"}')
+    build_opener.return_value.open.side_effect = [FakeResponse(b'{"task_id":"t-1"}')] + [running] * 26 + [success]
+
+    make_client(sleep=sleep).generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
     )
-    client.generate_edit(
-        "second",
-        [source],
-        tmp_path / "second.png",
-        status_callback=statuses.append,
+
+    assert sleeps[:25] == [5.0] * 25
+    assert sleeps[24] == 5.0
+    assert sleeps[25] == 10.0
+
+
+@patch("openai_image_api.time.monotonic")
+@patch("openai_image_api.urllib.request.build_opener")
+def test_600_second_deadline_raises_last_snapshot_without_new_post(build_opener, monotonic, tmp_path):
+    now = [0.0]
+    monotonic.side_effect = lambda: now[0]
+    callbacks = []
+
+    def sleep(delay):
+        now[0] += delay
+
+    build_opener.return_value.open.side_effect = [FakeResponse(b'{"task_id":"t-1"}')] + [
+        FakeResponse(b'{"task_id":"t-1","state":"running","is_final":false,"progress":"45%"}')
+    ] * 80
+
+    with pytest.raises(ImageTaskStillRunning) as ctx:
+        make_client(sleep=sleep).generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png",
+            task_callback=callbacks.append,
+        )
+
+    assert now[0] == 600.0
+    assert ctx.value.task == callbacks[-1]
+    assert ctx.value.task.progress == "45%"
+    assert sum(call.args[0].method == "POST" for call in build_opener.return_value.open.call_args_list) == 1
+
+
+@pytest.mark.parametrize("failure", [socket.timeout("slow"), HTTPError("url", 429, "busy", {}, None), HTTPError("url", 503, "down", {}, None)])
+@patch("openai_image_api.urllib.request.build_opener")
+def test_poll_transient_errors_retry_get_only(build_opener, failure, tmp_path):
+    sleeps = []
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(b'{"task_id":"t-1"}'), failure,
+        FakeResponse(b'{"task_id":"t-1","state":"success","is_final":true,"result_url":"https://cdn.example/result.png","result_type":"image"}'),
+    ]
+
+    make_client(sleep=sleeps.append, max_attempts=2, retry_delays=(0.25,)).generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
     )
 
     requests = [call.args[0] for call in build_opener.return_value.open.call_args_list]
-    assert [request.full_url for request in requests] == [
-        "https://image.hapiopen.cc/images/edits/async",
-        "https://image.hapiopen.cc/images/edits",
-        "https://image.hapiopen.cc/images/edits",
-    ]
-    assert all(b'name="image";' in request.data for request in requests)
-    assert statuses.count("↩️ HAPI 未启用异步任务，已切换为同步生成") == 1
+    assert [request.method for request in requests] == ["POST", "GET", "GET"]
+    assert requests[1].full_url == requests[2].full_url
+    assert sleeps == [0.25]
 
 
 @patch("openai_image_api.urllib.request.build_opener")
-@pytest.mark.skip(reason="HAPI multipart async protocol was removed")
-def test_hapi_multiple_reference_images_are_uploaded_as_one_contact_sheet(
-    build_opener,
-    tmp_path,
-):
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "task_id": "imgtask_contactsheet",
-        "status": "completed",
-        "result": {"data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}]},
-    }).encode("utf-8"), status=202)
-    first = make_png(tmp_path / "first.png")
-    second = make_png(tmp_path / "second.png")
+def test_poll_permanent_error_is_not_retried_or_resubmitted(build_opener, tmp_path):
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(b'{"task_id":"t-1"}'),
+        HTTPError("url", 401, "denied", {}, None),
+    ]
 
-    make_client(
-        base_url="https://image.hapiopen.cc",
-        async_edits=True,
-        merge_reference_images=True,
-    ).generate_edit(
-        "prompt",
-        [first, second],
-        tmp_path / "out.png",
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client(max_attempts=4).generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
+        )
+
+    assert ctx.value.code == "authentication"
+    assert [call.args[0].method for call in build_opener.return_value.open.call_args_list] == ["POST", "GET"]
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_resume_running_skips_create_and_uses_fresh_local_deadline(build_opener, tmp_path):
+    build_opener.return_value.open.return_value = FakeResponse(b'{"task_id":"t-1","state":"success","is_final":true,"result_url":"https://cdn.example/result.png","result_type":"image"}')
+    resume = ImageTaskSnapshot("t-1", "running", False, 1787200000.0)
+
+    result = make_client().generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png", resume_task=resume
     )
 
-    request = build_opener.return_value.open.call_args.args[0]
-    assert request.data.count(b'name="image"; filename=') == 1
-    assert b'merged-reference-sheet-' in request.data
-    assert b'name="image[]"' not in request.data
+    request = build_opener.return_value.open.call_args_list[0].args[0]
+    assert request.method == "GET"
+    assert result.task.state == "success"
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_resume_success_redownloads_missing_or_corrupt_output_without_api_requests(build_opener, tmp_path):
+    target = tmp_path / "out.png"
+    target.write_bytes(b"corrupt")
+    resume = ImageTaskSnapshot(
+        "t-1", "success", True, 1787200000.0,
+        result_url="https://cdn.example/result.png", result_type="image",
+    )
+    callbacks = []
+
+    result = make_client().generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], target,
+        resume_task=resume, task_callback=callbacks.append,
+    )
+
+    build_opener.assert_not_called()
+    assert callbacks == [resume]
+    assert result.task == resume
+    with Image.open(target) as image:
+        image.verify()
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_resume_failed_is_terminal_without_network(build_opener, tmp_path):
+    resume = ImageTaskSnapshot("t-1", "failed", True, 1787200000.0, error="provider rejected task")
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client().generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png", resume_task=resume
+        )
+
+    assert ctx.value.code == "task_failed"
+    build_opener.assert_not_called()
 
 
 @patch("openai_image_api.urllib.request.build_opener")
@@ -777,7 +871,7 @@ def test_multiple_reference_images_remain_separate_data_urls(
         tmp_path / "out.png",
     )
 
-    request = build_opener.return_value.open.call_args.args[0]
+    request = build_opener.return_value.open.call_args_list[0].args[0]
     assert len(json.loads(request.data)["params"]["images"]) == 2
 
 
@@ -811,7 +905,7 @@ def test_media_create_uses_documented_pixel_sizes(
         image_size=image_size,
     )
 
-    request = build_opener.return_value.open.call_args.args[0]
+    request = build_opener.return_value.open.call_args_list[0].args[0]
     assert request.full_url == "https://api.lk888.ai/v1/media/generate"
     assert expected_size in request.data
     assert request.get_header("Content-type") == "application/json"
@@ -830,7 +924,7 @@ def test_merge_switch_encodes_one_contact_sheet_data_url(build_opener, tmp_path)
         tmp_path / "out.png",
     )
 
-    request = build_opener.return_value.open.call_args.args[0]
+    request = build_opener.return_value.open.call_args_list[0].args[0]
     images = json.loads(request.data)["params"]["images"]
     assert len(images) == 1
     assert images[0].startswith("data:image/png;base64,")
@@ -875,60 +969,9 @@ def test_generate_edit_uses_redirect_rejecting_transport_for_authenticated_post(
     )
 
     assert result.local_path == str(tmp_path / "out.png")
-    request = build_opener.return_value.open.call_args.args[0]
+    request = build_opener.return_value.open.call_args_list[0].args[0]
     assert request.get_header("Authorization") == "Bearer test-key"
     assert build_opener.return_value.open.call_args.kwargs == {"timeout": 12.5}
-
-
-@patch("openai_image_api.urllib.request.build_opener")
-def test_sync_edit_timeout_is_not_retried_and_reports_wait_limit(build_opener, tmp_path):
-    """Fails if an ambiguous timeout can submit the same paid edit more than once."""
-    build_opener.return_value.open.side_effect = socket.timeout("provider stalled")
-    statuses = []
-
-    with pytest.raises(OpenAIImageAPIError) as ctx:
-        make_client(max_attempts=4).generate_edit(
-            "prompt",
-            [make_png(tmp_path / "source.png")],
-            tmp_path / "out.png",
-            status_callback=statuses.append,
-        )
-
-    assert ctx.value.code == "ambiguous_submission"
-    assert "已停止自动重试" in str(ctx.value)
-    assert build_opener.return_value.open.call_count == 1
-    assert statuses == [
-        "📨 GPT Image 请求已提交，正在等待服务返回（最长 13 秒）"
-    ]
-
-
-@patch("openai_image_api.urllib.request.build_opener")
-def test_sync_edit_enforces_wall_clock_deadline_when_response_never_finishes(
-    build_opener,
-    tmp_path,
-):
-    """Fails if socket activity can keep a paid synchronous edit waiting forever."""
-    release_response = threading.Event()
-
-    def stalled_response(*_args, **_kwargs):
-        release_response.wait(1.0)
-        return fake_png_response()
-
-    build_opener.return_value.open.side_effect = stalled_response
-    started = time.monotonic()
-    try:
-        with pytest.raises(OpenAIImageAPIError) as ctx:
-            make_client(timeout=0.05, max_attempts=4).generate_edit(
-                "prompt",
-                [make_png(tmp_path / "source.png")],
-                tmp_path / "out.png",
-            )
-    finally:
-        release_response.set()
-
-    assert time.monotonic() - started < 0.5
-    assert ctx.value.code == "ambiguous_submission"
-    assert build_opener.return_value.open.call_count == 1
 
 
 @patch("openai_image_api.urllib.request.build_opener")
@@ -1066,10 +1109,9 @@ def test_generate_edit_pins_public_result_connection_and_preserves_https_identit
     getaddrinfo.return_value = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 8443)),
     ]
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "created": 1,
-        "data": [{"url": "https://images.example.test:8443/generated.png?sig=opaque"}],
-    }).encode("utf-8"))
+    build_opener.return_value.open.return_value = fake_task_response(
+        "https://images.example.test:8443/generated.png?sig=opaque"
+    )
 
     result = make_client().generate_edit(
         "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
@@ -1113,9 +1155,9 @@ def test_result_download_does_not_follow_changed_dns_answer_to_private_address(
         [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
         [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))],
     ]
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "data": [{"url": "https://images.example.test/generated.png"}],
-    }).encode("utf-8"))
+    build_opener.return_value.open.return_value = fake_task_response(
+        "https://images.example.test/generated.png"
+    )
 
     make_client().generate_edit(
         "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
@@ -1149,9 +1191,9 @@ def test_result_download_tries_only_prevalidated_addresses_and_closes_failures(
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.35", 443)),
     ]
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "data": [{"url": "https://images.example.test/generated.png"}],
-    }).encode("utf-8"))
+    build_opener.return_value.open.return_value = fake_task_response(
+        "https://images.example.test/generated.png"
+    )
 
     make_client(
         sleep=sleep_calls.append,
@@ -1162,7 +1204,7 @@ def test_result_download_tries_only_prevalidated_addresses_and_closes_failures(
     )
 
     assert getaddrinfo.call_count == 1
-    assert build_opener.return_value.open.call_count == 1
+    assert build_opener.return_value.open.call_count == 2
     assert sleep_calls == [0.25]
     assert first_socket.connected_to == ("93.184.216.34", 443)
     assert second_socket.connected_to == ("93.184.216.35", 443)
@@ -1193,9 +1235,9 @@ def test_result_download_retries_timeout_without_repeating_edit_or_dns(
     getaddrinfo.return_value = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
     ]
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "data": [{"url": "https://images.example.test/generated.png"}],
-    }).encode("utf-8"))
+    build_opener.return_value.open.return_value = fake_task_response(
+        "https://images.example.test/generated.png"
+    )
 
     make_client(
         sleep=sleep_calls.append,
@@ -1205,7 +1247,7 @@ def test_result_download_retries_timeout_without_repeating_edit_or_dns(
         "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
     )
 
-    assert build_opener.return_value.open.call_count == 1
+    assert build_opener.return_value.open.call_count == 2
     assert getaddrinfo.call_count == 1
     assert sleep_calls == [0.25]
     assert timed_out_socket.connected_to == ("93.184.216.34", 443)
@@ -1238,9 +1280,9 @@ def test_result_download_retries_429_then_succeeds_without_repeating_edit(
     getaddrinfo.return_value = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
     ]
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "data": [{"url": "https://images.example.test/generated.png"}],
-    }).encode("utf-8"))
+    build_opener.return_value.open.return_value = fake_task_response(
+        "https://images.example.test/generated.png"
+    )
 
     make_client(
         sleep=sleep_calls.append,
@@ -1250,7 +1292,7 @@ def test_result_download_retries_429_then_succeeds_without_repeating_edit(
         "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
     )
 
-    assert build_opener.return_value.open.call_count == 1
+    assert build_opener.return_value.open.call_count == 2
     assert getaddrinfo.call_count == 1
     assert sleep_calls == [0.25]
     assert rate_limited_socket.was_closed
@@ -1279,9 +1321,9 @@ def test_result_download_exhausts_recoverable_5xx_with_exact_policy(
     getaddrinfo.return_value = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
     ]
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "data": [{"url": "https://images.example.test/generated.png"}],
-    }).encode("utf-8"))
+    build_opener.return_value.open.return_value = fake_task_response(
+        "https://images.example.test/generated.png"
+    )
 
     with pytest.raises(OpenAIImageAPIError) as ctx:
         make_client(
@@ -1294,7 +1336,7 @@ def test_result_download_exhausts_recoverable_5xx_with_exact_policy(
 
     assert ctx.value.code == "server_error"
     assert ctx.value.status_code == 502
-    assert build_opener.return_value.open.call_count == 1
+    assert build_opener.return_value.open.call_count == 2
     assert getaddrinfo.call_count == 1
     assert sleep_calls == [0.25, 0.5]
     assert all(sock.was_closed for sock in response_sockets)
@@ -1325,9 +1367,9 @@ def test_result_download_does_not_retry_permanent_http_status(
     getaddrinfo.return_value = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
     ]
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "data": [{"url": "https://images.example.test/generated.png"}],
-    }).encode("utf-8"))
+    build_opener.return_value.open.return_value = fake_task_response(
+        "https://images.example.test/generated.png"
+    )
 
     with pytest.raises(OpenAIImageAPIError) as ctx:
         make_client(
@@ -1339,7 +1381,7 @@ def test_result_download_does_not_retry_permanent_http_status(
         )
 
     assert ctx.value.code == "invalid_response"
-    assert build_opener.return_value.open.call_count == 1
+    assert build_opener.return_value.open.call_count == 2
     assert getaddrinfo.call_count == 1
     assert sleep_calls == []
     assert failed_socket.was_closed
@@ -1363,9 +1405,9 @@ def test_result_download_rejects_peer_mismatch_and_closes_connection(
     getaddrinfo.return_value = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
     ]
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "data": [{"url": "https://images.example.test/generated.png"}],
-    }).encode("utf-8"))
+    build_opener.return_value.open.return_value = fake_task_response(
+        "https://images.example.test/generated.png"
+    )
 
     with pytest.raises(OpenAIImageAPIError) as ctx:
         make_client().generate_edit(
@@ -1421,9 +1463,9 @@ def test_generate_edit_rejects_invalid_result_download_contract(
     getaddrinfo.return_value = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
     ]
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "data": [{"url": "https://images.example.test/generated.png"}],
-    }).encode("utf-8"))
+    build_opener.return_value.open.return_value = fake_task_response(
+        "https://images.example.test/generated.png"
+    )
 
     with pytest.raises(OpenAIImageAPIError) as ctx:
         make_client().generate_edit(
@@ -1456,9 +1498,9 @@ def test_http_ipv6_result_uses_pinned_literal_and_original_idna_authority(
         "",
         ("2606:2800:220:1:248:1893:25c8:1946", 8080, 0, 0),
     )]
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "data": [{"url": "http://b\u00fccher.example:8080/generated.png"}],
-    }).encode("utf-8"))
+    build_opener.return_value.open.return_value = fake_task_response(
+        "http://b\u00fccher.example:8080/generated.png"
+    )
 
     make_client().generate_edit(
         "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
@@ -1514,9 +1556,7 @@ def test_https_ipv6_literal_preserves_bracketed_host_authority(
     getaddrinfo.return_value = [
         (socket.AF_INET6, socket.SOCK_STREAM, 6, "", (ipv6, port, 0, 0)),
     ]
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "data": [{"url": remote_url}],
-    }).encode("utf-8"))
+    build_opener.return_value.open.return_value = fake_task_response(remote_url)
 
     make_client().generate_edit(
         "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
@@ -1542,9 +1582,9 @@ def test_result_download_closes_raw_socket_when_tls_wrap_fails(
     getaddrinfo.return_value = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
     ]
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "data": [{"url": "https://images.example.test/generated.png"}],
-    }).encode("utf-8"))
+    build_opener.return_value.open.return_value = fake_task_response(
+        "https://images.example.test/generated.png"
+    )
 
     with pytest.raises(OpenAIImageAPIError) as ctx:
         make_client().generate_edit(
@@ -1572,9 +1612,9 @@ def test_downloaded_invalid_image_reaches_decode_rejection_after_cleanup(
     getaddrinfo.return_value = [
         (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
     ]
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "data": [{"url": "https://images.example.test/generated.png"}],
-    }).encode("utf-8"))
+    build_opener.return_value.open.return_value = fake_task_response(
+        "https://images.example.test/generated.png"
+    )
 
     with pytest.raises(OpenAIImageAPIError) as ctx:
         make_client().generate_edit(
@@ -1619,10 +1659,9 @@ def test_generate_edit_does_not_replace_existing_output_with_invalid_image(build
     destination = tmp_path / "out.png"
     original = b"existing-output-must-survive"
     destination.write_bytes(original)
-    build_opener.return_value.open.return_value = FakeResponse(json.dumps({
-        "created": 1,
-        "data": [{"b64_json": base64.b64encode(b"not an image").decode("ascii")}],
-    }).encode("utf-8"))
+    build_opener.return_value.open.return_value = fake_task_response(
+        "https://cdn.example/corrupt.png"
+    )
 
     with pytest.raises(OpenAIImageAPIError) as ctx:
         make_client().generate_edit(
@@ -1642,6 +1681,6 @@ def test_test_edit_uses_a_real_png_fixture_and_returns_saved_image(build_opener,
 
     assert Path(result.local_path).parent == tmp_path
     assert Path(result.local_path).is_file()
-    request = build_opener.return_value.open.call_args.args[0]
+    request = build_opener.return_value.open.call_args_list[0].args[0]
     assert request.full_url == "https://api.lk888.ai/v1/media/generate"
     assert len(json.loads(request.data)["params"]["images"]) == 1
