@@ -235,6 +235,28 @@ def test_support_wait_timeout_retains_running_checkpoint(tmp_path: Path):
     assert result.task_id_suffix == "ask-live"
 
 
+def test_provider_result_propagates_stable_error_code_without_unsanitized_details(
+    tmp_path: Path,
+):
+    from image_providers import OpenAIImageProvider
+    from openai_image_api import OpenAIImageAPIError
+
+    class AmbiguousAPI(CheckpointingOpenAIAPI):
+        def generate_edit(self, **_kwargs):
+            raise OpenAIImageAPIError(
+                "ambiguous_submission",
+                "safe localized display text",
+            )
+
+    result = OpenAIImageProvider(AmbiguousAPI(())).generate_support_image(
+        support_request(tmp_path, input_fingerprint="support-input")
+    )
+
+    assert result.succeeded is False
+    assert result.error == "safe localized display text"
+    assert result.raw_result == {"error_code": "ambiguous_submission"}
+
+
 def test_support_poll_exception_preserves_running_task_for_zero_create_resume(
     tmp_path: Path,
 ):

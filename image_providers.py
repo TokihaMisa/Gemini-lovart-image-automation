@@ -20,6 +20,7 @@ from openai_image_api import (
     GeneratedImage,
     ImageTaskSnapshot,
     ImageTaskStillRunning,
+    OpenAIImageAPIError,
     _provider_image_size,
     append_aspect_instruction,
     normalize_openai_image_base_url,
@@ -350,6 +351,7 @@ class OpenAIImageProvider:
                 succeeded=False,
                 still_running=True,
                 task_id_suffix=safe_task_display_token(exc.task.task_id),
+                raw_result={"error_code": exc.code},
             )
         except Exception as exc:
             exception_task = getattr(exc, "task", None)
@@ -359,6 +361,7 @@ class OpenAIImageProvider:
                 else last_task
             )
             safe_error = _sanitized_provider_error(self.api, exc)
+            error_code = _stable_provider_error_code(exc)
             if (
                 isinstance(task, ImageTaskSnapshot)
                 and task.is_final
@@ -386,6 +389,7 @@ class OpenAIImageProvider:
             return ImageProviderResult(
                 succeeded=False,
                 error=safe_error,
+                raw_result={"error_code": error_code} if error_code else None,
                 task_id_suffix=(
                     safe_task_display_token(task.task_id)
                     if isinstance(task, ImageTaskSnapshot)
@@ -441,6 +445,7 @@ class OpenAIImageProvider:
         errors: list[str] = []
         still_running = False
         last_task_suffix = ""
+        last_error_code = ""
         config = getattr(self.api, "config", None)
         used_model = str(
             getattr(config, "model", "gpt-image-2") or "gpt-image-2"
@@ -515,10 +520,12 @@ class OpenAIImageProvider:
             except ImageTaskStillRunning as exc:
                 persist(exc.task)
                 still_running = True
+                last_error_code = exc.code
                 last_task_suffix = safe_task_display_token(exc.task.task_id)
                 break
             except Exception as exc:
                 failed.append(screen.index)
+                last_error_code = _stable_provider_error_code(exc)
                 safe_error = _sanitized_provider_error(self.api, exc)
                 errors.append(f"screen {screen.index}: {safe_error}")
                 exception_task = getattr(exc, "task", None)
@@ -600,6 +607,11 @@ class OpenAIImageProvider:
             failed_indexes=tuple(failed),
             partial_complete=0 < completed_count < request.target_count,
             error="; ".join(errors),
+            raw_result=(
+                {"error_code": last_error_code}
+                if last_error_code
+                else None
+            ),
             still_running=still_running,
             task_id_suffix=last_task_suffix,
         )
@@ -942,6 +954,12 @@ def _sanitized_provider_error(api: object, exc: BaseException) -> str:
     if api_key:
         message = message.replace(api_key, "[redacted]")
     return message
+
+
+def _stable_provider_error_code(exc: BaseException) -> str:
+    if not isinstance(exc, OpenAIImageAPIError):
+        return ""
+    return str(exc.code or "")
 
 
 def _sanitized_task_text(api: object, value: object) -> str:

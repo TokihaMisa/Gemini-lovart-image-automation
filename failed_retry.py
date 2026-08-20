@@ -100,6 +100,30 @@ _CATEGORY_MARKERS = (
     ),
 )
 
+_PERMANENT_FAILURE_CODES = frozenset(
+    {
+        "ambiguous_submission",
+        "task_still_running",
+        "authentication",
+        "missing_key",
+        "invalid_base_url",
+        "invalid_request",
+        "missing_input_image",
+        "reference_image_too_large",
+        "reference_total_too_large",
+        "create_body_too_large",
+        "tls_certificate",
+    }
+)
+
+_FAILURE_CODE_CATEGORIES = {
+    "network": "network",
+    "server_error": "network",
+    "rate_limit": "network",
+    "timeout": "timeout",
+    "task_failed": "other",
+}
+
 
 def normalize_retry_mode(value) -> str:
     mode = str(value or RETRY_MODE_FINITE).strip().lower()
@@ -168,6 +192,11 @@ class FailedRetryPolicy:
 def classify_retry_failure(row: dict) -> str | None:
     if row.get("status") != "failed":
         return None
+    failure_code = str(row.get("failure_code") or "").strip().casefold()
+    if failure_code:
+        if failure_code in _PERMANENT_FAILURE_CODES:
+            return None
+        return _FAILURE_CODE_CATEGORIES.get(failure_code, "other")
     error = str(row.get("error") or "").casefold()
     if any(marker in error for marker in _PERMANENT_ERROR_MARKERS):
         return None

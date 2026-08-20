@@ -300,6 +300,57 @@ class FailedRetryQueueTests(unittest.TestCase):
             "error": "Unexpected response shape",
         }), "other")
 
+    def test_stable_paid_create_and_live_task_codes_never_retry(self):
+        for code in ("ambiguous_submission", "task_still_running"):
+            self.assertIsNone(classify_retry_failure({
+                "status": "failed",
+                "failure_code": code,
+                "error": "localized text deliberately contains network timeout words",
+            }))
+
+    def test_final_provider_task_failure_can_enter_product_retry_policy(self):
+        self.assertEqual(classify_retry_failure({
+            "status": "failed",
+            "failure_code": "task_failed",
+            "error": "localized provider rejection",
+        }), "other")
+
+    def test_infinite_policy_does_not_retry_ambiguous_paid_create(self):
+        calls = []
+
+        def process_once(_current, _gemini, _lovart, _logger, run_dir, **_kwargs):
+            calls.append(1)
+            if len(calls) > 1:
+                raise AssertionError("ambiguous paid create was automatically retried")
+            write_run_summary(run_dir, [{
+                "product_id": "SKU-AMBIGUOUS",
+                "status": "failed",
+                "failure_code": "ambiguous_submission",
+                "error": "network timeout translated differently",
+            }])
+            return 0, 1, 0, 0
+
+        policy = FailedRetryPolicy(
+            mode=RETRY_MODE_INFINITE,
+            rounds=1,
+            delay=0,
+            error_types=("network", "timeout", "other"),
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "main._process_products_once", side_effect=process_once
+        ):
+            result = main._process_products(
+                [_Product("SKU-AMBIGUOUS")],
+                object(),
+                None,
+                _Logger(),
+                Path(tmp),
+                failed_retry_policy=policy,
+            )
+
+        self.assertEqual(calls, [1])
+        self.assertEqual(result, (0, 1, 0, 0))
+
     def test_shutdown_interrupts_retry_delay(self):
         main._shutdown_requested = True
         with patch("main.time.sleep") as sleep:

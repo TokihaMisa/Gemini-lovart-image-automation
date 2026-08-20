@@ -1,6 +1,7 @@
 import argparse
 from collections.abc import Mapping
 import csv
+import hashlib
 import io
 import json
 import os
@@ -66,7 +67,11 @@ from gemini_browser_session import (
 from network_retry import RetryKind, classify_network_error
 from lovart_bot import LOVART_IMAGE_MODELS, LovartBot
 from nvidia_api import NvidiaAPI, resolve_nvidia_model
-from openai_image_api import OpenAIImageAPI, OpenAIImageAPIConfig
+from openai_image_api import (
+    OpenAIImageAPI,
+    OpenAIImageAPIConfig,
+    append_aspect_instruction,
+)
 from prompt_settings import get_prompt_settings, normalize_prompt_settings
 from utils import (
     _read_csv_dict_rows_with_fallback,
@@ -221,6 +226,67 @@ def _detail_fingerprint_execution_settings(
     }:
         normalized["base_url"] = "https://hapiopen.cc/v1"
     return normalized
+
+
+def _support_execution_settings(provider) -> dict[str, object]:
+    sensitive_markers = ("api_key", "apikey", "secret", "token", "password")
+    return {
+        str(key): value
+        for key, value in sorted(
+            _detail_execution_settings(provider).items(),
+            key=lambda item: str(item[0]),
+        )
+        if not any(marker in str(key).casefold() for marker in sensitive_markers)
+    }
+
+
+def _support_reference_identity(path_value: str | Path) -> dict[str, object]:
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with Path(path_value).open("rb") as source:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                size += len(chunk)
+    except OSError:
+        return {"state": "unreadable"}
+    return {"sha256": digest.hexdigest(), "size": size}
+
+
+def _build_support_input_fingerprint(
+    provider,
+    provider_name: str,
+    step_name: str,
+    prompt: str,
+    image_size: str,
+    image_inputs: Mapping[str, str | Path],
+) -> str:
+    execution_settings = _support_execution_settings(provider)
+    payload = {
+        "schema": 1,
+        "provider": str(provider_name or ""),
+        "execution_settings": execution_settings,
+        "step_name": str(step_name),
+        "final_prompt": append_aspect_instruction(prompt, image_size),
+        "image_size": str(image_size or ""),
+        "merge_reference_images": bool(
+            execution_settings.get("merge_reference_images", False)
+        ),
+        "references": {
+            str(role): _support_reference_identity(path)
+            for role, path in sorted(image_inputs.items(), key=lambda item: str(item[0]))
+        },
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _compose_detail_request_screens(
@@ -451,7 +517,10 @@ def _record_failure(
         error=error,
         used_model=used_model,
     )
-    if os.environ.get("UI_MODE") == "1":
+    if os.environ.get("UI_MODE") == "1" and status in {
+        "failed",
+        "needs_manual_action",
+    }:
         import json
         is_manual = (status == "needs_manual_action")
         print(f"[UI_FAIL] {json.dumps({'id': product.id, 'reason': error, 'is_manual': is_manual})}")
@@ -749,6 +818,7 @@ def _generate_support_images(
     existing_status,
     *,
     force_regenerate: bool = False,
+    resume: bool = True,
 ) -> tuple[str, str]:
     product_dir = Path(product_dir)
     image_roles = split_image_roles(product.image_paths)
@@ -765,7 +835,12 @@ def _generate_support_images(
     else:
         provider_name = str(getattr(provider, "name", "") or "")
 
-    def generate(step_name: str, prompt: str, image_paths: tuple[str, ...], final_index: int) -> str:
+    def generate(
+        step_name: str,
+        prompt: str,
+        image_inputs: Mapping[str, str],
+        final_index: int,
+    ) -> str:
         stage = "support_white" if step_name == "white_bg" else "support_scene"
         label = "白底图" if step_name == "white_bg" else "场景图"
         status = read_status(product_dir)
@@ -787,21 +862,48 @@ def _generate_support_images(
                 **{
                     f"{step_name}_local_path": existing_path,
                     f"{step_name}_provider": provider_name,
+                    "openai_image_still_running": False,
+                    "openai_image_active_stage": "",
+                    "openai_image_task_suffix": "",
                 },
             )
             return existing_path
+        if provider_name == PROVIDER_OPENAI_IMAGE:
+            update_status(
+                product_dir,
+                "openai_image_task_active",
+                openai_image_still_running=False,
+                openai_image_active_stage=stage,
+                openai_image_task_suffix="",
+                failed=False,
+                needs_manual_action=False,
+                reason="",
+            )
         _emit_ui_status(product.id, stage, f"🎨 正在生成{label}")
+        ordered_image_paths = tuple(
+            str(path)
+            for _role, path in sorted(image_inputs.items(), key=lambda item: str(item[0]))
+        )
         result = provider.generate_support_image(
             SupportImageRequest(
                 product_id=product.id,
                 product_dir=product_dir,
                 step_name=step_name,
                 prompt=prompt,
-                image_paths=image_paths,
+                image_paths=ordered_image_paths,
                 image_size=getattr(product, "image_size", ""),
                 product_name_cn=product.name_cn,
                 language=product.language,
                 selling_points=product.selling_points,
+                input_fingerprint=_build_support_input_fingerprint(
+                    provider,
+                    provider_name,
+                    step_name,
+                    prompt,
+                    getattr(product, "image_size", ""),
+                    image_inputs,
+                ),
+                resume=resume,
                 confirmation_advisor=getattr(provider, "confirmation_advisor", None),
                 status_callback=lambda message: _emit_ui_status(
                     product.id,
@@ -819,6 +921,9 @@ def _generate_support_images(
             **{
                 f"{step_name}_local_path": local_path,
                 f"{step_name}_provider": provider_name,
+                "openai_image_still_running": False,
+                "openai_image_active_stage": "",
+                "openai_image_task_suffix": "",
             },
         )
         return local_path
@@ -829,7 +934,7 @@ def _generate_support_images(
             getattr(product, "image_size", ""),
             prompt_settings=prompt_settings,
         ),
-        (product_image,),
+        {"product_image": product_image},
         0,
     )
     scene_image = generate(
@@ -838,7 +943,7 @@ def _generate_support_images(
             getattr(product, "image_size", ""),
             prompt_settings=prompt_settings,
         ),
-        (white_image,),
+        {"white_bg": white_image},
         1,
     )
     complete = getattr(provider, "complete_support_images", None)
@@ -1011,10 +1116,20 @@ def _process_products_once(
             image_size=current_image_size,
             language=product.language,
             image_count=len(product.image_paths),
+            openai_image_still_running=False,
+            openai_image_active_stage="",
+            openai_image_task_suffix="",
         )
         replace_detail_target = not resume
         saved_detail_target = previous_status.get("detail_page_count_snapshot")
         saved_detail_provider = str(previous_status.get("detail_provider") or "")
+        detail_work_started = bool(
+            saved_detail_provider
+            or previous_status.get("detail_checkpoints")
+            or previous_status.get("detail_prompt_ready")
+            or (product_dir / "detail_prompt.txt").exists()
+            or (product_dir / "lovart_prompt.txt").exists()
+        )
         completed_for_current_detail_provider = bool(
             is_product_completed(product_dir)
             and (
@@ -1032,8 +1147,13 @@ def _process_products_once(
             and saved_detail_target is not None
         ):
             try:
-                replace_detail_target = int(saved_detail_target) != int(
-                    effective_routing.detail_page_count
+                replace_detail_target = bool(
+                    not (
+                        detail_work_started
+                        and saved_detail_provider == effective_routing.detail_provider
+                    )
+                    and int(saved_detail_target)
+                    != int(effective_routing.detail_page_count)
                 )
             except (TypeError, ValueError):
                 replace_detail_target = True
@@ -1110,14 +1230,40 @@ def _process_products_once(
                     prompt_settings,
                     read_status(product_dir),
                     force_regenerate=regenerate_support_for_size,
+                    resume=resume,
                 )
             except _SupportImageGenerationError as support_error:
                 raw_result = support_error.result.raw_result or {}
                 final_status = raw_result.get("final_status")
+                failure_code = str(raw_result.get("error_code") or "")
                 status = read_status(product_dir)
                 project_url = _project_url_from_status(status)
                 label = "white-background" if support_error.step_name == "white_bg" else "scene"
-                if final_status == "timeout":
+                active_stage = (
+                    "support_white"
+                    if support_error.step_name == "white_bg"
+                    else "support_scene"
+                )
+                if support_error.result.still_running:
+                    reason = f"GPT Image {label} task is still running"
+                    logger.warning(
+                        f"STILL RUNNING [{idx}/{len(products)}] "
+                        f"{product.id} {support_error.step_name}"
+                    )
+                    still_running += 1
+                    outcome = "openai_image_task_still_running"
+                    failure_code = failure_code or "task_still_running"
+                    update_status(
+                        product_dir,
+                        outcome,
+                        openai_image_still_running=True,
+                        openai_image_active_stage=active_stage,
+                        openai_image_task_suffix=support_error.result.task_id_suffix,
+                        failed=False,
+                        needs_manual_action=False,
+                        reason="",
+                    )
+                elif final_status == "timeout":
                     reason = f"Lovart {label} image still running after local wait timeout"
                     logger.warning(
                         f"STILL RUNNING [{idx}/{len(products)}] {product.id} {support_error.step_name}"
@@ -1138,7 +1284,23 @@ def _process_products_once(
                     fail += 1
                     outcome = "needs_manual_action"
                 else:
-                    raise
+                    reason = support_error.result.error or str(support_error)
+                    logger.warning(
+                        f"WARN [{idx}/{len(products)}] {product.id} "
+                        f"{support_error.step_name} failed"
+                    )
+                    fail += 1
+                    outcome = "failed"
+                    update_status(
+                        product_dir,
+                        outcome,
+                        failed=True,
+                        needs_manual_action=False,
+                        reason=reason,
+                        openai_image_still_running=False,
+                        openai_image_active_stage="",
+                        openai_image_task_suffix="",
+                    )
                 _record_failure(product, outcome, reason, project_url)
                 summary_rows.append({
                     "product_id": product.id,
@@ -1149,6 +1311,7 @@ def _process_products_once(
                     "artifact_count": "",
                     "duration_seconds": round(time.time() - started, 2),
                     "error": reason,
+                    "failure_code": failure_code,
                 })
                 continue
 
@@ -1421,6 +1584,13 @@ def _process_products_once(
                 "detail_generation_started",
                 detail_provider=effective_routing.detail_provider,
                 used_model=initial_used_model,
+                openai_image_still_running=False,
+                openai_image_active_stage=(
+                    "detail"
+                    if effective_routing.detail_provider == PROVIDER_OPENAI_IMAGE
+                    else ""
+                ),
+                openai_image_task_suffix="",
             )
             _emit_ui_status(
                 product.id,
@@ -1452,6 +1622,7 @@ def _process_products_once(
                 )
             )
             raw_result = dict(detail_result.raw_result or {})
+            failure_code = str(raw_result.get("error_code") or "")
             status = read_status(product_dir)
             completed_count = max(0, int(detail_result.completed_count))
             detail_images = list(detail_result.local_paths)
@@ -1531,6 +1702,9 @@ def _process_products_once(
                     failed=False,
                     needs_manual_action=False,
                     lovart_still_running=False,
+                    openai_image_still_running=False,
+                    openai_image_active_stage="",
+                    openai_image_task_suffix="",
                     reason="",
                 )
                 result = dict(raw_result)
@@ -1554,6 +1728,44 @@ def _process_products_once(
                     "error": "",
                     "used_model": used_model or "unknown",
                 })
+            elif detail_result.still_running:
+                logger.warning(f"STILL RUNNING [{idx}/{len(products)}] {product.id}")
+                still_running += 1
+                active_index = min(target_count, completed_count + 1)
+                reason = f"GPT Image detail screen {active_index} task is still running"
+                update_status(
+                    product_dir,
+                    "openai_image_task_still_running",
+                    detail_generation_complete=False,
+                    partial_complete=partial_complete,
+                    failed=False,
+                    needs_manual_action=False,
+                    openai_image_still_running=True,
+                    openai_image_active_stage=f"detail_screen_{active_index}",
+                    openai_image_task_suffix=detail_result.task_id_suffix,
+                    reason="",
+                )
+                _record_failure(
+                    product,
+                    "openai_image_task_still_running",
+                    reason,
+                    project_url,
+                    used_model=used_model,
+                )
+                summary_rows.append({
+                    "product_id": product.id,
+                    "product_name": product.name_cn,
+                    "status": "openai_image_task_still_running",
+                    "project_url": project_url,
+                    "gemini_chars": gemini_chars,
+                    "artifact_count": artifact_count,
+                    "duration_seconds": round(time.time() - started, 2),
+                    "error": reason,
+                    "failure_code": failure_code or "task_still_running",
+                    "used_model": used_model,
+                    "partial_complete": partial_complete,
+                    "detail_completed_count": completed_count,
+                })
             elif raw_result.get("final_status") == "pending_confirmation":
                 logger.warning(f"NEEDS MANUAL ACTION [{idx}/{len(products)}] {product.id}")
                 fail += 1
@@ -1566,6 +1778,9 @@ def _process_products_once(
                     failed=False,
                     needs_manual_action=True,
                     lovart_still_running=False,
+                    openai_image_still_running=False,
+                    openai_image_active_stage="",
+                    openai_image_task_suffix="",
                     reason=reason,
                     project_url=project_url,
                 )
@@ -1608,6 +1823,9 @@ def _process_products_once(
                     needs_manual_action=False,
                     reason="Lovart still running after local wait timeout",
                     project_url=project_url,
+                    openai_image_still_running=False,
+                    openai_image_active_stage="",
+                    openai_image_task_suffix="",
                 )
                 summary_rows.append({
                     "product_id": product.id,
@@ -1632,12 +1850,16 @@ def _process_products_once(
                 update_status(
                     product_dir,
                     "failed",
+                    failed=True,
                     reason=reason,
                     project_url=project_url,
                     detail_generation_complete=False,
                     partial_complete=partial_complete,
                     needs_manual_action=False,
                     lovart_still_running=False,
+                    openai_image_still_running=False,
+                    openai_image_active_stage="",
+                    openai_image_task_suffix="",
                 )
                 _record_failure(
                     product,
@@ -1659,11 +1881,21 @@ def _process_products_once(
                     "partial_complete": partial_complete,
                     "detail_completed_count": completed_count,
                     "detail_failed_indexes": list(detail_result.failed_indexes),
+                    "failure_code": failure_code,
                 })
         except Exception as exc:
             status = read_status(product_dir)
             project_url = _project_url_from_status(status)
-            update_status(product_dir, "failed", reason=str(exc), project_url=project_url)
+            update_status(
+                product_dir,
+                "failed",
+                failed=True,
+                reason=str(exc),
+                project_url=project_url,
+                openai_image_still_running=False,
+                openai_image_active_stage="",
+                openai_image_task_suffix="",
+            )
             logger.error(f"FAIL [{idx}/{len(products)}] {product.id}: {exc}")
             fail += 1
             _record_failure(
@@ -1793,7 +2025,13 @@ def _process_products(
     write_run_summary(run_dir, final_rows)
     success = sum(row.get("status") == "success" for row in final_rows)
     skipped = sum(row.get("status") == "skipped" for row in final_rows)
-    still_running = sum(row.get("status") == "lovart_still_running" for row in final_rows)
+    still_running = sum(
+        row.get("status") in {
+            "lovart_still_running",
+            "openai_image_task_still_running",
+        }
+        for row in final_rows
+    )
     fail = len(final_rows) - success - skipped - still_running
     return success, fail, skipped, still_running
 
