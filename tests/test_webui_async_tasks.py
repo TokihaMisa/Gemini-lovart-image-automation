@@ -40,16 +40,19 @@ def test_transport_test_edit_forwards_callbacks_to_async_generate_pipeline(tmp_p
     )
     status_callback = Mock()
     task_callback = Mock()
+    display_callback = Mock()
 
     result = client.test_edit(
         tmp_path,
         status_callback=status_callback,
         task_callback=task_callback,
+        display_callback=display_callback,
     )
 
     assert result.local_path.endswith("result.png")
     assert client.generate_edit.call_args.kwargs["status_callback"] is status_callback
     assert client.generate_edit.call_args.kwargs["task_callback"] is task_callback
+    assert client.generate_edit.call_args.kwargs["display_callback"] is display_callback
 
 
 @patch("webui.OpenAIImageAPI")
@@ -57,7 +60,7 @@ def test_paid_test_streams_async_task_progress_and_masks_sensitive_values(api_cl
     secret = "paid-test-secret"
     full_task_id = "provider-private-task-12345678"
 
-    def run_test(_output_dir, *, status_callback, task_callback):
+    def run_test(_output_dir, *, status_callback, task_callback, **_kwargs):
         task_callback(_task(full_task_id, progress="0%", status="accepted"))
         status_callback(
             "⏳ GPT Image rendering · 42% · 已等待 17 秒 · 任务 …12345678"
@@ -104,7 +107,7 @@ def test_paid_test_sanitizes_terminal_error_and_button_can_be_reenabled(api_cls)
     secret = "paid-test-secret"
     full_task_id = "provider-private-task-12345678"
 
-    def run_test(_output_dir, *, status_callback, task_callback):
+    def run_test(_output_dir, *, status_callback, task_callback, **_kwargs):
         task_callback(_task(full_task_id, progress="10%", status="queued"))
         raise ValueError(f"gateway rejected {secret} for {full_task_id}")
 
@@ -251,3 +254,54 @@ def test_product_card_redacts_full_task_id_from_fallback_status_message(tmp_path
 
     assert full_task_id not in rendered
     assert "白底图" in rendered
+
+
+@patch("webui.OpenAIImageAPI")
+def test_paid_test_resolves_saved_env_key_without_echoing_it(api_cls, tmp_path):
+    saved_key = "saved-paid-test-secret"
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"OPENAI_IMAGE_API_KEY={saved_key}\n", encoding="utf-8")
+    api_cls.return_value.test_edit.return_value = GeneratedImage(
+        local_path="output/.api-tests/openai-image-test.png",
+        model="gpt-image-2",
+        task=_task(state="success", is_final=True, progress="100%"),
+    )
+
+    updates = list(
+        webui.test_openai_image_edit(
+            "",
+            "https://api.lk888.ai",
+            "gpt-image-2",
+            "1K",
+            env_path=env_path,
+        )
+    )
+
+    resolved_config = api_cls.call_args.args[0]
+    assert resolved_config.api_key == saved_key
+    assert "测试成功" in updates[-1]
+    assert saved_key not in "\n".join(updates)
+
+
+@patch("webui.OpenAIImageAPI")
+def test_paid_test_explicit_clear_does_not_reuse_saved_env_key(api_cls, tmp_path):
+    saved_key = "saved-paid-test-secret"
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"OPENAI_IMAGE_API_KEY={saved_key}\n", encoding="utf-8")
+
+    updates = list(
+        webui.test_openai_image_edit(
+            "",
+            "https://api.lk888.ai",
+            "gpt-image-2",
+            "1K",
+            False,
+            True,
+            env_path=env_path,
+        )
+    )
+
+    assert "测试失败" in updates[-1]
+    assert "密钥" in updates[-1]
+    assert saved_key not in "\n".join(updates)
+    api_cls.assert_not_called()

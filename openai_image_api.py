@@ -132,6 +132,19 @@ class ImageTaskSnapshot:
     cost: object = None
 
 
+@dataclass(frozen=True, slots=True)
+class ImageTaskDisplayStatus:
+    """Non-secret task state safe for logs and serialized UI events."""
+
+    phase: str
+    state: str
+    progress: str = ""
+    status: str = ""
+    elapsed_seconds: int = 0
+    task_suffix: str = ""
+    message: str = ""
+
+
 class ImageTaskStillRunning(OpenAIImageAPIError):
     def __init__(self, task: ImageTaskSnapshot) -> None:
         self.task = task
@@ -342,6 +355,27 @@ def _notify_task(
         callback(task)
 
 
+def _notify_display(
+    callback: Callable[[ImageTaskDisplayStatus], None] | None,
+    task: ImageTaskSnapshot,
+    *,
+    phase: str,
+    elapsed_seconds: int = 0,
+    message: str = "",
+) -> None:
+    if callback is None:
+        return
+    callback(ImageTaskDisplayStatus(
+        phase=str(phase),
+        state=str(task.state),
+        progress=str(task.progress),
+        status=str(task.status or task.status_group or task.state),
+        elapsed_seconds=max(0, int(elapsed_seconds)),
+        task_suffix=safe_task_display_token(task.task_id),
+        message=str(message),
+    ))
+
+
 def safe_task_display_token(task_id: object) -> str:
     """Return a display-only token that never exposes a complete short task ID."""
     value = str(task_id or "")
@@ -392,24 +426,27 @@ def _validate_task_state(task: ImageTaskSnapshot) -> ImageTaskSnapshot:
     )
 
 
-def _redact_snapshot_value(value: object, api_key: str) -> object:
-    if not api_key:
-        return value
+def _redact_snapshot_value(value: object, *sensitive_values: str) -> object:
+    sensitive = tuple(item for item in sensitive_values if item)
     if isinstance(value, str):
-        return value.replace(api_key, "[redacted]")
+        redacted = value
+        for item in sensitive:
+            redacted = redacted.replace(item, "[redacted]")
+        return redacted
     if isinstance(value, Mapping):
         return {
-            _redact_snapshot_value(key, api_key): _redact_snapshot_value(item, api_key)
+            _redact_snapshot_value(key, *sensitive): _redact_snapshot_value(item, *sensitive)
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_redact_snapshot_value(item, api_key) for item in value]
+        return [_redact_snapshot_value(item, *sensitive) for item in value]
     if isinstance(value, tuple):
-        return tuple(_redact_snapshot_value(item, api_key) for item in value)
+        return tuple(_redact_snapshot_value(item, *sensitive) for item in value)
     if isinstance(value, set):
-        return {_redact_snapshot_value(item, api_key) for item in value}
-    if api_key in repr(value):
-        return repr(value).replace(api_key, "[redacted]")
+        return {_redact_snapshot_value(item, *sensitive) for item in value}
+    rendered = repr(value)
+    if any(item in rendered for item in sensitive):
+        return _redact_snapshot_value(rendered, *sensitive)
     return value
 
 
@@ -426,13 +463,13 @@ def _sanitize_task_snapshot(
         state=str(_redact_snapshot_value(task.state, api_key)),
         is_final=task.is_final,
         task_created_at=task.task_created_at,
-        progress=str(_redact_snapshot_value(task.progress, api_key)),
-        status=str(_redact_snapshot_value(task.status, api_key)),
-        status_group=str(_redact_snapshot_value(task.status_group, api_key)),
+        progress=str(_redact_snapshot_value(task.progress, api_key, task.task_id)),
+        status=str(_redact_snapshot_value(task.status, api_key, task.task_id)),
+        status_group=str(_redact_snapshot_value(task.status_group, api_key, task.task_id)),
         result_url=str(_redact_snapshot_value(task.result_url, api_key)),
-        result_type=str(_redact_snapshot_value(task.result_type, api_key)),
-        error=str(_redact_snapshot_value(task.error, api_key)),
-        cost=_redact_snapshot_value(task.cost, api_key),
+        result_type=str(_redact_snapshot_value(task.result_type, api_key, task.task_id)),
+        error=str(_redact_snapshot_value(task.error, api_key, task.task_id)),
+        cost=_redact_snapshot_value(task.cost, api_key, task.task_id),
     )
 
 
@@ -550,6 +587,7 @@ class OpenAIImageAPI:
         status_callback: Callable[[str], None] | None = None,
         task_callback: Callable[[ImageTaskSnapshot], None] | None = None,
         resume_task: ImageTaskSnapshot | None = None,
+        display_callback: Callable[[ImageTaskDisplayStatus], None] | None = None,
     ) -> GeneratedImage:
         images = _encode_reference_images(
             image_paths,
@@ -566,16 +604,32 @@ class OpenAIImageAPI:
         else:
             task = _validate_resume_task(resume_task, self.config.api_key)
         _notify_task(task_callback, task)
+        submitted_message = "📨 GPT Image 异步任务已提交，正在等待平台处理"
+        _notify_display(
+            display_callback,
+            task,
+            phase="submitted",
+            message=submitted_message,
+        )
 
         if task.state == "failed":
             raise _task_failed_error(task, self.config.api_key)
         if task.is_final and task.state == "success":
+            download_message = "✅ GPT Image 生成完成，正在安全下载图片"
+            _notify_status(status_callback, download_message)
+            _notify_display(
+                display_callback,
+                task,
+                phase="downloading",
+                message=download_message,
+            )
             return self._download_task_result(task, output_path, status_callback)
 
         task, operational_result_url = self._poll_task(
             task,
             status_callback,
             task_callback,
+            display_callback,
         )
         return self._download_task_result(
             task,
@@ -589,6 +643,7 @@ class OpenAIImageAPI:
         output_dir: str | Path,
         status_callback: Callable[[str], None] | None = None,
         task_callback: Callable[[ImageTaskSnapshot], None] | None = None,
+        display_callback: Callable[[ImageTaskDisplayStatus], None] | None = None,
     ) -> GeneratedImage:
         directory = Path(output_dir)
         directory.mkdir(parents=True, exist_ok=True)
@@ -606,6 +661,7 @@ class OpenAIImageAPI:
                 directory / "openai-image-test.png",
                 status_callback=status_callback,
                 task_callback=task_callback,
+                display_callback=display_callback,
             )
         finally:
             if source_path is not None:
@@ -764,6 +820,7 @@ class OpenAIImageAPI:
         task: ImageTaskSnapshot,
         status_callback: Callable[[str], None] | None,
         task_callback: Callable[[ImageTaskSnapshot], None] | None,
+        display_callback: Callable[[ImageTaskDisplayStatus], None] | None,
     ) -> tuple[ImageTaskSnapshot, str]:
         started_at = time.monotonic()
         deadline = started_at + TASK_WAIT_LIMIT_SECONDS
@@ -787,15 +844,30 @@ class OpenAIImageAPI:
             if task.state == "failed":
                 raise _task_failed_error(task, self.config.api_key)
             if task.is_final:
-                _notify_status(status_callback, "✅ GPT Image 生成完成，正在安全下载图片")
+                download_message = "✅ GPT Image 生成完成，正在安全下载图片"
+                _notify_status(status_callback, download_message)
+                _notify_display(
+                    display_callback,
+                    task,
+                    phase="downloading",
+                    elapsed_seconds=int(elapsed),
+                    message=download_message,
+                )
                 return task, operational_result_url
 
             display = task.status or task.status_group or task.state
             progress = f" · {task.progress}" if task.progress else ""
             suffix = safe_task_display_token(task.task_id)
-            _notify_status(
-                status_callback,
-                f"⏳ GPT Image {display}{progress} · 已等待 {int(elapsed)} 秒 · 任务 …{suffix}",
+            progress_message = (
+                f"⏳ GPT Image {display}{progress} · 已等待 {int(elapsed)} 秒 · 任务 …{suffix}"
+            )
+            _notify_status(status_callback, progress_message)
+            _notify_display(
+                display_callback,
+                task,
+                phase="polling",
+                elapsed_seconds=int(elapsed),
+                message=progress_message,
             )
             remaining = deadline - time.monotonic()
             if remaining <= 0:

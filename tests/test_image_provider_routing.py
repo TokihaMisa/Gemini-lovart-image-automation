@@ -71,6 +71,16 @@ class _ScriptedTaskAPI(CheckpointingOpenAIAPI):
         )
         if kwargs.get("task_callback"):
             kwargs["task_callback"](snapshot)
+        if kwargs.get("display_callback"):
+            kwargs["display_callback"](SimpleNamespace(
+                phase="running",
+                state=snapshot.state,
+                progress=snapshot.progress,
+                status=snapshot.status,
+                elapsed_seconds=17,
+                task_suffix=task_id[-8:],
+                message="GPT Image task is running",
+            ))
         if outcome == "still_running":
             raise ImageTaskStillRunning(snapshot)
         if outcome == "failed":
@@ -300,6 +310,36 @@ def test_ui_emits_active_product_and_stage_statuses(tmp_path, capsys):
     assert "support_scene" in stages
     assert "prompt" in stages
     assert "detail" in stages
+
+
+def test_real_provider_main_event_path_emits_exact_detail_screen_display_fields(
+    tmp_path, capsys
+):
+    full_task_id = "detail-private-task-12345678"
+    api = _ScriptedTaskAPI({
+        "white_bg": [("success", "white-task-done-12345678")],
+        "scene": [("success", "scene-task-done-12345678")],
+        "01": [("success", full_task_id)],
+    })
+
+    with patch.dict(os.environ, {"UI_MODE": "1"}):
+        _run_scripted_openai_pipeline(tmp_path, api, detail_count=1)
+
+    payloads = [
+        json.loads(line.split("]", 1)[1].strip())
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("[UI_STATUS]")
+    ]
+    detail_event = next(
+        payload for payload in payloads
+        if payload["stage"] == "detail_screen_1" and payload.get("progress") == "50%"
+    )
+
+    assert detail_event["display_status"] == "rendering"
+    assert detail_event["elapsed_seconds"] == 17
+    assert detail_event["task_suffix"] == "12345678"
+    assert full_task_id not in json.dumps(detail_event)
+    assert "task_id" not in detail_event
 
 
 @pytest.mark.parametrize(

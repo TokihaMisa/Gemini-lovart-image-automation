@@ -977,6 +977,9 @@ def test_openai_image_edit(
     model,
     resolution,
     merge_reference_images=None,
+    clear_openai_image_key=False,
+    *,
+    env_path=".env",
 ):
     """Run the explicitly requested, potentially billable GPT Image edit probe."""
     import queue
@@ -985,10 +988,14 @@ def test_openai_image_edit(
     finished = object()
     outcome: dict[str, object] = {}
     task_ids: set[str] = set()
+    submitted_api_key = str(api_key or "").strip()
+    resolved_api_key = "" if clear_openai_image_key else (
+        submitted_api_key or get_env("OPENAI_IMAGE_API_KEY", env_path=env_path)
+    )
 
     def sanitize(value: object) -> str:
         text = " ".join(str(value or "").split())
-        sensitive_values = [str(api_key or "").strip(), *task_ids]
+        sensitive_values = [submitted_api_key, resolved_api_key, *task_ids]
         for sensitive in sensitive_values:
             if sensitive:
                 text = text.replace(sensitive, "[已隐藏]")
@@ -1021,7 +1028,7 @@ def test_openai_image_edit(
                 }
             }
             client = OpenAIImageAPI(
-                OpenAIImageAPIConfig.from_config(config, api_key=api_key),
+                OpenAIImageAPIConfig.from_config(config, api_key=resolved_api_key),
                 logger=None,
             )
             outcome["result"] = client.test_edit(
@@ -1382,9 +1389,10 @@ def save_env(
             temp.unlink()
 
 
-def get_env(key: str) -> str:
-    if os.path.exists(".env"):
-        with open(".env", "r", encoding="utf-8") as f:
+def get_env(key: str, env_path: str | Path = ".env") -> str:
+    target = Path(env_path)
+    if target.exists():
+        with target.open("r", encoding="utf-8") as f:
             for line in f:
                 if line.startswith(f"{key}="):
                     return line.split("=", 1)[1].strip()
@@ -1458,11 +1466,6 @@ def run_process(
             nvidia_base_url,
             nvidia_model,
         )
-        config = persist_image_routing_settings(
-            config,
-            support_provider,
-            detail_provider,
-        )
         uses_openai_image = "openai_image" in {
             normalize_image_provider(support_provider),
             normalize_image_provider(detail_provider),
@@ -1476,15 +1479,15 @@ def run_process(
                     "missing_key",
                     "请先填写或保存 GPT Image API 密钥。",
                 )
-            config = persist_openai_image_settings(
-                config,
-                openai_image_base_url,
-                openai_image_model,
-                openai_image_resolution,
-                support_provider,
-                detail_provider,
-                merge_reference_images,
-            )
+        config = persist_openai_image_settings(
+            config,
+            openai_image_base_url,
+            openai_image_model,
+            openai_image_resolution,
+            support_provider,
+            detail_provider,
+            merge_reference_images,
+        )
         if "lovart" not in config:
             config["lovart"] = {}
         config["lovart"]["image_model"] = lovart_image_model
@@ -2698,6 +2701,7 @@ def build_ui():
                             openai_image_model,
                             openai_image_resolution,
                             merge_reference_images,
+                            clear_openai_image_key,
                         ],
                         outputs=openai_image_test_status,
                         api_name="test_openai_image_edit",

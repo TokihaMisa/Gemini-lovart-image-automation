@@ -68,6 +68,7 @@ from network_retry import RetryKind, classify_network_error
 from lovart_bot import LOVART_IMAGE_MODELS, LovartBot
 from nvidia_api import NvidiaAPI, resolve_nvidia_model
 from openai_image_api import (
+    ImageTaskDisplayStatus,
     OpenAIImageAPI,
     OpenAIImageAPIConfig,
     append_aspect_instruction,
@@ -195,7 +196,16 @@ def _emit_ui_detail_progress(current, target, completed, failed) -> None:
     print(f"[UI_DETAIL_PROGRESS] {json.dumps(payload)}", flush=True)
 
 
-def _emit_ui_status(product_id: str, stage: str, message: str) -> None:
+def _emit_ui_status(
+    product_id: str,
+    stage: str,
+    message: str,
+    *,
+    progress: str = "",
+    display_status: str = "",
+    elapsed_seconds: int | None = None,
+    task_suffix: str = "",
+) -> None:
     if not _is_ui_mode():
         return
     payload = {
@@ -203,7 +213,31 @@ def _emit_ui_status(product_id: str, stage: str, message: str) -> None:
         "stage": str(stage),
         "message": str(message),
     }
+    if progress:
+        payload["progress"] = str(progress)
+    if display_status:
+        payload["display_status"] = str(display_status)
+    if elapsed_seconds is not None:
+        payload["elapsed_seconds"] = max(0, int(elapsed_seconds))
+    if task_suffix:
+        payload["task_suffix"] = str(task_suffix)
     print(f"[UI_STATUS] {json.dumps(payload)}", flush=True)
+
+
+def _emit_ui_task_status(
+    product_id: str,
+    stage: str,
+    task_status: ImageTaskDisplayStatus,
+) -> None:
+    _emit_ui_status(
+        product_id,
+        stage,
+        task_status.message or "GPT Image 异步任务正在处理",
+        progress=task_status.progress,
+        display_status=task_status.status,
+        elapsed_seconds=task_status.elapsed_seconds,
+        task_suffix=task_status.task_suffix,
+    )
 
 
 def _detail_execution_settings(provider) -> dict[str, object]:
@@ -915,6 +949,11 @@ def _generate_support_images(
                     stage,
                     message,
                 ),
+                task_status_callback=lambda task_status: _emit_ui_task_status(
+                    product.id,
+                    stage,
+                    task_status,
+                ),
             )
         )
         if not result.succeeded or not result.local_paths:
@@ -1623,6 +1662,11 @@ def _process_products_once(
                         product.id,
                         "detail",
                         message,
+                    ),
+                    task_status_callback=lambda detail_index, task_status: _emit_ui_task_status(
+                        product.id,
+                        f"detail_screen_{detail_index}",
+                        task_status,
                     ),
                 )
             )

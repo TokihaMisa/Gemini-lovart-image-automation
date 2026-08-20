@@ -18,6 +18,7 @@ from image_generation import (
 )
 from openai_image_api import (
     GeneratedImage,
+    ImageTaskDisplayStatus,
     ImageTaskSnapshot,
     ImageTaskStillRunning,
     OpenAIImageAPIError,
@@ -75,6 +76,7 @@ class SupportImageRequest:
     resume: bool = True
     confirmation_advisor: Any | None = None
     status_callback: Callable[[str], None] | None = None
+    task_status_callback: Callable[[ImageTaskDisplayStatus], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +97,7 @@ class DetailSetRequest:
     confirmation_advisor: Any | None = None
     progress_callback: Callable[[int, int, int, tuple[int, ...]], None] | None = None
     status_callback: Callable[[str], None] | None = None
+    task_status_callback: Callable[[int, ImageTaskDisplayStatus], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -359,6 +362,7 @@ class OpenAIImageProvider:
                 status_callback=request.status_callback,
                 task_callback=persist,
                 resume_task=saved_task,
+                display_callback=request.task_status_callback,
             )
         except ImageTaskStillRunning as exc:
             persist(exc.task)
@@ -560,6 +564,14 @@ class OpenAIImageProvider:
                     status_callback=request.status_callback,
                     task_callback=persist,
                     resume_task=saved_task,
+                    display_callback=(
+                        (
+                            lambda display_status, detail_index=screen.index:
+                            request.task_status_callback(detail_index, display_status)
+                        )
+                        if request.task_status_callback is not None
+                        else None
+                    ),
                 )
             except ImageTaskStillRunning as exc:
                 persist(exc.task)

@@ -179,6 +179,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
                 "GPT Image 模型",
                 "GPT Image 分辨率",
                 "将多张参考图合并为一张上传",
+                "清除已保存 GPT Image 密钥",
             },
         )
         paid_test_index = demo.config["dependencies"].index(paid_test)
@@ -1347,7 +1348,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
         )
 
     @patch("webui.subprocess.Popen")
-    def test_lovart_only_launch_ignores_malformed_unused_gpt_settings(self, popen):
+    def test_lovart_only_launch_rejects_malformed_nonblank_gpt_settings(self, popen):
         child = Mock()
         child.stdout = io.StringIO("")
         child.poll.return_value = 0
@@ -1372,15 +1373,39 @@ class WebUIModelSettingsTests(unittest.TestCase):
             ))
             saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
-        self.assertTrue(any("Starting" in item for item in output))
-        self.assertEqual(saved["image_generation"], {
-            "support_provider": "lovart",
-            "detail_provider": "lovart",
-        })
+        self.assertFalse(any("Starting" in item for item in output))
+        self.assertTrue(any("GPT Image" in item for item in output))
         self.assertEqual(saved["openai_image"]["base_url"], "deliberately-malformed")
         self.assertEqual(saved["openai_image"]["resolution"], "BAD")
-        self.assertFalse("api_key" in saved["openai_image"])
         self.assertNotIn("legacy-sentinel-secret", str(output))
+        popen.assert_not_called()
+
+    @patch("webui.subprocess.Popen")
+    def test_lovart_only_launch_allows_blank_gpt_base_url(self, popen):
+        child = Mock()
+        child.stdout = io.StringIO("")
+        child.poll.return_value = 0
+        popen.return_value = child
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            env_path = Path(tmp) / ".env"
+            config_path.write_text(
+                "gemini_api:\n  base_url: https://gemini.test/v1beta\n  model: gemini-model\n"
+                "nvidia_api:\n  base_url: https://nvidia.test/v1\n  model: nvidia-model\n",
+                encoding="utf-8",
+            )
+
+            output = list(run_process(
+                None, "output", "gemini_api", "gemini-model", "unlimited", "auto",
+                "https://gemini.test/v1beta", "https://nvidia.test/v1",
+                "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
+                "", "", "gpt-image-2", "1K", "lovart", "lovart", False,
+                config_path=config_path,
+                env_path=env_path,
+            ))
+
+        self.assertTrue(any("Starting" in item for item in output))
+        popen.assert_called_once()
 
     def test_selected_gpt_route_rejects_malformed_or_missing_selected_settings(self):
         cases = [
@@ -1437,7 +1462,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
                 None, "output", "gemini_api", "gemini-model", "unlimited", "auto",
                 "https://gemini.test/v1beta", "https://nvidia.test/v1",
                 "gemini-key", "nvidia-key", "lovart-access", "lovart-secret",
-                "", "malformed-unused", "", "BAD", "lovart", "lovart", True,
+                "", "", "gpt-image-2", "1K", "lovart", "lovart", True,
                 config_path=config_path,
                 env_path=env_path,
             ))

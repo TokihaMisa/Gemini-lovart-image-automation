@@ -700,6 +700,53 @@ def test_running_task_polls_same_id_then_downloads_and_reports_progress(build_op
     assert isinstance(result, GeneratedImage)
 
 
+@patch("openai_image_api.urllib.request.build_opener")
+def test_nested_provider_status_redacts_exact_task_id_from_all_display_callbacks(
+    build_opener, tmp_path
+):
+    task_id = "provider-private-task-12345678"
+    statuses = []
+    tasks = []
+    display_events = []
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(json.dumps({"data": {"task_id": task_id}}).encode()),
+        FakeResponse(json.dumps({
+            "data": {
+                "task_id": task_id,
+                "state": "running",
+                "is_final": False,
+                "progress": f"42% for {task_id}",
+                "status": f"rendering {task_id}",
+            }
+        }).encode()),
+        FakeResponse(json.dumps({
+            "data": {
+                "task_id": task_id,
+                "state": "success",
+                "is_final": True,
+                "result_url": "https://cdn.example/result.png",
+                "result_type": "image",
+            }
+        }).encode()),
+    ]
+
+    make_client(sleep=lambda _seconds: None).generate_edit(
+        "prompt",
+        [make_png(tmp_path / "source.png")],
+        tmp_path / "out.png",
+        status_callback=statuses.append,
+        task_callback=tasks.append,
+        display_callback=display_events.append,
+    )
+
+    assert all(task_id not in message for message in statuses)
+    assert all(task_id not in task.status for task in tasks)
+    assert all(task_id not in task.progress for task in tasks)
+    assert display_events
+    assert all(task_id not in json.dumps(asdict(event)) for event in display_events)
+    assert any(event.task_suffix == "12345678" for event in display_events)
+
+
 @pytest.mark.parametrize(
     ("task_id", "expected_display", "forbidden_display"),
     [
