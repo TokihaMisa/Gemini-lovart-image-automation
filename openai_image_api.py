@@ -622,22 +622,26 @@ def _encode_reference_images(paths: Sequence[str | Path], merge: bool) -> list[s
         )
 
     validated = [_read_validated_reference(path) for path in source_paths]
-    total_bytes = sum(len(raw) for _, raw in validated)
-    if any(len(raw) > MAX_REFERENCE_BYTES for _, raw in validated):
-        raise OpenAIImageAPIError("reference_image_too_large", "A reference image exceeds the size limit.")
-    if total_bytes > MAX_REFERENCE_TOTAL_BYTES:
-        raise OpenAIImageAPIError("reference_total_too_large", "Reference images exceed the total size limit.")
+    _validate_reference_byte_limits(validated)
 
     if merge and len(source_paths) > 1:
         reference_sheet = _build_reference_sheet(source_paths)
         try:
             validated = [_read_validated_reference(reference_sheet)]
+            _validate_reference_byte_limits(validated)
         finally:
             try:
                 reference_sheet.unlink()
             except FileNotFoundError:
                 pass
     return [f"data:{media_type};base64,{base64.b64encode(raw).decode('ascii')}" for media_type, raw in validated]
+
+
+def _validate_reference_byte_limits(validated: Sequence[tuple[str, bytes]]) -> None:
+    if any(len(raw) > MAX_REFERENCE_BYTES for _, raw in validated):
+        raise OpenAIImageAPIError("reference_image_too_large", "A reference image exceeds the size limit.")
+    if sum(len(raw) for _, raw in validated) > MAX_REFERENCE_TOTAL_BYTES:
+        raise OpenAIImageAPIError("reference_total_too_large", "Reference images exceed the total size limit.")
 
 
 def _build_create_body(model: str, prompt: str, size: str, images: Sequence[str]) -> bytes:

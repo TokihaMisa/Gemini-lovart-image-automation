@@ -398,11 +398,66 @@ def test_reference_merge_is_explicit_and_uses_one_data_url(tmp_path):
     assert merged[0].startswith("data:image/png;base64,")
 
 
+@pytest.mark.parametrize(
+    ("limit_name", "error_code"),
+    [
+        ("MAX_REFERENCE_BYTES", "reference_image_too_large"),
+        ("MAX_REFERENCE_TOTAL_BYTES", "reference_total_too_large"),
+    ],
+)
+def test_merged_reference_sheet_rechecks_decoded_byte_limits(
+    monkeypatch, tmp_path, limit_name, error_code
+):
+    references = [make_png(tmp_path / "first.png"), make_png(tmp_path / "second.png")]
+    original = references[0].read_bytes()
+    merged_size = len(original) * 3
+
+    def write_sheet(size):
+        sheet = tmp_path / f"sheet-{size}.png"
+        sheet.write_bytes(original + b"x" * (size - len(original)))
+        return sheet
+
+    def encode_sheet(size):
+        monkeypatch.setattr(
+            "openai_image_api._build_reference_sheet",
+            lambda _paths: write_sheet(size),
+        )
+        return _encode_reference_images(references, merge=True)
+
+    monkeypatch.setattr("openai_image_api.MAX_REFERENCE_BYTES", merged_size)
+    monkeypatch.setattr("openai_image_api.MAX_REFERENCE_TOTAL_BYTES", merged_size)
+    assert len(encode_sheet(merged_size)) == 1
+
+    if limit_name == "MAX_REFERENCE_BYTES":
+        monkeypatch.setattr("openai_image_api.MAX_REFERENCE_BYTES", merged_size)
+        monkeypatch.setattr("openai_image_api.MAX_REFERENCE_TOTAL_BYTES", merged_size + 1)
+    else:
+        monkeypatch.setattr("openai_image_api.MAX_REFERENCE_BYTES", merged_size + 1)
+        monkeypatch.setattr("openai_image_api.MAX_REFERENCE_TOTAL_BYTES", merged_size)
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        encode_sheet(merged_size + 1)
+    assert ctx.value.code == error_code
+
+
 @patch("openai_image_api.urllib.request.build_opener")
 @pytest.mark.parametrize("raw", [b"not an image", base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)[:-8]])
 def test_invalid_reference_images_fail_before_network_access(build_opener, raw, tmp_path):
     source = tmp_path / "invalid.png"
     source.write_bytes(raw)
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client().generate_edit("prompt", [source], tmp_path / "out.png")
+
+    assert ctx.value.code == "invalid_input_image"
+    build_opener.assert_not_called()
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+@pytest.mark.parametrize("image_format", ["BMP", "GIF"])
+def test_unsupported_pillow_valid_reference_image_fails_before_network_access(
+    build_opener, image_format, tmp_path
+):
+    source = make_image(tmp_path / f"reference.{image_format.lower()}", image_format)
 
     with pytest.raises(OpenAIImageAPIError) as ctx:
         make_client().generate_edit("prompt", [source], tmp_path / "out.png")
