@@ -34,6 +34,7 @@ _PERMANENT_ERROR_MARKERS = (
     "pending confirmation",
     "manual action",
     "needs_manual_action",
+    "已停止自动重试",
     "no main product image",
     "没有商品主图",
 )

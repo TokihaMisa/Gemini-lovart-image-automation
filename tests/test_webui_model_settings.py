@@ -1234,6 +1234,21 @@ class WebUIModelSettingsTests(unittest.TestCase):
             all("⏳ 等待处理" in frame for frame in frames if "SKU-1" in frame)
         )
 
+    def test_live_support_status_shows_elapsed_wait_time(self):
+        status = webui._live_product_status(
+            {
+                "status": "📨 GPT Image 请求已提交，正在等待服务返回（最长 10 分钟）",
+                "stage": "support_scene",
+                "stage_started_at": 100.0,
+            },
+            now=225.0,
+        )
+
+        self.assertEqual(
+            status,
+            "📨 GPT Image 请求已提交，正在等待服务返回（最长 10 分钟） · 已等待 2分05秒",
+        )
+
     @patch("webui.subprocess.Popen")
     def test_lovart_only_launch_ignores_malformed_unused_gpt_settings(self, popen):
         child = Mock()

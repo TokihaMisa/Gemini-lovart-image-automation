@@ -78,6 +78,20 @@ PROMPT_FORM_FIELDS = (
 
 active_processes = []
 API_SETTINGS_SAVE_SUCCESS = "✅ 密钥、API 地址和模型已保存"
+
+
+def _live_product_status(product: dict, *, now: float | None = None) -> str:
+    status = str(product.get("status") or "⏳ 等待处理")
+    if product.get("stage") not in {"support_white", "support_scene"}:
+        return status
+    try:
+        started_at = float(product["stage_started_at"])
+    except (KeyError, TypeError, ValueError):
+        return status
+    elapsed = max(0, int((time.time() if now is None else now) - started_at))
+    minutes, seconds = divmod(elapsed, 60)
+    elapsed_text = f"{minutes}分{seconds:02d}秒" if minutes else f"{seconds}秒"
+    return f"{status} · 已等待 {elapsed_text}"
 OPENAI_IMAGE_TEST_BUTTON_LABEL = "真实图像编辑测试（可能产生一次图片费用）"
 _gemini_login_launch_lock = threading.Lock()
 _gemini_login_launches: dict[str, float] = {}
@@ -1392,6 +1406,7 @@ def run_process(
         if products_dict:
             cards_html += "<div style='display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 15px; margin-top: 20px;'>"
             for pid, pdata in products_dict.items():
+                live_status = _live_product_status(pdata)
                 img_tag = ""
                 if pdata.get("image"):
                     try:
@@ -1437,7 +1452,7 @@ def run_process(
                             </div>
                             <div style='font-size: 1.05em; color: #f8fafc; font-weight: 700; margin-bottom: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;' title="{pdata['name']}">{pdata['name']}</div>
                             <div style='display: inline-block; background: {pdata["color"]}15; color: {pdata["color"]}; padding: 4px 12px; border-radius: 9999px; font-size: 0.8em; font-weight: 600; border: 1px solid {pdata["color"]}30;'>
-                                {pdata["status"]}
+                                {live_status}
                             </div>
                         </div>
                     </div>
@@ -1567,6 +1582,9 @@ def run_process(
                         "prompt": "#06b6d4",
                         "detail": "#3b82f6",
                     }.get(stage, "#8b5cf6")
+                    if products_dict[pid].get("stage") != stage:
+                        products_dict[pid]["stage_started_at"] = time.time()
+                    products_dict[pid]["stage"] = stage
                     products_dict[pid]["status"] = message
                     products_dict[pid]["color"] = status_color
                     stage_log = f"▶ {html.escape(message)}"
@@ -1617,6 +1635,7 @@ def run_process(
                 pid = data["id"]
                 if pid in products_dict:
                     products_dict[pid]["url"] = data.get("url", "")
+                    products_dict[pid]["stage"] = "complete"
                     products_dict[pid]["status"] = "🎉 成功生成"
                     products_dict[pid]["color"] = "#10b981"
                     current_status = f"🎉 {pid} 已完成"
@@ -1635,6 +1654,7 @@ def run_process(
                 is_manual = data.get("is_manual", False)
                 if pid in products_dict:
                     status_color = "#f59e0b" if is_manual else "#ef4444"
+                    products_dict[pid]["stage"] = "manual" if is_manual else "failed"
                     products_dict[pid]["status"] = f"{'⚠️' if is_manual else '❌'} {reason}"
                     products_dict[pid]["color"] = status_color
                     current_status = f"❌ {pid} 失败" if not is_manual else f"⚠️ {pid} 待确认"

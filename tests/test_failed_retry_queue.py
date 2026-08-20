@@ -288,6 +288,13 @@ class FailedRetryQueueTests(unittest.TestCase):
             "status": "failed",
             "error": "Gemini 未登录，请先登录后再试。",
         }))
+        self.assertIsNone(classify_retry_failure({
+            "status": "failed",
+            "error": (
+                "GPT Image 同步请求已提交但未收到响应，结果未知；"
+                "已停止自动重试。请先检查平台后台。"
+            ),
+        }))
         self.assertEqual(classify_retry_failure({
             "status": "failed",
             "error": "Unexpected response shape",

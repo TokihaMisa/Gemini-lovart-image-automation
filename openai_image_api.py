@@ -10,14 +10,17 @@ import http.client
 import io
 import ipaddress
 import json
+import math
 import mimetypes
 import os
 from pathlib import Path
+import queue
 import re
 import secrets
 import socket
 import ssl
 import tempfile
+import threading
 import time
 from typing import Any, Callable, Final, Sequence
 from urllib.error import HTTPError, URLError
@@ -436,7 +439,7 @@ class OpenAIImageAPI:
                 status_callback=status_callback,
             )
         else:
-            payload = self._request_json(
+            payload = self._request_sync_edit(
                 "/images/edits",
                 body,
                 content_type,
@@ -634,12 +637,79 @@ class OpenAIImageAPI:
         *,
         status_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
-        return self._request_json(
+        return self._request_sync_edit(
             _hapi_images_endpoint(self.config.base_url, "/edits"),
             body,
             content_type,
             status_callback=status_callback,
         )
+
+    def _request_sync_edit(
+        self,
+        endpoint: str,
+        body: bytes,
+        content_type: str,
+        *,
+        status_callback: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        _notify_status(
+            status_callback,
+            "📨 GPT Image 请求已提交，正在等待服务返回"
+            f"（最长 {_wait_limit_text(self.config.timeout)}）",
+        )
+        result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+        def request_once() -> None:
+            try:
+                result = self._request_json(
+                    endpoint,
+                    body,
+                    content_type,
+                    max_attempts=1,
+                    status_callback=status_callback,
+                )
+            except Exception as exc:  # delivered back to the calling thread
+                result_queue.put(("error", exc))
+            else:
+                result_queue.put(("result", result))
+
+        # urllib's timeout applies to individual socket operations, not to the
+        # whole response.  A provider can therefore keep a paid request alive
+        # indefinitely by periodically sending bytes.  A daemon worker lets us
+        # enforce a strict wall-clock deadline without submitting a second POST.
+        threading.Thread(
+            target=request_once,
+            name="gpt-image-sync-request",
+            daemon=True,
+        ).start()
+
+        started_at = time.monotonic()
+        deadline = started_at + float(self.config.timeout)
+        heartbeat_seconds = min(10.0, max(1.0, float(self.config.timeout) / 4))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _ambiguous_sync_submission_error()
+            try:
+                result_type, value = result_queue.get(
+                    timeout=min(heartbeat_seconds, remaining)
+                )
+            except queue.Empty:
+                _notify_status(
+                    status_callback,
+                    "⏳ GPT Image 同步请求仍在等待"
+                    f"（已等待 {_wait_limit_text(time.monotonic() - started_at)}，"
+                    f"最长 {_wait_limit_text(self.config.timeout)}）",
+                )
+                continue
+
+            if result_type == "result":
+                return value
+            if isinstance(value, OpenAIImageAPIError):
+                if value.status_code is None and value.code in {"timeout", "network"}:
+                    raise _ambiguous_sync_submission_error() from None
+                raise value
+            raise value
 
     def _raise_hapi_task_failure(self, payload: Mapping[str, Any]) -> None:
         raw_status = payload.get("http_status")
@@ -1241,12 +1311,36 @@ def _transport_error(exc: BaseException) -> OpenAIImageAPIError:
             f"GPT Image API request failed (HTTP {exc.code}).",
             exc.code,
         )
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return OpenAIImageAPIError(
+            "timeout",
+            "GPT Image API did not respond before the local wait timeout.",
+            retryable=True,
+        )
     kind = classify_network_error(exc)
     if kind is RetryKind.PERMANENT_TLS:
         return OpenAIImageAPIError("tls_certificate", PERMANENT_TLS_GUIDANCE)
     if kind is RetryKind.TRANSIENT:
         return OpenAIImageAPIError("network", "Could not reach GPT Image API.", retryable=True)
     return OpenAIImageAPIError("network", "Could not reach GPT Image API.")
+
+
+def _wait_limit_text(timeout: object) -> str:
+    total_seconds = max(1, math.ceil(float(timeout)))
+    minutes, seconds = divmod(total_seconds, 60)
+    if minutes and seconds:
+        return f"{minutes} 分 {seconds:02d} 秒"
+    if minutes:
+        return f"{minutes} 分钟"
+    return f"{seconds} 秒"
+
+
+def _ambiguous_sync_submission_error() -> OpenAIImageAPIError:
+    return OpenAIImageAPIError(
+        "ambiguous_submission",
+        "GPT Image 同步请求已提交但未收到响应，结果未知；"
+        "已停止自动重试。请先在 API 平台后台确认任务和扣费状态，再手动重试。",
+    )
 
 
 def _retry_delay(delays: Sequence[float], failed_attempt: int) -> float:

@@ -3,6 +3,8 @@ import io
 import json
 import socket
 import ssl
+import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
 from urllib.error import HTTPError
@@ -686,27 +688,76 @@ def test_generate_edit_uses_redirect_rejecting_transport_for_authenticated_post(
 
 
 @patch("openai_image_api.urllib.request.build_opener")
-def test_generate_edit_retries_429_but_not_401(build_opener, tmp_path):
-    """Fails if permanent authentication failures can create extra paid image jobs."""
-    source = make_png(tmp_path / "source.png")
-    build_opener.return_value.open.side_effect = [
-        HTTPError("https://hapiopen.cc/v1/images/edits", 429, "busy", {}, None),
-        fake_png_response(),
+def test_sync_edit_timeout_is_not_retried_and_reports_wait_limit(build_opener, tmp_path):
+    """Fails if an ambiguous timeout can submit the same paid edit more than once."""
+    build_opener.return_value.open.side_effect = socket.timeout("provider stalled")
+    statuses = []
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client(max_attempts=4).generate_edit(
+            "prompt",
+            [make_png(tmp_path / "source.png")],
+            tmp_path / "out.png",
+            status_callback=statuses.append,
+        )
+
+    assert ctx.value.code == "ambiguous_submission"
+    assert "已停止自动重试" in str(ctx.value)
+    assert build_opener.return_value.open.call_count == 1
+    assert statuses == [
+        "📨 GPT Image 请求已提交，正在等待服务返回（最长 13 秒）"
     ]
 
-    make_client().generate_edit("prompt", [source], tmp_path / "out.png")
 
-    assert build_opener.return_value.open.call_count == 2
+@patch("openai_image_api.urllib.request.build_opener")
+def test_sync_edit_enforces_wall_clock_deadline_when_response_never_finishes(
+    build_opener,
+    tmp_path,
+):
+    """Fails if socket activity can keep a paid synchronous edit waiting forever."""
+    release_response = threading.Event()
 
-    build_opener.return_value.open.reset_mock()
-    build_opener.return_value.open.side_effect = HTTPError(
-        "https://hapiopen.cc/v1/images/edits", 401, "unauthorized", {}, None
-    )
-    with pytest.raises(OpenAIImageAPIError) as ctx:
-        make_client().generate_edit("prompt", [source], tmp_path / "out-401.png")
+    def stalled_response(*_args, **_kwargs):
+        release_response.wait(1.0)
+        return fake_png_response()
 
-    assert ctx.value.code == "authentication"
+    build_opener.return_value.open.side_effect = stalled_response
+    started = time.monotonic()
+    try:
+        with pytest.raises(OpenAIImageAPIError) as ctx:
+            make_client(timeout=0.05, max_attempts=4).generate_edit(
+                "prompt",
+                [make_png(tmp_path / "source.png")],
+                tmp_path / "out.png",
+            )
+    finally:
+        release_response.set()
+
+    assert time.monotonic() - started < 0.5
+    assert ctx.value.code == "ambiguous_submission"
     assert build_opener.return_value.open.call_count == 1
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_generate_edit_does_not_retry_paid_post_for_429_or_401(build_opener, tmp_path):
+    """Fails if an HTTP error can automatically resubmit a paid synchronous edit."""
+    source = make_png(tmp_path / "source.png")
+    for status, expected_code in ((429, "rate_limit"), (401, "authentication")):
+        build_opener.return_value.open.reset_mock()
+        build_opener.return_value.open.side_effect = HTTPError(
+            "https://gateway.test/v1/images/edits",
+            status,
+            "injected error",
+            {},
+            None,
+        )
+        with pytest.raises(OpenAIImageAPIError) as ctx:
+            make_client(base_url="https://gateway.test/v1").generate_edit(
+                "prompt", [source], tmp_path / f"out-{status}.png"
+            )
+
+        assert ctx.value.code == expected_code
+        assert build_opener.return_value.open.call_count == 1
 
 
 @pytest.mark.parametrize(
