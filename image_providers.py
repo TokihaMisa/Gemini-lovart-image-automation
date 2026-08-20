@@ -16,11 +16,42 @@ from image_generation import (
     DetailScreen,
     normalize_image_provider,
 )
-from openai_image_api import append_aspect_instruction, normalize_openai_image_base_url
+from openai_image_api import (
+    GeneratedImage,
+    ImageTaskSnapshot,
+    ImageTaskStillRunning,
+    _provider_image_size,
+    append_aspect_instruction,
+    normalize_openai_image_base_url,
+)
 from utils import read_status, update_status
 
 
 _CHECKPOINT_FIELD = "detail_checkpoints"
+_SUPPORT_TASK_CHECKPOINT_FIELD = "support_task_checkpoints"
+_SUPPORT_TASK_CHECKPOINT_KEYS = frozenset(
+    {
+        "state",
+        "task_id",
+        "task_created_at",
+        "is_final",
+        "progress",
+        "status",
+        "status_group",
+        "result_url",
+        "result_type",
+        "error",
+        "cost",
+        "input_fingerprint",
+        "prompt_hash",
+        "model",
+        "size",
+        "base_url",
+        "merge_reference_images",
+        "local_path",
+        "attempts",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -34,6 +65,8 @@ class SupportImageRequest:
     product_name_cn: str = ""
     language: str = ""
     selling_points: str = ""
+    input_fingerprint: str = ""
+    resume: bool = True
     confirmation_advisor: Any | None = None
     status_callback: Callable[[str], None] | None = None
 
@@ -69,6 +102,8 @@ class ImageProviderResult:
     partial_complete: bool = False
     error: str = ""
     raw_result: Mapping[str, object] | None = None
+    still_running: bool = False
+    task_id_suffix: str = ""
 
 
 class LazyImageProviderRegistry:
@@ -94,12 +129,22 @@ def record_detail_checkpoint(
     attempts: int = 0,
     input_fingerprint: str = "",
     prompt_hash: str = "",
+    task_id: str = "",
+    task_created_at: float = 0.0,
+    is_final: bool = False,
+    progress: str = "",
+    status: str = "",
+    status_group: str = "",
+    result_url: str = "",
+    result_type: str = "",
+    cost: object = None,
+    request_settings: Mapping[str, object] | None = None,
 ) -> None:
     """Atomically persist the state of one GPT detail screen."""
-    status = read_status(product_dir)
-    checkpoints = status.get(_CHECKPOINT_FIELD, {})
+    product_status = read_status(product_dir)
+    checkpoints = product_status.get(_CHECKPOINT_FIELD, {})
     saved = dict(checkpoints) if isinstance(checkpoints, Mapping) else {}
-    saved[str(index)] = {
+    checkpoint = {
         "state": str(state),
         "local_path": str(local_path),
         "error": str(error),
@@ -107,7 +152,59 @@ def record_detail_checkpoint(
         "input_fingerprint": str(input_fingerprint or ""),
         "prompt_hash": str(prompt_hash or ""),
     }
+    if task_id:
+        checkpoint.update(
+            task_id=str(task_id),
+            task_created_at=float(task_created_at),
+            is_final=bool(is_final),
+            progress=str(progress),
+            status=str(status),
+            status_group=str(status_group),
+            result_url=str(result_url),
+            result_type=str(result_type),
+            cost=_json_safe_setting(cost),
+        )
+    if request_settings:
+        checkpoint.update(
+            {
+                str(key): _json_safe_setting(value)
+                for key, value in request_settings.items()
+            }
+        )
+    saved[str(index)] = checkpoint
     update_status(product_dir, "detail_checkpoint_updated", **{_CHECKPOINT_FIELD: saved})
+
+
+def record_support_task_checkpoint(
+    product_dir: str | Path,
+    step_name: str,
+    checkpoint: Mapping[str, object],
+) -> None:
+    """Atomically replace one provider-owned support task checkpoint."""
+    status = read_status(product_dir)
+    checkpoints = status.get(_SUPPORT_TASK_CHECKPOINT_FIELD, {})
+    saved = dict(checkpoints) if isinstance(checkpoints, Mapping) else {}
+    saved[str(step_name)] = {
+        str(key): _json_safe_setting(value)
+        for key, value in checkpoint.items()
+        if str(key) in _SUPPORT_TASK_CHECKPOINT_KEYS
+    }
+    update_status(
+        product_dir,
+        "support_task_checkpoint_updated",
+        **{_SUPPORT_TASK_CHECKPOINT_FIELD: saved},
+    )
+
+
+def read_support_task_checkpoint(
+    product_dir: str | Path,
+    step_name: str,
+) -> dict[str, object]:
+    checkpoints = read_status(product_dir).get(_SUPPORT_TASK_CHECKPOINT_FIELD, {})
+    if not isinstance(checkpoints, Mapping):
+        return {}
+    checkpoint = checkpoints.get(str(step_name), {})
+    return dict(checkpoint) if isinstance(checkpoint, Mapping) else {}
 
 
 def read_completed_detail_indexes(
@@ -173,6 +270,61 @@ class OpenAIImageProvider:
 
     def generate_support_image(self, request: SupportImageRequest) -> ImageProviderResult:
         output_path = request.product_dir / "gpt_image" / "support" / f"{request.step_name}.png"
+        identity = _support_request_identity(self.api, request)
+        checkpoint = read_support_task_checkpoint(request.product_dir, request.step_name)
+        identity_matches = _checkpoint_matches_identity(checkpoint, identity)
+        saved_task = (
+            _task_snapshot_from_checkpoint(checkpoint)
+            if request.resume and identity_matches
+            else None
+        )
+        if (
+            request.resume
+            and identity_matches
+            and str(checkpoint.get("state") or "") == "done"
+            and is_valid_image_file(checkpoint.get("local_path"))
+        ):
+            local_path = str(checkpoint["local_path"])
+            return ImageProviderResult(
+                succeeded=True,
+                local_paths=(local_path,),
+                used_model=str(identity["model"]),
+                completed_count=1,
+            )
+        if saved_task is not None and saved_task.state == "failed":
+            saved_task = None
+        if saved_task is None:
+            _remove_file(output_path)
+            attempts = _checkpoint_attempt_value(checkpoint) + 1 if identity_matches else 1
+            record_support_task_checkpoint(
+                request.product_dir,
+                request.step_name,
+                {
+                    **identity,
+                    "state": "running",
+                    "local_path": "",
+                    "error": "",
+                    "attempts": attempts,
+                },
+            )
+        else:
+            attempts = max(1, _checkpoint_attempt_value(checkpoint))
+        callback_local_path = (
+            str(checkpoint.get("local_path") or "") if saved_task is not None else ""
+        )
+
+        def persist(task: ImageTaskSnapshot) -> None:
+            record_support_task_checkpoint(
+                request.product_dir,
+                request.step_name,
+                {
+                    **identity,
+                    "local_path": callback_local_path,
+                    "attempts": attempts,
+                    **_checkpoint_fields_for_persistence(self.api, task),
+                },
+            )
+
         try:
             generated = self.api.generate_edit(
                 prompt=request.prompt,
@@ -180,14 +332,67 @@ class OpenAIImageProvider:
                 output_path=output_path,
                 image_size=request.image_size,
                 status_callback=request.status_callback,
+                task_callback=persist,
+                resume_task=saved_task,
+            )
+        except ImageTaskStillRunning as exc:
+            persist(exc.task)
+            return ImageProviderResult(
+                succeeded=False,
+                still_running=True,
+                task_id_suffix=_task_id_suffix(exc.task.task_id),
             )
         except Exception as exc:
-            return ImageProviderResult(succeeded=False, error=str(exc))
+            task = getattr(exc, "task", None)
+            safe_error = _sanitized_provider_error(self.api, exc)
+            failed_checkpoint = {
+                **identity,
+                "state": "failed",
+                "local_path": "",
+                "error": safe_error,
+                "attempts": attempts,
+            }
+            if isinstance(task, ImageTaskSnapshot):
+                failed_checkpoint.update(
+                    _checkpoint_fields_for_persistence(self.api, task)
+                )
+                failed_checkpoint["state"] = "failed"
+                failed_checkpoint["error"] = (
+                    _sanitized_task_text(self.api, task.error) or safe_error
+                )
+            record_support_task_checkpoint(
+                request.product_dir,
+                request.step_name,
+                failed_checkpoint,
+            )
+            return ImageProviderResult(
+                succeeded=False,
+                error=safe_error,
+                task_id_suffix=(
+                    _task_id_suffix(task.task_id)
+                    if isinstance(task, ImageTaskSnapshot)
+                    else ""
+                ),
+            )
+        task = _generated_task(generated)
+        local_path = str(generated.local_path)
+        record_support_task_checkpoint(
+            request.product_dir,
+            request.step_name,
+            {
+                **identity,
+                "local_path": local_path,
+                "attempts": attempts,
+                **_checkpoint_fields_for_persistence(self.api, task),
+                "state": "done",
+            },
+        )
         return ImageProviderResult(
             succeeded=True,
-            local_paths=(str(generated.local_path),),
+            local_paths=(local_path,),
             used_model=str(generated.model),
             completed_count=1,
+            task_id_suffix=_task_id_suffix(task.task_id),
         )
 
     def generate_detail_set(self, request: DetailSetRequest) -> ImageProviderResult:
@@ -199,6 +404,7 @@ class OpenAIImageProvider:
             )
             for screen in request.screens
         }
+        request_settings = _openai_request_settings(self.api, request.image_size)
         if request.resume:
             completed = read_completed_detail_indexes(
                 request.product_dir,
@@ -206,13 +412,6 @@ class OpenAIImageProvider:
                 request.input_fingerprint,
                 prompt_hashes,
             )
-            for screen in sorted(request.screens, key=lambda item: item.index):
-                if screen.index not in completed and _reconcile_running_detail_output(
-                    request,
-                    screen.index,
-                    prompt_hashes[screen.index],
-                ):
-                    completed.add(screen.index)
         else:
             update_status(
                 request.product_dir,
@@ -222,6 +421,8 @@ class OpenAIImageProvider:
             completed = set()
         failed: list[int] = []
         errors: list[str] = []
+        still_running = False
+        last_task_suffix = ""
         config = getattr(self.api, "config", None)
         used_model = str(
             getattr(config, "model", "gpt-image-2") or "gpt-image-2"
@@ -229,29 +430,56 @@ class OpenAIImageProvider:
         for screen in sorted(request.screens, key=lambda item: item.index):
             if screen.index in completed:
                 continue
-            attempts = _checkpoint_attempts(request.product_dir, screen.index) + 1
             output_path = request.product_dir / "gpt_image" / "detail" / f"{screen.index:02d}.png"
-            if (
-                not request.resume
-                or not _checkpoint_identity_matches(
+            checkpoint = _read_detail_checkpoint(request.product_dir, screen.index)
+            identity = {
+                "input_fingerprint": request.input_fingerprint,
+                "prompt_hash": prompt_hashes[screen.index],
+                **request_settings,
+            }
+            identity_matches = _checkpoint_matches_identity(checkpoint, identity)
+            saved_task = (
+                _task_snapshot_from_checkpoint(checkpoint)
+                if request.resume and identity_matches
+                else None
+            )
+            if saved_task is not None and saved_task.state == "failed":
+                saved_task = None
+            if saved_task is None:
+                _remove_file(output_path)
+                attempts = _checkpoint_attempt_value(checkpoint) + 1 if identity_matches else 1
+                record_detail_checkpoint(
                     request.product_dir,
                     screen.index,
-                    request.input_fingerprint,
-                    prompt_hashes[screen.index],
+                    "running",
+                    attempts=attempts,
+                    input_fingerprint=request.input_fingerprint,
+                    prompt_hash=prompt_hashes[screen.index],
+                    request_settings=request_settings,
                 )
-            ):
-                try:
-                    output_path.unlink()
-                except FileNotFoundError:
-                    pass
-            record_detail_checkpoint(
-                request.product_dir,
-                screen.index,
-                "running",
-                attempts=attempts,
-                input_fingerprint=request.input_fingerprint,
-                prompt_hash=prompt_hashes[screen.index],
+            else:
+                attempts = max(1, _checkpoint_attempt_value(checkpoint))
+            callback_local_path = (
+                str(checkpoint.get("local_path") or "")
+                if saved_task is not None
+                else ""
             )
+
+            def persist(task: ImageTaskSnapshot) -> None:
+                fields = _checkpoint_fields_for_persistence(self.api, task)
+                record_detail_checkpoint(
+                    request.product_dir,
+                    screen.index,
+                    str(fields.pop("state")),
+                    local_path=callback_local_path,
+                    error=str(fields.pop("error")),
+                    attempts=attempts,
+                    input_fingerprint=request.input_fingerprint,
+                    prompt_hash=prompt_hashes[screen.index],
+                    request_settings=request_settings,
+                    **fields,
+                )
+
             try:
                 generated = self.api.generate_edit(
                     prompt=screen.prompt,
@@ -259,18 +487,39 @@ class OpenAIImageProvider:
                     output_path=output_path,
                     image_size=request.image_size,
                     status_callback=request.status_callback,
+                    task_callback=persist,
+                    resume_task=saved_task,
                 )
+            except ImageTaskStillRunning as exc:
+                persist(exc.task)
+                still_running = True
+                last_task_suffix = _task_id_suffix(exc.task.task_id)
+                break
             except Exception as exc:
                 failed.append(screen.index)
-                errors.append(f"screen {screen.index}: {exc}")
+                safe_error = _sanitized_provider_error(self.api, exc)
+                errors.append(f"screen {screen.index}: {safe_error}")
+                task = getattr(exc, "task", None)
+                task_fields: dict[str, object] = {}
+                if isinstance(task, ImageTaskSnapshot):
+                    task_fields = _checkpoint_fields_for_persistence(self.api, task)
+                    task_fields.pop("state", None)
+                    task_fields.pop("error", None)
+                    last_task_suffix = _task_id_suffix(task.task_id)
                 record_detail_checkpoint(
                     request.product_dir,
                     screen.index,
                     "failed",
-                    error=str(exc),
+                    error=(
+                        _sanitized_task_text(self.api, task.error) or safe_error
+                        if isinstance(task, ImageTaskSnapshot)
+                        else safe_error
+                    ),
                     attempts=attempts,
                     input_fingerprint=request.input_fingerprint,
                     prompt_hash=prompt_hashes[screen.index],
+                    request_settings=request_settings,
+                    **task_fields,
                 )
                 if request.progress_callback:
                     request.progress_callback(
@@ -280,6 +529,10 @@ class OpenAIImageProvider:
                         tuple(failed),
                     )
                 break
+            task = _generated_task(generated)
+            task_fields = _checkpoint_fields_for_persistence(self.api, task)
+            task_fields.pop("state", None)
+            task_fields.pop("error", None)
             local_path = str(generated.local_path)
             record_detail_checkpoint(
                 request.product_dir,
@@ -289,8 +542,12 @@ class OpenAIImageProvider:
                 attempts=attempts,
                 input_fingerprint=request.input_fingerprint,
                 prompt_hash=prompt_hashes[screen.index],
+                error=_sanitized_task_text(self.api, task.error),
+                request_settings=request_settings,
+                **task_fields,
             )
             completed.add(screen.index)
+            last_task_suffix = _task_id_suffix(task.task_id)
             used_model = str(generated.model) or used_model
             if request.progress_callback:
                 request.progress_callback(
@@ -308,13 +565,15 @@ class OpenAIImageProvider:
         )
         completed_count = len(completed)
         return ImageProviderResult(
-            succeeded=completed_count == request.target_count,
+            succeeded=not still_running and completed_count == request.target_count,
             local_paths=local_paths,
             used_model=used_model,
             completed_count=completed_count,
             failed_indexes=tuple(failed),
             partial_complete=0 < completed_count < request.target_count,
             error="; ".join(errors),
+            still_running=still_running,
+            task_id_suffix=last_task_suffix,
         )
 
 
@@ -503,30 +762,184 @@ def _checkpoint_for_index(checkpoints: Mapping[str, object], index: int) -> obje
     return checkpoints.get(str(index), checkpoints.get(f"{index:02d}"))
 
 
+def _read_detail_checkpoint(product_dir: str | Path, index: int) -> dict[str, object]:
+    checkpoints = read_status(product_dir).get(_CHECKPOINT_FIELD, {})
+    if not isinstance(checkpoints, Mapping):
+        return {}
+    checkpoint = _checkpoint_for_index(checkpoints, index)
+    return dict(checkpoint) if isinstance(checkpoint, Mapping) else {}
+
+
+def _task_snapshot_from_checkpoint(
+    checkpoint: Mapping[str, object],
+) -> ImageTaskSnapshot | None:
+    task_id = str(checkpoint.get("task_id") or "").strip()
+    if not task_id:
+        return None
+    try:
+        task_created_at = float(checkpoint.get("task_created_at") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    state = str(checkpoint.get("state") or "running")
+    if state == "done":
+        state = "success"
+    return ImageTaskSnapshot(
+        task_id=task_id,
+        state=state,
+        is_final=bool(checkpoint.get("is_final", False)),
+        task_created_at=task_created_at,
+        progress=str(checkpoint.get("progress") or ""),
+        status=str(checkpoint.get("status") or ""),
+        status_group=str(checkpoint.get("status_group") or ""),
+        result_url=str(checkpoint.get("result_url") or ""),
+        result_type=str(checkpoint.get("result_type") or ""),
+        error=str(checkpoint.get("error") or ""),
+        cost=checkpoint.get("cost"),
+    )
+
+
+def _task_checkpoint_fields(task: ImageTaskSnapshot) -> dict[str, object]:
+    return {
+        "task_id": task.task_id,
+        "task_created_at": task.task_created_at,
+        "state": task.state,
+        "is_final": task.is_final,
+        "progress": task.progress,
+        "status": task.status,
+        "status_group": task.status_group,
+        "result_url": task.result_url,
+        "result_type": task.result_type,
+        "error": task.error,
+        "cost": _json_safe_setting(task.cost),
+    }
+
+
+def _checkpoint_fields_for_persistence(
+    api: object,
+    task: ImageTaskSnapshot,
+) -> dict[str, object]:
+    fields = _task_checkpoint_fields(task)
+    api_key = _resolved_api_key(api)
+    if not api_key:
+        return fields
+    return {
+        key: value
+        if key == "task_id"
+        else _redact_checkpoint_value(value, api_key)
+        for key, value in fields.items()
+    }
+
+
+def _redact_checkpoint_value(value: object, api_key: str) -> object:
+    if isinstance(value, str):
+        return value.replace(api_key, "[redacted]")
+    if isinstance(value, Mapping):
+        return {
+            str(key): _redact_checkpoint_value(item, api_key)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_checkpoint_value(item, api_key) for item in value]
+    return _json_safe_setting(value)
+
+
+def _generated_task(generated: object) -> ImageTaskSnapshot:
+    task = generated.task if isinstance(generated, GeneratedImage) else getattr(generated, "task", None)
+    if not isinstance(task, ImageTaskSnapshot):
+        raise TypeError("GPT Image transport returned no task snapshot")
+    return task
+
+
+def _openai_request_settings(api: object, image_size: str) -> dict[str, object]:
+    config = getattr(api, "config", None)
+    raw_base_url = getattr(config, "base_url", "") if config is not None else ""
+    base_url = ""
+    if isinstance(raw_base_url, str) and raw_base_url.strip():
+        base_url = normalize_openai_image_base_url(raw_base_url)
+    raw_model = getattr(config, "model", "gpt-image-2") if config is not None else "gpt-image-2"
+    model = raw_model.strip() if isinstance(raw_model, str) and raw_model.strip() else "gpt-image-2"
+    raw_resolution = getattr(config, "resolution", "1K") if config is not None else "1K"
+    resolution = raw_resolution.upper() if isinstance(raw_resolution, str) else "1K"
+    if resolution not in {"1K", "2K", "4K"}:
+        resolution = "1K"
+    raw_merge = getattr(config, "merge_reference_images", False) if config is not None else False
+    merge = raw_merge if isinstance(raw_merge, bool) else False
+    return {
+        "model": model,
+        "size": _provider_image_size(resolution, image_size),
+        "base_url": base_url,
+        "merge_reference_images": merge,
+    }
+
+
+def _support_request_identity(
+    api: object,
+    request: SupportImageRequest,
+) -> dict[str, object]:
+    final_prompt = append_aspect_instruction(request.prompt, request.image_size)
+    prompt_hash = hashlib.sha256(final_prompt.encode("utf-8")).hexdigest()
+    return {
+        "input_fingerprint": str(request.input_fingerprint or ""),
+        "prompt_hash": f"sha256:{prompt_hash}",
+        **_openai_request_settings(api, request.image_size),
+    }
+
+
+def _checkpoint_matches_identity(
+    checkpoint: Mapping[str, object],
+    identity: Mapping[str, object],
+) -> bool:
+    return bool(checkpoint) and all(
+        checkpoint.get(key) == expected for key, expected in identity.items()
+    )
+
+
+def _checkpoint_attempt_value(checkpoint: Mapping[str, object]) -> int:
+    try:
+        return max(0, int(checkpoint.get("attempts", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _task_id_suffix(task_id: str) -> str:
+    return str(task_id or "")[-8:]
+
+
+def _remove_file(path: str | Path) -> None:
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _sanitized_provider_error(api: object, exc: BaseException) -> str:
+    message = str(exc)
+    api_key = _resolved_api_key(api)
+    if api_key:
+        message = message.replace(api_key, "[redacted]")
+    return message
+
+
+def _sanitized_task_text(api: object, value: object) -> str:
+    message = str(value or "")
+    api_key = _resolved_api_key(api)
+    if api_key:
+        message = message.replace(api_key, "[redacted]")
+    return message
+
+
+def _resolved_api_key(api: object) -> str:
+    config = getattr(api, "config", None)
+    api_key = getattr(config, "api_key", "") if config is not None else ""
+    return api_key if isinstance(api_key, str) else ""
+
+
 def _checkpoint_matches_fingerprint(
     checkpoint: Mapping[str, object],
     input_fingerprint: str,
 ) -> bool:
     expected = str(input_fingerprint or "")
     return not expected or str(checkpoint.get("input_fingerprint") or "") == expected
-
-
-def _checkpoint_identity_matches(
-    product_dir: str | Path,
-    index: int,
-    input_fingerprint: str,
-    prompt_hash: str,
-) -> bool:
-    checkpoints = read_status(product_dir).get(_CHECKPOINT_FIELD, {})
-    if not isinstance(checkpoints, Mapping):
-        return False
-    checkpoint = _checkpoint_for_index(checkpoints, index)
-    return bool(
-        isinstance(checkpoint, Mapping)
-        and str(checkpoint.get("input_fingerprint") or "")
-        == str(input_fingerprint or "")
-        and str(checkpoint.get("prompt_hash") or "") == str(prompt_hash or "")
-    )
 
 
 def detail_screen_prompt_hash(
@@ -566,54 +979,6 @@ def _checkpoint_matches_prompt(
     if expected_prompt_hash is None:
         return True
     return bool(expected_prompt_hash) and str(checkpoint.get("prompt_hash") or "") == expected_prompt_hash
-
-
-def _reconcile_running_detail_output(
-    request: DetailSetRequest,
-    index: int,
-    prompt_hash: str,
-) -> bool:
-    checkpoints = read_status(request.product_dir).get(_CHECKPOINT_FIELD, {})
-    if not isinstance(checkpoints, Mapping):
-        return False
-    checkpoint = _checkpoint_for_index(checkpoints, index)
-    if (
-        not isinstance(checkpoint, Mapping)
-        or checkpoint.get("state") != "running"
-        or not _checkpoint_matches_fingerprint(checkpoint, request.input_fingerprint)
-        or not _checkpoint_matches_prompt(checkpoint, prompt_hash)
-    ):
-        return False
-    canonical_path = request.product_dir / "gpt_image" / "detail" / f"{index:02d}.png"
-    if not is_valid_image_file(canonical_path):
-        return False
-    try:
-        attempts = max(0, int(checkpoint.get("attempts", 0)))
-    except (TypeError, ValueError):
-        attempts = 0
-    record_detail_checkpoint(
-        request.product_dir,
-        index,
-        "done",
-        str(canonical_path),
-        attempts=attempts,
-        input_fingerprint=request.input_fingerprint,
-        prompt_hash=prompt_hash,
-    )
-    return True
-
-
-def _checkpoint_attempts(product_dir: str | Path, index: int) -> int:
-    checkpoints = read_status(product_dir).get(_CHECKPOINT_FIELD, {})
-    if not isinstance(checkpoints, Mapping):
-        return 0
-    checkpoint = _checkpoint_for_index(checkpoints, index)
-    if not isinstance(checkpoint, Mapping):
-        return 0
-    try:
-        return max(0, int(checkpoint.get("attempts", 0)))
-    except (TypeError, ValueError):
-        return 0
 
 
 def _completed_paths(

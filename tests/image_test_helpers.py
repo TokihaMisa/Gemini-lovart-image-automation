@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 import main
 from image_generation import GenerationRouting
 from image_providers import ImageProviderResult, LovartImageProvider, OpenAIImageProvider
+from openai_image_api import GeneratedImage, ImageTaskSnapshot, ImageTaskStillRunning
 from utils import read_status
 
 
@@ -25,6 +26,59 @@ def write_truncated_png(path: Path) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(base64.b64decode(VALID_PNG_BASE64)[:-12])
     return str(path)
+
+
+class CheckpointingOpenAIAPI:
+    """Transport double that distinguishes paid creates from task resumes."""
+
+    def __init__(
+        self,
+        snapshots: tuple[ImageTaskSnapshot, ...],
+        *,
+        base_url: str = "https://api.lk888.ai",
+        model: str = "gpt-image-2",
+        resolution: str = "1K",
+        merge_reference_images: bool = False,
+        outcome: str = "success",
+    ) -> None:
+        self.snapshots = snapshots
+        self.outcome = outcome
+        self.create_posts = 0
+        self.calls: list[dict[str, object]] = []
+        self.output_existed_at_call: list[bool] = []
+        self.config = SimpleNamespace(
+            base_url=base_url,
+            model=model,
+            resolution=resolution,
+            merge_reference_images=merge_reference_images,
+        )
+
+    def generate_edit(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        self.output_existed_at_call.append(Path(kwargs["output_path"]).exists())
+        resume_task = kwargs.get("resume_task")
+        if resume_task is None:
+            self.create_posts += 1
+        emitted = list(self.snapshots)
+        if not emitted:
+            if not isinstance(resume_task, ImageTaskSnapshot):
+                raise AssertionError("a snapshot or resume task is required")
+            emitted = [resume_task]
+        callback = kwargs.get("task_callback")
+        for snapshot in emitted:
+            if callback is not None:
+                callback(snapshot)
+        final = emitted[-1]
+        if self.outcome == "still_running":
+            raise ImageTaskStillRunning(final)
+        if self.outcome == "crash":
+            raise KeyboardInterrupt("poll crashed after task callback")
+        if self.outcome == "failed":
+            error = RuntimeError(final.error or "provider task failed")
+            error.task = final
+            raise error
+        local_path = write_valid_png(Path(kwargs["output_path"]))
+        return GeneratedImage(local_path, self.config.model, final)
 
 
 class RecordingImageProvider:
@@ -118,7 +172,18 @@ class RecordingOpenAIAPI:
             raise RuntimeError(f"screen {index} failed")
         self.generated_indexes.append(index)
         write_valid_png(output_path)
-        return SimpleNamespace(local_path=str(output_path), model=self.config.model)
+        return GeneratedImage(
+            local_path=str(output_path),
+            model=self.config.model,
+            task=ImageTaskSnapshot(
+                task_id=f"recording-task-{index}",
+                state="success",
+                is_final=True,
+                task_created_at=0.0,
+                result_url=f"https://cdn.example/{index}.png",
+                result_type="image",
+            ),
+        )
 
 
 class PipelineOpenAIProvider:

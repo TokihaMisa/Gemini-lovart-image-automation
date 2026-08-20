@@ -6,7 +6,11 @@ from PIL import Image
 
 from image_generation import DetailScreen
 from openai_image_api import GeneratedImage, ImageTaskSnapshot
-from tests.image_test_helpers import write_truncated_png, write_valid_png
+from tests.image_test_helpers import (
+    CheckpointingOpenAIAPI,
+    write_truncated_png,
+    write_valid_png,
+)
 
 
 def completed_image_task() -> ImageTaskSnapshot:
@@ -18,6 +22,418 @@ def completed_image_task() -> ImageTaskSnapshot:
         result_url="https://cdn.example/result.png",
         result_type="image",
     )
+
+
+def task_snapshot(
+    task_id: str = "task-123",
+    *,
+    state: str = "running",
+    is_final: bool = False,
+    result_url: str = "",
+    error: str = "",
+) -> ImageTaskSnapshot:
+    return ImageTaskSnapshot(
+        task_id=task_id,
+        state=state,
+        is_final=is_final,
+        task_created_at=1787200000.0,
+        progress="45%",
+        status="处理中" if state == "running" else state,
+        status_group="进行中" if state == "running" else "已结束",
+        result_url=result_url,
+        result_type="image" if result_url else "",
+        error=error,
+        cost={"amount": "0.04", "currency": "USD"},
+    )
+
+
+def support_request(tmp_path: Path, **overrides):
+    from image_providers import SupportImageRequest
+
+    values = {
+        "product_id": "P1",
+        "product_dir": tmp_path,
+        "step_name": "white_bg",
+        "prompt": "make a clean white product photo",
+        "image_paths": (write_valid_png(tmp_path / "reference.png"),),
+        "image_size": "2:3",
+        "input_fingerprint": "sha256:8f4c1d4a",
+        "resume": True,
+    }
+    values.update(overrides)
+    return SupportImageRequest(**values)
+
+
+def test_support_task_callback_persists_full_identity_before_poll_crash(tmp_path: Path):
+    import json
+
+    from image_providers import OpenAIImageProvider, read_support_task_checkpoint
+
+    api = CheckpointingOpenAIAPI((task_snapshot(),), outcome="crash")
+
+    with pytest.raises(KeyboardInterrupt, match="poll crashed"):
+        OpenAIImageProvider(api).generate_support_image(support_request(tmp_path))
+
+    checkpoint = read_support_task_checkpoint(tmp_path, "white_bg")
+    assert checkpoint == {
+        "state": "running",
+        "task_id": "task-123",
+        "task_created_at": 1787200000.0,
+        "is_final": False,
+        "progress": "45%",
+        "status": "处理中",
+        "status_group": "进行中",
+        "result_url": "",
+        "result_type": "",
+        "error": "",
+        "cost": {"amount": "0.04", "currency": "USD"},
+        "input_fingerprint": "sha256:8f4c1d4a",
+        "prompt_hash": "sha256:13b2990aa2af8a89fac10a6f132fa246eb8485a420b56dbeb02f56fb0f044457",
+        "model": "gpt-image-2",
+        "size": "1024x1536",
+        "base_url": "https://api.lk888.ai",
+        "merge_reference_images": False,
+        "local_path": "",
+        "attempts": 1,
+    }
+    assert "api_key" not in json.dumps(checkpoint)
+
+
+def test_support_matching_running_task_resumes_without_paid_create(tmp_path: Path):
+    from image_providers import OpenAIImageProvider, record_support_task_checkpoint
+
+    running = task_snapshot("task-resume")
+    record_support_task_checkpoint(
+        tmp_path,
+        "white_bg",
+        {
+            "input_fingerprint": "sha256:8f4c1d4a",
+            "prompt_hash": "sha256:13b2990aa2af8a89fac10a6f132fa246eb8485a420b56dbeb02f56fb0f044457",
+            "model": "gpt-image-2",
+            "size": "1024x1536",
+            "base_url": "https://api.lk888.ai",
+            "merge_reference_images": False,
+            "attempts": 1,
+            **{
+                "task_id": running.task_id,
+                "state": running.state,
+                "is_final": running.is_final,
+                "task_created_at": running.task_created_at,
+                "progress": running.progress,
+                "status": running.status,
+                "status_group": running.status_group,
+                "result_url": running.result_url,
+                "result_type": running.result_type,
+                "error": running.error,
+                "cost": running.cost,
+            },
+        },
+    )
+    success = task_snapshot(
+        "task-resume",
+        state="success",
+        is_final=True,
+        result_url="https://cdn.example/resumed.png",
+    )
+    api = CheckpointingOpenAIAPI((success,))
+
+    result = OpenAIImageProvider(api).generate_support_image(support_request(tmp_path))
+
+    assert api.create_posts == 0
+    assert api.calls[0]["resume_task"] == running
+    assert result.succeeded is True
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "request_overrides", "api_overrides"),
+    [
+        ("input", {"input_fingerprint": "sha256:new"}, {}),
+        ("prompt", {"prompt": "changed prompt"}, {}),
+        ("base_url", {}, {"base_url": "https://other.example"}),
+        ("model", {}, {"model": "gpt-image-new"}),
+        ("size", {"image_size": "1:1"}, {}),
+        ("merge", {}, {"merge_reference_images": True}),
+    ],
+)
+def test_support_identity_change_discards_task_and_stale_canonical(
+    tmp_path: Path,
+    mismatch: str,
+    request_overrides: dict[str, object],
+    api_overrides: dict[str, object],
+):
+    from image_providers import OpenAIImageProvider, record_support_task_checkpoint
+
+    canonical = Path(
+        write_valid_png(tmp_path / "gpt_image" / "support" / "white_bg.png")
+    )
+    old = task_snapshot("task-old")
+    record_support_task_checkpoint(
+        tmp_path,
+        "white_bg",
+        {
+            "state": old.state,
+            "task_id": old.task_id,
+            "is_final": old.is_final,
+            "task_created_at": old.task_created_at,
+            "input_fingerprint": "sha256:8f4c1d4a",
+            "prompt_hash": "sha256:13b2990aa2af8a89fac10a6f132fa246eb8485a420b56dbeb02f56fb0f044457",
+            "model": "gpt-image-2",
+            "size": "1024x1536",
+            "base_url": "https://api.lk888.ai",
+            "merge_reference_images": False,
+            "local_path": str(canonical),
+            "attempts": 1,
+        },
+    )
+    replacement = task_snapshot(
+        f"task-new-{mismatch}",
+        state="success",
+        is_final=True,
+        result_url="https://cdn.example/new.png",
+    )
+    api = CheckpointingOpenAIAPI((replacement,), **api_overrides)
+
+    result = OpenAIImageProvider(api).generate_support_image(
+        support_request(tmp_path, **request_overrides)
+    )
+
+    assert api.create_posts == 1
+    assert api.calls[0]["resume_task"] is None
+    assert api.output_existed_at_call == [False]
+    assert result.succeeded is True
+
+
+def test_support_wait_timeout_retains_running_checkpoint(tmp_path: Path):
+    from image_providers import OpenAIImageProvider, read_support_task_checkpoint
+
+    api = CheckpointingOpenAIAPI((task_snapshot("task-live"),), outcome="still_running")
+
+    result = OpenAIImageProvider(api).generate_support_image(support_request(tmp_path))
+
+    checkpoint = read_support_task_checkpoint(tmp_path, "white_bg")
+    assert checkpoint["state"] == "running"
+    assert checkpoint["task_id"] == "task-live"
+    assert result.succeeded is False
+    assert result.still_running is True
+    assert result.task_id_suffix == "ask-live"
+
+
+def test_support_new_task_callback_does_not_restore_stale_local_path(tmp_path: Path):
+    from image_providers import (
+        OpenAIImageProvider,
+        read_support_task_checkpoint,
+        record_support_task_checkpoint,
+    )
+
+    stale_path = write_valid_png(tmp_path / "old" / "white_bg.png")
+    record_support_task_checkpoint(
+        tmp_path,
+        "white_bg",
+        {
+            "state": "running",
+            "task_id": "old-task",
+            "task_created_at": 1787100000.0,
+            "input_fingerprint": "sha256:old",
+            "prompt_hash": "sha256:old",
+            "model": "gpt-image-2",
+            "size": "1024x1536",
+            "base_url": "https://api.lk888.ai",
+            "merge_reference_images": False,
+            "local_path": stale_path,
+            "attempts": 1,
+        },
+    )
+    api = CheckpointingOpenAIAPI((task_snapshot("new-task"),), outcome="crash")
+
+    with pytest.raises(KeyboardInterrupt, match="poll crashed"):
+        OpenAIImageProvider(api).generate_support_image(support_request(tmp_path))
+
+    checkpoint = read_support_task_checkpoint(tmp_path, "white_bg")
+    assert checkpoint["task_id"] == "new-task"
+    assert checkpoint["local_path"] == ""
+
+
+def test_detail_task_callback_persists_id_and_restart_resumes_only_missing_screen(
+    tmp_path: Path,
+):
+    from image_providers import (
+        DetailSetRequest,
+        OpenAIImageProvider,
+        detail_screen_prompt_hash,
+        record_detail_checkpoint,
+    )
+    from utils import read_status
+
+    screens = (DetailScreen(1, "hero"), DetailScreen(2, "feature"))
+    first = Path(write_valid_png(tmp_path / "gpt_image" / "detail" / "01.png"))
+    record_detail_checkpoint(
+        tmp_path,
+        1,
+        "done",
+        str(first),
+        input_fingerprint="inputs-v1",
+        prompt_hash=detail_screen_prompt_hash(screens[0], 2, "2:3"),
+    )
+    request = DetailSetRequest(
+        product_id="P1",
+        product_dir=tmp_path,
+        screens=screens,
+        image_paths=(write_valid_png(tmp_path / "reference.png"),),
+        image_size="2:3",
+        target_count=2,
+        input_fingerprint="inputs-v1",
+    )
+    crashing = CheckpointingOpenAIAPI((task_snapshot("detail-task-2"),), outcome="crash")
+
+    with pytest.raises(KeyboardInterrupt, match="poll crashed"):
+        OpenAIImageProvider(crashing).generate_detail_set(request)
+
+    saved = read_status(tmp_path)["detail_checkpoints"]
+    assert saved["2"]["task_id"] == "detail-task-2"
+    assert saved["2"]["state"] == "running"
+    first_bytes = first.read_bytes()
+    success = task_snapshot(
+        "detail-task-2",
+        state="success",
+        is_final=True,
+        result_url="https://cdn.example/detail-2.png",
+    )
+    resumed_api = CheckpointingOpenAIAPI((success,))
+
+    resumed = OpenAIImageProvider(resumed_api).generate_detail_set(request)
+
+    assert resumed_api.create_posts == 0
+    assert resumed_api.calls[0]["resume_task"].task_id == "detail-task-2"
+    assert Path(resumed_api.calls[0]["output_path"]).name == "02.png"
+    assert first.read_bytes() == first_bytes
+    assert resumed.succeeded is True
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_detail_success_url_redownloads_without_new_create(tmp_path: Path, damage: str):
+    from image_providers import DetailSetRequest, OpenAIImageProvider
+
+    screen = DetailScreen(1, "hero")
+    request = DetailSetRequest(
+        product_id="P1",
+        product_dir=tmp_path,
+        screens=(screen,),
+        image_paths=(write_valid_png(tmp_path / "reference.png"),),
+        image_size="1:1",
+        target_count=1,
+        input_fingerprint="inputs-v1",
+    )
+    success = task_snapshot(
+        "detail-success",
+        state="success",
+        is_final=True,
+        result_url="https://cdn.example/detail.png",
+    )
+    first_api = CheckpointingOpenAIAPI((success,))
+    first = OpenAIImageProvider(first_api).generate_detail_set(request)
+    canonical = Path(first.local_paths[0])
+    if damage == "missing":
+        canonical.unlink()
+    else:
+        canonical.write_text("corrupt", encoding="utf-8")
+    resumed_api = CheckpointingOpenAIAPI(())
+
+    redownloaded = OpenAIImageProvider(resumed_api).generate_detail_set(request)
+
+    assert resumed_api.create_posts == 0
+    assert resumed_api.calls[0]["resume_task"].state == "success"
+    assert resumed_api.calls[0]["resume_task"].result_url == "https://cdn.example/detail.png"
+    assert redownloaded.succeeded is True
+
+
+def test_detail_final_failure_replaces_only_failed_screen_on_next_retry(tmp_path: Path):
+    from image_providers import DetailSetRequest, OpenAIImageProvider
+    from utils import read_status
+
+    screens = (DetailScreen(1, "hero"), DetailScreen(2, "feature"))
+    request = DetailSetRequest(
+        product_id="P1",
+        product_dir=tmp_path,
+        screens=screens,
+        image_paths=(write_valid_png(tmp_path / "reference.png"),),
+        image_size="1:1",
+        target_count=2,
+        input_fingerprint="inputs-v1",
+    )
+    first_success = task_snapshot(
+        "detail-one", state="success", is_final=True, result_url="https://cdn.example/1.png"
+    )
+    second_failed = task_snapshot(
+        "detail-two-failed", state="failed", is_final=True, error="quota exhausted"
+    )
+    first_api = CheckpointingOpenAIAPI((first_success,))
+    provider = OpenAIImageProvider(first_api)
+    one_screen_request = DetailSetRequest(**{**request.__dict__, "screens": (screens[0],)})
+    provider.generate_detail_set(one_screen_request)
+    first_path = tmp_path / "gpt_image" / "detail" / "01.png"
+    first_bytes = first_path.read_bytes()
+    failed_api = CheckpointingOpenAIAPI((second_failed,), outcome="failed")
+    failed = OpenAIImageProvider(failed_api).generate_detail_set(request)
+
+    assert failed.failed_indexes == (2,)
+    assert read_status(tmp_path)["detail_checkpoints"]["2"]["task_id"] == "detail-two-failed"
+    replacement = task_snapshot(
+        "detail-two-new", state="success", is_final=True, result_url="https://cdn.example/2.png"
+    )
+    retry_api = CheckpointingOpenAIAPI((replacement,))
+    retried = OpenAIImageProvider(retry_api).generate_detail_set(request)
+
+    assert retry_api.create_posts == 1
+    assert Path(retry_api.calls[0]["output_path"]).name == "02.png"
+    assert retry_api.calls[0]["resume_task"] is None
+    assert first_path.read_bytes() == first_bytes
+    assert retried.succeeded is True
+
+
+@pytest.mark.parametrize("resume", [True, False])
+def test_detail_invalidates_legacy_or_no_resume_identity_before_one_create(
+    tmp_path: Path,
+    resume: bool,
+):
+    from image_providers import (
+        DetailSetRequest,
+        OpenAIImageProvider,
+        detail_screen_prompt_hash,
+        record_detail_checkpoint,
+    )
+
+    screen = DetailScreen(1, "hero")
+    canonical = Path(write_valid_png(tmp_path / "gpt_image" / "detail" / "01.png"))
+    record_detail_checkpoint(
+        tmp_path,
+        1,
+        "running",
+        str(canonical),
+        attempts=4,
+        input_fingerprint="inputs-v1",
+        prompt_hash=detail_screen_prompt_hash(screen, 1, "1:1"),
+    )
+    replacement = task_snapshot(
+        "replacement", state="success", is_final=True, result_url="https://cdn.example/new.png"
+    )
+    api = CheckpointingOpenAIAPI((replacement,))
+    request = DetailSetRequest(
+        product_id="P1",
+        product_dir=tmp_path,
+        screens=(screen,),
+        image_paths=(write_valid_png(tmp_path / "reference.png"),),
+        image_size="1:1",
+        target_count=1,
+        input_fingerprint="inputs-v1",
+        resume=resume,
+    )
+
+    result = OpenAIImageProvider(api).generate_detail_set(request)
+
+    assert api.create_posts == 1
+    assert api.calls[0]["resume_task"] is None
+    assert api.output_existed_at_call == [False]
+    assert result.succeeded is True
 
 
 def test_registry_does_not_build_lovart_for_all_openai_run():
@@ -312,7 +728,7 @@ def test_openai_detail_set_no_resume_replaces_all_prior_checkpoints(tmp_path: Pa
     assert checkpoints["2"]["attempts"] == 1
 
 
-def test_openai_detail_set_reconciles_only_matching_running_canonical_output(
+def test_openai_detail_set_resumes_only_matching_running_task_with_canonical_output(
     tmp_path: Path,
 ):
     from image_providers import (
@@ -325,6 +741,7 @@ def test_openai_detail_set_reconciles_only_matching_running_canonical_output(
 
     canonical = write_valid_png(tmp_path / "gpt_image" / "detail" / "01.png")
     screen = DetailScreen(1, "hero")
+    running = task_snapshot("task-with-canonical")
     record_detail_checkpoint(
         tmp_path,
         1,
@@ -332,8 +749,30 @@ def test_openai_detail_set_reconciles_only_matching_running_canonical_output(
         attempts=1,
         input_fingerprint="inputs-v1",
         prompt_hash=detail_screen_prompt_hash(screen, 1, "1:1"),
+        task_id=running.task_id,
+        task_created_at=running.task_created_at,
+        is_final=running.is_final,
+        progress=running.progress,
+        status=running.status,
+        status_group=running.status_group,
+        result_url=running.result_url,
+        result_type=running.result_type,
+        error=running.error,
+        cost=running.cost,
+        request_settings={
+            "model": "gpt-image-2",
+            "size": "1024x1024",
+            "base_url": "https://api.lk888.ai",
+            "merge_reference_images": False,
+        },
     )
-    api = Mock()
+    success = task_snapshot(
+        "task-with-canonical",
+        state="success",
+        is_final=True,
+        result_url="https://cdn.example/canonical.png",
+    )
+    api = CheckpointingOpenAIAPI((success,))
     request = DetailSetRequest(
         product_id="P1",
         product_dir=tmp_path,
@@ -347,7 +786,8 @@ def test_openai_detail_set_reconciles_only_matching_running_canonical_output(
 
     result = OpenAIImageProvider(api).generate_detail_set(request)
 
-    api.generate_edit.assert_not_called()
+    assert api.create_posts == 0
+    assert api.calls[0]["resume_task"] == running
     assert result.succeeded is True
     assert result.local_paths == (canonical,)
     checkpoint = read_status(tmp_path)["detail_checkpoints"]["1"]
