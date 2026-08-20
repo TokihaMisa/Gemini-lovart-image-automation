@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from collections.abc import Mapping
 from dataclasses import dataclass
+import hashlib
 import http.client
 import io
 import ipaddress
@@ -339,6 +340,17 @@ def _notify_task(
 ) -> None:
     if callback is not None:
         callback(task)
+
+
+def safe_task_display_token(task_id: object) -> str:
+    """Return a display-only token that never exposes a complete short task ID."""
+    value = str(task_id or "")
+    if not value:
+        return ""
+    if len(value) <= 8:
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
+        return f"hash:{digest}"
+    return value[-8:]
 
 
 def _normalize_task_id(value: object) -> str:
@@ -773,7 +785,7 @@ class OpenAIImageAPI:
 
             display = task.status or task.status_group or task.state
             progress = f" · {task.progress}" if task.progress else ""
-            suffix = task.task_id[-6:]
+            suffix = safe_task_display_token(task.task_id)
             _notify_status(
                 status_callback,
                 f"⏳ GPT Image {display}{progress} · 已等待 {int(elapsed)} 秒 · 任务 …{suffix}",

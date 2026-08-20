@@ -23,6 +23,7 @@ from openai_image_api import (
     _provider_image_size,
     append_aspect_instruction,
     normalize_openai_image_base_url,
+    safe_task_display_token,
 )
 from utils import read_status, update_status
 
@@ -348,7 +349,7 @@ class OpenAIImageProvider:
             return ImageProviderResult(
                 succeeded=False,
                 still_running=True,
-                task_id_suffix=_task_id_suffix(exc.task.task_id),
+                task_id_suffix=safe_task_display_token(exc.task.task_id),
             )
         except Exception as exc:
             exception_task = getattr(exc, "task", None)
@@ -386,7 +387,7 @@ class OpenAIImageProvider:
                 succeeded=False,
                 error=safe_error,
                 task_id_suffix=(
-                    _task_id_suffix(task.task_id)
+                    safe_task_display_token(task.task_id)
                     if isinstance(task, ImageTaskSnapshot)
                     else ""
                 ),
@@ -409,7 +410,7 @@ class OpenAIImageProvider:
             local_paths=(local_path,),
             used_model=str(generated.model),
             completed_count=1,
-            task_id_suffix=_task_id_suffix(task.task_id),
+            task_id_suffix=safe_task_display_token(task.task_id),
         )
 
     def generate_detail_set(self, request: DetailSetRequest) -> ImageProviderResult:
@@ -514,7 +515,7 @@ class OpenAIImageProvider:
             except ImageTaskStillRunning as exc:
                 persist(exc.task)
                 still_running = True
-                last_task_suffix = _task_id_suffix(exc.task.task_id)
+                last_task_suffix = safe_task_display_token(exc.task.task_id)
                 break
             except Exception as exc:
                 failed.append(screen.index)
@@ -534,7 +535,7 @@ class OpenAIImageProvider:
                     task_fields = _checkpoint_fields_for_persistence(self.api, task)
                     task_fields.pop("state", None)
                     task_fields.pop("error", None)
-                    last_task_suffix = _task_id_suffix(task.task_id)
+                    last_task_suffix = safe_task_display_token(task.task_id)
                     record_detail_checkpoint(
                         request.product_dir,
                         screen.index,
@@ -547,7 +548,7 @@ class OpenAIImageProvider:
                         **task_fields,
                     )
                 elif isinstance(task, ImageTaskSnapshot):
-                    last_task_suffix = _task_id_suffix(task.task_id)
+                    last_task_suffix = safe_task_display_token(task.task_id)
                 if request.progress_callback:
                     request.progress_callback(
                         screen.index,
@@ -574,7 +575,7 @@ class OpenAIImageProvider:
                 **task_fields,
             )
             completed.add(screen.index)
-            last_task_suffix = _task_id_suffix(task.task_id)
+            last_task_suffix = safe_task_display_token(task.task_id)
             used_model = str(generated.model) or used_model
             if request.progress_callback:
                 request.progress_callback(
@@ -926,16 +927,6 @@ def _checkpoint_attempt_value(checkpoint: Mapping[str, object]) -> int:
         return max(0, int(checkpoint.get("attempts", 0)))
     except (TypeError, ValueError):
         return 0
-
-
-def _task_id_suffix(task_id: str) -> str:
-    value = str(task_id or "")
-    if not value:
-        return ""
-    if len(value) <= 8:
-        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
-        return f"hash:{digest}"
-    return value[-8:]
 
 
 def _remove_file(path: str | Path) -> None:

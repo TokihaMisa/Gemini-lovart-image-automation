@@ -701,6 +701,62 @@ def test_running_task_polls_same_id_then_downloads_and_reports_progress(build_op
 
 
 @pytest.mark.parametrize(
+    ("task_id", "expected_display", "forbidden_display"),
+    [
+        ("tiny", "hash:8950abfd", "tiny"),
+        ("task-secret-prefix-abc123", "x-abc123", "task-secret-prefix"),
+    ],
+)
+@patch("openai_image_api.urllib.request.build_opener")
+def test_progress_status_uses_safe_task_display_token(
+    build_opener,
+    task_id,
+    expected_display,
+    forbidden_display,
+    tmp_path,
+):
+    statuses = []
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(json.dumps({"task_id": task_id}).encode()),
+        FakeResponse(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "state": "running",
+                    "is_final": False,
+                    "progress": "45%",
+                    "status": "处理中",
+                }
+            ).encode()
+        ),
+        FakeResponse(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "state": "success",
+                    "is_final": True,
+                    "result_url": "https://cdn.example/result.png",
+                    "result_type": "image",
+                }
+            ).encode()
+        ),
+    ]
+
+    make_client(sleep=lambda _delay: None).generate_edit(
+        "prompt",
+        [make_png(tmp_path / "source.png")],
+        tmp_path / "out.png",
+        status_callback=statuses.append,
+    )
+
+    progress_messages = [message for message in statuses if "已等待" in message]
+    assert len(progress_messages) == 1
+    assert expected_display in progress_messages[0]
+    assert forbidden_display not in progress_messages[0]
+    assert task_id not in progress_messages[0]
+
+
+@pytest.mark.parametrize(
     "payload",
     [
         {"task_id": "wrong", "state": "running", "is_final": False},
