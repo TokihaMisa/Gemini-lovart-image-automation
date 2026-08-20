@@ -1,7 +1,7 @@
 {
-  "version": "1.3.20",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.20/update.zip",
-  "changelog": "修复未完成任务沿用旧详情图数量、Gemini 详情屏标记不完整及输出目录移动后的旧图片路径问题；GPT Image 同步请求现在只提交一次，显示实时等待时长并执行严格总超时，结果未知时即使启用无限重试也不会重复付费提交。",
-  "sha256": "00b5d4a3cb50d835a453294ee38b5cb4065e30d1ff8124698fb127f33a184974",
-  "size": 131964780
+  "version": "1.3.21",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.21/update.zip",
+  "changelog": "GPT Image 已迁移到异步媒体任务协议：支持最多 14 张参考图、任务 ID 持久化与断点续查、实时进度显示，并移除旧 HAPI/同步接口回退，避免结果未知时重复付费提交。",
+  "sha256": "c85ec81b7116a95a150c5f73d1edbabaa5aa51e544bd7e35f26bc8a54b3672ae",
+  "size": 131989518
 }

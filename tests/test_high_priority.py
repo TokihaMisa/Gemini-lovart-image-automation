@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import os
 import tempfile
@@ -24,6 +25,40 @@ from utils import (
 
 
 class HighPriorityBehaviorTests(unittest.TestCase):
+    def test_v1_3_21_release_metadata_and_ui_are_consistent(self):
+        expected_version = "1.3.21"
+        version_source = Path("version.py").read_text(encoding="utf-8")
+        version_info = json.loads(Path("version.json").read_text(encoding="utf-8"))
+        webui_source = Path("webui.py").read_text(encoding="utf-8")
+        release_notes = Path(f"release-v{expected_version}-notes.md")
+
+        self.assertIn(f'VERSION = "{expected_version}"', version_source)
+        self.assertEqual(version_info["version"], expected_version)
+        self.assertEqual(
+            version_info["url"],
+            "https://github.com/TokihaMisa/Gemini-lovart-image-automation/"
+            f"releases/download/v{expected_version}/update.zip",
+        )
+        self.assertRegex(version_info["sha256"], r"^[0-9a-f]{64}$")
+        self.assertGreater(version_info["size"], 0)
+        self.assertTrue(release_notes.is_file(), release_notes)
+        self.assertEqual(release_notes.name, f"release-v{expected_version}-notes.md")
+        self.assertIn("from version import VERSION", webui_source)
+        self.assertIn("v{VERSION}", webui_source)
+
+        release_asset = Path("update.zip")
+        versioned_asset = Path(f"update-v{expected_version}.zip")
+        if release_asset.is_file() or versioned_asset.is_file():
+            self.assertTrue(release_asset.is_file(), release_asset)
+            self.assertTrue(versioned_asset.is_file(), versioned_asset)
+            self.assertEqual(release_asset.stat().st_size, version_info["size"])
+            self.assertEqual(versioned_asset.stat().st_size, version_info["size"])
+            digests = []
+            for asset in (release_asset, versioned_asset):
+                with asset.open("rb") as stream:
+                    digests.append(hashlib.file_digest(stream, "sha256").hexdigest())
+            self.assertEqual(digests, [version_info["sha256"]] * 2)
+
     def test_repository_examples_contain_no_real_api_keys(self):
         examples = [
             Path("config.example.yaml"),
