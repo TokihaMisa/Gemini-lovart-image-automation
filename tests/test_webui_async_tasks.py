@@ -256,6 +256,22 @@ def test_product_card_redacts_full_task_id_from_fallback_status_message(tmp_path
     assert "白底图" in rendered
 
 
+def test_ui_status_redacts_encoded_and_case_transformed_key_and_task_id():
+    full_task_id = "Private-Task-12345678"
+    rendered = webui._format_openai_image_ui_status(
+        {
+            "stage": "detail_screen_1",
+            "api_key": "TeSt-Key",
+            "task_id": full_task_id,
+            "status": "key=TEST%2DKEY task=Private%252DTask%252D12345678",
+        },
+        "provider=PRIVATE-TASK-12345678",
+    )
+    assert "TEST%2DKEY" not in rendered
+    assert "Private%252DTask%252D12345678" not in rendered
+    assert "PRIVATE-TASK-12345678" not in rendered
+
+
 @patch("webui.OpenAIImageAPI")
 def test_paid_test_resolves_saved_env_key_without_echoing_it(api_cls, tmp_path):
     saved_key = "saved-paid-test-secret"

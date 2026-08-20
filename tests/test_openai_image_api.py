@@ -973,6 +973,43 @@ def test_percent_encoded_and_case_transformed_secrets_are_recursively_redacted(b
 
 
 @patch("openai_image_api.urllib.request.build_opener")
+def test_non_string_repr_secret_variants_are_recursively_redacted(build_opener, tmp_path):
+    class ProviderCost:
+        def __repr__(self):
+            return "ProviderCost(key=TeSt%252DKey, task=PRIVATE-TASK-12345678)"
+
+    callbacks = []
+    task_id = "Private-Task-12345678"
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(json.dumps({"task_id": task_id}).encode()),
+        FakeResponse(json.dumps({"task_id": task_id, "state": "running", "is_final": False}).encode()),
+        FakeResponse(json.dumps({"task_id": task_id, "state": "success", "is_final": True,
+            "result_url": "https://cdn.example/result.png", "result_type": "image"}).encode()),
+    ]
+    client = make_client(api_key="TeSt-Key", sleep=lambda _delay: None)
+    original_parse = client._parse_status_task
+
+    def inject_cost(payload, previous):
+        task, url = original_parse(payload, previous)
+        if task.state == "running":
+            task = ImageTaskSnapshot(
+                task.task_id, task.state, task.is_final, task.task_created_at,
+                cost=ProviderCost(),
+            )
+            task = __import__("openai_image_api")._sanitize_task_snapshot(task, "TeSt-Key")
+        return task, url
+
+    client._parse_status_task = inject_cost
+    client.generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png",
+        task_callback=callbacks.append,
+    )
+    rendered = repr(callbacks)
+    assert "TeSt%252DKey" not in rendered
+    assert "PRIVATE-TASK-12345678" not in rendered
+
+
+@patch("openai_image_api.urllib.request.build_opener")
 def test_final_credentialed_result_url_downloads_raw_but_exposes_only_redacted_snapshot(
     build_opener, monkeypatch, tmp_path
 ):
@@ -1209,6 +1246,56 @@ def test_poll_deadline_returns_while_get_is_still_dribbling(build_opener, tmp_pa
     requests = [call.args[0] for call in build_opener.return_value.open.call_args_list]
     assert [request.method for request in requests] == ["POST", "GET"]
     assert not any(thread.name == "gpt-image-status-get" for thread in threading.enumerate())
+
+
+def test_python314_real_https_handler_propagates_stable_network_error(monkeypatch):
+    def fail_connect(*_args, **_kwargs):
+        raise socket.timeout("injected connect timeout")
+
+    monkeypatch.setattr(socket, "create_connection", fail_connect)
+    client = make_client(timeout=0.2, max_attempts=1)
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        client._request_json_url(
+            "https://api.lk888.ai/v1/media/status?task_id=t-1",
+            deadline=time.monotonic() + 0.5,
+        )
+    assert ctx.value.code in {"timeout", "network"}
+
+
+def test_pre_socket_deadline_is_bounded_and_second_call_starts_no_worker(monkeypatch, tmp_path):
+    release = threading.Event()
+    started = threading.Event()
+    connect_calls = []
+
+    def blocked_connect(*args, **kwargs):
+        connect_calls.append((args, kwargs))
+        started.set()
+        release.wait(1.0)
+        raise socket.timeout("blocked before socket publication")
+
+    monkeypatch.setattr(socket, "create_connection", blocked_connect)
+    client = make_client(timeout=10.0, max_attempts=1)
+    resume = ImageTaskSnapshot("t-1", "running", False, 1787200000.0)
+    source = make_png(tmp_path / "source.png")
+    try:
+        started_at = time.monotonic()
+        with pytest.raises(ImageTaskStillRunning):
+            with patch("openai_image_api.TASK_WAIT_LIMIT_SECONDS", 0.05):
+                client.generate_edit("prompt", [source], tmp_path / "one.png", resume_task=resume)
+        assert time.monotonic() - started_at < 0.3
+        assert started.wait(0.2)
+
+        with pytest.raises(ImageTaskStillRunning):
+            with patch("openai_image_api.TASK_WAIT_LIMIT_SECONDS", 0.05):
+                client.generate_edit("prompt", [source], tmp_path / "two.png", resume_task=resume)
+        assert len(connect_calls) == 1
+        assert sum(thread.name == "gpt-image-status-get" for thread in threading.enumerate()) <= 1
+    finally:
+        release.set()
+        cleanup_deadline = time.monotonic() + 0.5
+        while client._active_status_worker is not None and time.monotonic() < cleanup_deadline:
+            time.sleep(0.01)
+        assert client._active_status_worker is None
 
 
 @pytest.mark.parametrize("fmt", ["JPEG", "WEBP"])

@@ -622,7 +622,6 @@ class OpenAIImageProvider:
                 failed.append(screen.index)
                 last_error_code = _stable_provider_error_code(exc)
                 safe_error = _sanitized_provider_error(self.api, exc)
-                errors.append(f"screen {screen.index}: {safe_error}")
                 exception_task = getattr(exc, "task", None)
                 task = (
                     exception_task
@@ -631,6 +630,7 @@ class OpenAIImageProvider:
                 )
                 if isinstance(task, ImageTaskSnapshot):
                     safe_error = str(sanitize_external_value(safe_error, task.task_id))
+                errors.append(f"screen {screen.index}: {safe_error}")
                 current_checkpoint = _read_detail_checkpoint(
                     request.product_dir, screen.index
                 )

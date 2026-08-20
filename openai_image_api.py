@@ -36,6 +36,7 @@ MAX_REFERENCE_BYTES: Final = 10 * 1024 * 1024
 MAX_REFERENCE_TOTAL_BYTES: Final = 30 * 1024 * 1024
 MAX_CREATE_BODY_BYTES: Final = 50 * 1024 * 1024
 TASK_WAIT_LIMIT_SECONDS: Final = 600.0
+STATUS_WORKER_CLEANUP_GRACE_SECONDS: Final = 0.05
 MAX_TASK_ID_LENGTH: Final = 128
 _VALID_RESOLUTIONS: Final = {"1K", "2K", "4K"}
 _PIXEL_SIZES_BY_RESOLUTION: Final = {
@@ -453,8 +454,9 @@ def _redact_snapshot_value(value: object, *sensitive_values: str) -> object:
     if isinstance(value, set):
         return {_redact_snapshot_value(item, *sensitive) for item in value}
     rendered = repr(value)
-    if any(item in rendered for item in sensitive):
-        return _redact_snapshot_value(rendered, *sensitive)
+    sanitized_rendered = _redact_snapshot_value(rendered, *sensitive)
+    if sanitized_rendered != rendered:
+        return sanitized_rendered
     return value
 
 
@@ -590,7 +592,8 @@ class OpenAIImageAPI:
         self.config = config
         self.logger = logger
         self._sleep = sleep or time.sleep
-        self._status_worker_lock = threading.Lock()
+        self._status_state_lock = threading.Lock()
+        self._active_status_worker: threading.Thread | None = None
 
     def generate_edit(
         self,
@@ -755,38 +758,59 @@ class OpenAIImageAPI:
                 result_queue.put(("error", exc))
             else:
                 result_queue.put(("result", result))
+            finally:
+                current = threading.current_thread()
+                with self._status_state_lock:
+                    if self._active_status_worker is current:
+                        self._active_status_worker = None
 
-        with self._status_worker_lock:
-            worker = threading.Thread(
-                target=request_status,
-                name="gpt-image-status-get",
-                daemon=False,
-            )
-            worker.start()
-            remaining = _deadline_remaining(deadline)
-            try:
-                result_type, value = result_queue.get(timeout=remaining)
-            except queue.Empty:
-                response = active_response[0]
-                close_response = getattr(response, "close", None)
-                if callable(close_response):
-                    close_response()
-                connection = active_connection[0]
-                close_connection = getattr(connection, "close", None)
-                if callable(close_connection):
-                    close_connection()
-                close_opener = getattr(opener, "close", None)
-                if callable(close_opener):
-                    close_opener()
-                worker.join()
-                raise _InvocationDeadlineExceeded from None
-            worker.join()
+        remaining = _deadline_remaining(deadline)
+        # Windows cannot reliably cancel a system DNS call before it publishes a
+        # socket. Keep that worker daemonized, bound cleanup waiting, and admit
+        # at most one outstanding status worker per API instance. Once a
+        # response/HTTPSConnection exists, cancel_and_join also closes it.
+        worker = threading.Thread(
+            target=request_status,
+            name="gpt-image-status-get",
+            daemon=True,
+        )
+        with self._status_state_lock:
+            active = self._active_status_worker
+            if active is not None and active.is_alive():
+                raise _InvocationDeadlineExceeded
+            self._active_status_worker = worker
+        worker.start()
+
+        def cancel_and_join() -> None:
+            response = active_response[0]
+            close_response = getattr(response, "close", None)
+            if callable(close_response):
+                close_response()
+            connection = active_connection[0]
+            close_connection = getattr(connection, "close", None)
+            if callable(close_connection):
+                close_connection()
+            close_opener = getattr(opener, "close", None)
+            if callable(close_opener):
+                close_opener()
+            worker.join(timeout=STATUS_WORKER_CLEANUP_GRACE_SECONDS)
+
+        try:
+            result_type, value = result_queue.get(timeout=remaining)
+        except queue.Empty:
+            cancel_and_join()
+            raise _InvocationDeadlineExceeded from None
+        worker.join(timeout=STATUS_WORKER_CLEANUP_GRACE_SECONDS)
+        try:
             _deadline_remaining(deadline)
-            if result_type == "error":
-                if isinstance(value, BaseException):
-                    raise value
-                raise RuntimeError("image status worker returned an invalid error")
-            return cast(tuple[dict[str, Any], float | None], value)
+        except _InvocationDeadlineExceeded:
+            cancel_and_join()
+            raise
+        if result_type == "error":
+            if isinstance(value, BaseException):
+                raise value
+            raise RuntimeError("image status worker returned an invalid error")
+        return cast(tuple[dict[str, Any], float | None], value)
 
     def _submit_task_once(self, body: bytes) -> ImageTaskSnapshot:
         try:
@@ -1583,7 +1607,6 @@ class _TrackedHTTPSHandler(urllib.request.HTTPSHandler):
             self._connection_factory,
             request,
             context=self._context,
-            check_hostname=self._check_hostname,
         )
 
 

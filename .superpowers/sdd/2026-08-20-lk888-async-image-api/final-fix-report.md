@@ -49,3 +49,33 @@ Base: `bc540a2`
 - Code concerns remaining: none identified after focused and full verification.
 
 Commit: `78b3ce3` (`fix: close async image release safety gaps`).
+
+## Scoped re-review — Round 2
+
+Base: `73d4b27`
+
+### Findings and RED→GREEN evidence
+
+1. **Python 3.14 HTTPS handler portability**
+   - RED on Python 3.14.5: the real `urllib` handler path raised `AttributeError` for removed `_check_hostname` before reaching the socket; passing `check_hostname` would also be invalid for the Python 3.14 `HTTPSConnection` constructor.
+   - GREEN: `_TrackedHTTPSHandler` now follows Python 3.14's handler contract and passes only its verified SSL context through `do_open`. A test that does not mock `build_opener` traverses the real handler/constructor boundary and receives a stable `timeout`/`network` API error rather than an implementation exception.
+
+2. **Bounded pre-socket deadline and single outstanding worker**
+   - RED: a blocked pre-socket `socket.create_connection` made the deadline path wait on an unbounded `join()`.
+   - GREEN: response and live `HTTPSConnection` are still closed when available. Because Windows system DNS/connect cannot always be cancelled before publishing a socket, cleanup joins for at most 50ms and the worker is daemonized. Each API instance tracks one active status worker; while that worker remains alive, another status call immediately returns the still-running boundary without creating a second thread, socket, or request. The regression verifies bounded return, one connect attempt, at most one worker, and eventual active-state cleanup after releasing the blocked call.
+   - Security boundary unchanged: result-image SSRF filtering, DNS pinning, numeric socket connection, TLS/SNI/Host and peer-IP checks remain untouched.
+
+3. **Detail/non-string/UI sanitizer ordering and coverage**
+   - RED: detail errors were appended before the exact task ID became available for sanitization; custom object `repr()` values only received a case-sensitive literal precheck, so encoded/case variants survived.
+   - GREEN: detail errors are sanitized with API key and exact task ID before appending/returning. Non-string representations always pass through the same bounded percent-decoding and case-insensitive sanitizer. Transport nested cost/object, provider detail error, and WebUI encoded/case regressions pass. The exact internal checkpoint `task_id` remains unchanged for resume.
+
+### Round 2 verification
+
+- Named RED: 4 verified failing behaviors; the pre-existing UI string boundary was already safe and its new regression stayed green.
+- Named GREEN: `5 passed in 2.73s`.
+- Expanded focused matrix: `313 passed in 45.68s`.
+- Full suite: `745 passed, 128 subtests passed in 127.96s`.
+- `compileall`, `git diff --check`, and dry-run with `config.example.yaml`: exit 0.
+- Release artifacts remain stale and were not rebuilt or modified.
+
+Round 2 commit: to be recorded after commit creation.

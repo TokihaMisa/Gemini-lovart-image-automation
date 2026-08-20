@@ -220,6 +220,30 @@ def test_provider_checkpoint_recursively_redacts_encoded_secret_and_task_variant
     assert "PRIVATE-TASK-12345678" not in rendered
 
 
+def test_detail_return_error_is_sanitized_after_exact_task_is_known(tmp_path: Path):
+    from image_providers import OpenAIImageProvider
+
+    task_id = "Private-Task-12345678"
+    running = task_snapshot(task_id)
+
+    class LeakingDetailAPI(CheckpointingOpenAIAPI):
+        def generate_edit(self, **kwargs):
+            kwargs["submission_callback"]()
+            self.create_posts += 1
+            kwargs["task_callback"](running)
+            raise RuntimeError(
+                "task=Private%2DTask%2D12345678 exact=PRIVATE-TASK-12345678"
+            )
+
+    api = LeakingDetailAPI(())
+    api.config.api_key = "TeSt-Key"
+    result = OpenAIImageProvider(api).generate_detail_set(single_detail_request(tmp_path))
+    assert result.succeeded is False
+    assert "Private%2DTask%2D12345678" not in result.error
+    assert "PRIVATE-TASK-12345678" not in result.error
+    assert "[redacted]" in result.error
+
+
 def test_support_task_callback_persists_full_identity_before_poll_crash(tmp_path: Path):
     import json
 
