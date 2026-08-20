@@ -169,6 +169,7 @@ def run_product_pipeline(
     openai_model="gpt-image-2",
     openai_resolution="1K",
     screen_label="Screen",
+    prompt_responses=None,
 ):
     product_dir = Path(tmp_path) / "products" / "SKU-ROUTING"
     product_image = write_valid_png(product_dir / "product.png")
@@ -181,18 +182,16 @@ def run_product_pipeline(
         image_paths=[product_image],
         reference_images_are_product=False,
     )
-    saved_target = read_status(product_dir).get("detail_page_count_snapshot")
-    screen_count = (
-        int(saved_target) if prompt_screen_count is None and saved_target is not None
-        else detail_count if prompt_screen_count is None
-        else prompt_screen_count
-    )
+    screen_count = detail_count if prompt_screen_count is None else prompt_screen_count
     marked_prompt = "\n\n".join(
         f"[[SCREEN {index:02d}]]\n{screen_label} {index}\n[[/SCREEN {index:02d}]]"
         for index in range(1, screen_count + 1)
     )
     gemini = Mock()
-    gemini.generate_prompt.return_value = marked_prompt
+    if prompt_responses is None:
+        gemini.generate_prompt.return_value = marked_prompt
+    else:
+        gemini.generate_prompt.side_effect = list(prompt_responses)
 
     supplied_lovart = lovart is not None
     if not supplied_lovart:

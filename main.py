@@ -26,6 +26,7 @@ from gemini_api import GeminiAPI
 from gemini_bot import GeminiBot
 from image_generation import (
     DetailScreen,
+    DetailScreenParseError,
     GenerationRouting,
     PROVIDER_LOVART,
     PROVIDER_OPENAI_IMAGE,
@@ -1011,10 +1012,43 @@ def _process_products_once(
             language=product.language,
             image_count=len(product.image_paths),
         )
+        replace_detail_target = not resume
+        saved_detail_target = previous_status.get("detail_page_count_snapshot")
+        saved_detail_provider = str(previous_status.get("detail_provider") or "")
+        completed_for_current_detail_provider = bool(
+            is_product_completed(product_dir)
+            and (
+                saved_detail_provider == effective_routing.detail_provider
+                or (
+                    effective_routing.detail_provider == PROVIDER_LOVART
+                    and not saved_detail_provider
+                    and previous_status.get("lovart_done")
+                )
+            )
+        )
+        if (
+            resume
+            and not completed_for_current_detail_provider
+            and saved_detail_target is not None
+        ):
+            try:
+                replace_detail_target = int(saved_detail_target) != int(
+                    effective_routing.detail_page_count
+                )
+            except (TypeError, ValueError):
+                replace_detail_target = True
+        if replace_detail_target and resume:
+            logger.info(
+                "Detail page count changed for incomplete product %s: %s -> %s; "
+                "invalidating stale detail resume state",
+                product.id,
+                saved_detail_target,
+                effective_routing.detail_page_count,
+            )
         target_count = ensure_detail_page_count_snapshot(
             product_dir,
             effective_routing.detail_page_count,
-            replace_existing=not resume,
+            replace_existing=replace_detail_target,
         )
 
         status = read_status(product_dir)
@@ -1280,31 +1314,55 @@ def _process_products_once(
                     screens = []
 
             if not screens:
-                _emit_ui_status(product.id, "prompt", "🧠 正在生成详情提示词")
-                prompt = gemini.generate_prompt(
-                    product_id=product.id,
-                    product_name_cn=product.name_cn,
-                    language=product.language,
-                    selling_points=product.selling_points,
-                    image_paths=gemini_images,
-                    image_size=getattr(product, "image_size", ""),
-                )
-                logger.info(f"Gemini done ({len(prompt)} chars)")
+                for prompt_attempt in range(1, 3):
+                    if prompt_attempt == 1:
+                        prompt_status = "🧠 正在生成详情提示词"
+                    else:
+                        prompt_status = "🔄 提示词格式不完整，正在自动重试（2/2）"
+                    _emit_ui_status(product.id, "prompt", prompt_status)
+                    prompt = gemini.generate_prompt(
+                        product_id=product.id,
+                        product_name_cn=product.name_cn,
+                        language=product.language,
+                        selling_points=product.selling_points,
+                        image_paths=gemini_images,
+                        image_size=getattr(product, "image_size", ""),
+                    )
+                    logger.info(f"Gemini done ({len(prompt)} chars)")
+                    if _shutdown_requested:
+                        break
+                    try:
+                        screens = split_detail_screens(prompt, target_count)
+                    except DetailScreenParseError as exc:
+                        if prompt_attempt >= 2:
+                            raise
+                        logger.warning(
+                            "Gemini detail prompt format invalid for %s; retrying once: %s",
+                            product.id,
+                            exc,
+                        )
+                        update_status(
+                            product_dir,
+                            "detail_prompt_retrying",
+                            detail_prompt_attempt=prompt_attempt,
+                            detail_prompt_error=str(exc),
+                        )
+                        continue
+                    detail_prompt_settings = dict(prompt_settings)
+                    detail_prompt_settings["detail_page_count"] = target_count
+                    detail_prompt = build_detail_prompt(
+                        product_name_cn=product.name_cn,
+                        language=product.language,
+                        selling_points=product.selling_points,
+                        generated_prompt=prompt,
+                        image_note=image_note,
+                        image_size=getattr(product, "image_size", ""),
+                        prompt_settings=detail_prompt_settings,
+                    )
+                    gemini_chars = len(prompt)
+                    break
                 if _shutdown_requested:
                     break
-                screens = split_detail_screens(prompt, target_count)
-                detail_prompt_settings = dict(prompt_settings)
-                detail_prompt_settings["detail_page_count"] = target_count
-                detail_prompt = build_detail_prompt(
-                    product_name_cn=product.name_cn,
-                    language=product.language,
-                    selling_points=product.selling_points,
-                    generated_prompt=prompt,
-                    image_note=image_note,
-                    image_size=getattr(product, "image_size", ""),
-                    prompt_settings=detail_prompt_settings,
-                )
-                gemini_chars = len(prompt)
             else:
                 _emit_ui_status(product.id, "prompt", "♻️ 正在复用已生成详情提示词")
 

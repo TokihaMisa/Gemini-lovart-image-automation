@@ -267,6 +267,77 @@ def test_screen_count_mismatch_makes_no_paid_image_calls(tmp_path):
     assert status.get("detail_completed_count", 0) == 0
 
 
+def test_incomplete_task_uses_current_detail_count_instead_of_stale_snapshot(tmp_path):
+    failed = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=12,
+        prompt_screen_count=10,
+    )
+
+    assert (failed.success, failed.fail) == (0, 1)
+    assert failed.generated_indexes == ()
+    assert read_status(failed.product_dir)["detail_page_count_snapshot"] == 12
+
+    retried = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=10,
+        prompt_screen_count=10,
+    )
+
+    assert (retried.success, retried.fail, retried.skipped) == (1, 0, 0)
+    assert retried.generated_indexes == tuple(range(1, 11))
+    status = read_status(retried.product_dir)
+    assert status["detail_page_count_snapshot"] == 10
+    assert status["detail_completed_count"] == 10
+    assert status["detail_generation_complete"] is True
+
+
+def test_malformed_detail_markers_are_regenerated_once(tmp_path):
+    malformed = (
+        "[[SCREEN 01]]\nScreen 1\n[[/SCREEN 01]]\n\n"
+        "[[SCREEN 02]]\nScreen 2"
+    )
+    valid = (
+        "[[SCREEN 01]]\nScreen 1\n[[/SCREEN 01]]\n\n"
+        "[[SCREEN 02]]\nScreen 2\n[[/SCREEN 02]]"
+    )
+
+    run = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=2,
+        prompt_responses=[malformed, valid],
+    )
+
+    assert (run.success, run.fail) == (1, 0)
+    assert run.gemini.generate_prompt.call_count == 2
+    assert run.generated_indexes == (1, 2)
+
+
+def test_repeated_malformed_detail_markers_fail_without_paid_image_calls(tmp_path):
+    malformed = (
+        "[[SCREEN 01]]\nScreen 1\n[[/SCREEN 01]]\n\n"
+        "[[SCREEN 02]]\nScreen 2"
+    )
+
+    run = run_product_pipeline(
+        tmp_path,
+        "openai_image",
+        "openai_image",
+        detail_count=2,
+        prompt_responses=[malformed, malformed],
+    )
+
+    assert (run.success, run.fail) == (0, 1)
+    assert run.gemini.generate_prompt.call_count == 2
+    assert run.generated_indexes == ()
+
+
 def test_partial_detail_failure_keeps_completed_images_and_resumes_only_missing(tmp_path):
     first = run_product_pipeline(
         tmp_path,
@@ -290,7 +361,7 @@ def test_partial_detail_failure_keeps_completed_images_and_resumes_only_missing(
         tmp_path,
         "openai_image",
         "openai_image",
-        detail_count=9,
+        detail_count=3,
         fail_indexes=set(),
     )
 
@@ -310,7 +381,7 @@ def test_partial_detail_failure_keeps_completed_images_and_resumes_only_missing(
         tmp_path,
         "openai_image",
         "openai_image",
-        detail_count=7,
+        detail_count=3,
     )
     assert (skipped.success, skipped.skipped) == (0, 1)
     assert skipped.append_result.call_args.kwargs["used_model"] == "gpt-image-2"
@@ -404,7 +475,7 @@ def test_support_provider_switch_invalidates_detail_prompt_and_gpt_checkpoints(t
     assert read_status(switched.product_dir)["detail_input_fingerprint"] != first_fingerprint
 
 
-def test_snapshot_is_written_before_support_failure_and_survives_setting_change(tmp_path):
+def test_incomplete_support_failure_uses_updated_detail_count_on_retry(tmp_path):
     failed = run_product_pipeline(
         tmp_path,
         "openai_image",
@@ -424,8 +495,8 @@ def test_snapshot_is_written_before_support_failure_and_survives_setting_change(
         detail_count=9,
     )
 
-    assert resumed.generated_indexes == (1, 2, 3)
-    assert read_status(resumed.product_dir)["detail_page_count_snapshot"] == 3
+    assert resumed.generated_indexes == tuple(range(1, 10))
+    assert read_status(resumed.product_dir)["detail_page_count_snapshot"] == 9
 
 
 def test_no_resume_regenerates_the_configured_gpt_detail_set(tmp_path):
@@ -856,7 +927,7 @@ def test_lovart_openai_lovart_switch_does_not_reuse_stale_lovart_done(tmp_path):
     lovart_bot.create_and_generate.assert_called_once()
     status = read_status(product_dir)
     assert status["detail_provider"] == "lovart"
-    assert status["detail_page_count_snapshot"] == 2
+    assert status["detail_page_count_snapshot"] == 9
 
 
 def test_provider_change_to_pending_lovart_clears_openai_artifacts_and_reports_model(tmp_path):
