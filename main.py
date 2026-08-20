@@ -843,9 +843,25 @@ def _generate_support_images(
     ) -> str:
         stage = "support_white" if step_name == "white_bg" else "support_scene"
         label = "白底图" if step_name == "white_bg" else "场景图"
+        ordered_image_paths = tuple(
+            str(path)
+            for _role, path in sorted(image_inputs.items(), key=lambda item: str(item[0]))
+        )
+        input_fingerprint = _build_support_input_fingerprint(
+            provider,
+            provider_name,
+            step_name,
+            prompt,
+            getattr(product, "image_size", ""),
+            image_inputs,
+        )
         status = read_status(product_dir)
         existing_path = ""
-        if not force_regenerate:
+        if (
+            resume
+            and not force_regenerate
+            and not isinstance(provider, OpenAIImageProvider)
+        ):
             existing_path = _find_support_image(
                 product_dir,
                 status,
@@ -880,10 +896,6 @@ def _generate_support_images(
                 reason="",
             )
         _emit_ui_status(product.id, stage, f"🎨 正在生成{label}")
-        ordered_image_paths = tuple(
-            str(path)
-            for _role, path in sorted(image_inputs.items(), key=lambda item: str(item[0]))
-        )
         result = provider.generate_support_image(
             SupportImageRequest(
                 product_id=product.id,
@@ -895,14 +907,7 @@ def _generate_support_images(
                 product_name_cn=product.name_cn,
                 language=product.language,
                 selling_points=product.selling_points,
-                input_fingerprint=_build_support_input_fingerprint(
-                    provider,
-                    provider_name,
-                    step_name,
-                    prompt,
-                    getattr(product, "image_size", ""),
-                    image_inputs,
-                ),
+                input_fingerprint=input_fingerprint,
                 resume=resume,
                 confirmation_advisor=getattr(provider, "confirmation_advisor", None),
                 status_callback=lambda message: _emit_ui_status(
@@ -1731,7 +1736,9 @@ def _process_products_once(
             elif detail_result.still_running:
                 logger.warning(f"STILL RUNNING [{idx}/{len(products)}] {product.id}")
                 still_running += 1
-                active_index = min(target_count, completed_count + 1)
+                active_index = int(detail_result.active_index or 0)
+                if not 1 <= active_index <= target_count:
+                    active_index = min(target_count, completed_count + 1)
                 reason = f"GPT Image detail screen {active_index} task is still running"
                 update_status(
                     product_dir,

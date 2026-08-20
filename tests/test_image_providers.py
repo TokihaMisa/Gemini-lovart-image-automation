@@ -257,6 +257,114 @@ def test_provider_result_propagates_stable_error_code_without_unsanitized_detail
     assert result.raw_result == {"error_code": "ambiguous_submission"}
 
 
+def test_ambiguous_support_create_is_blocked_on_resume_until_explicit_restart(
+    tmp_path: Path,
+):
+    from image_providers import OpenAIImageProvider, read_support_task_checkpoint
+    from openai_image_api import OpenAIImageAPIError
+
+    secret = "secret-support-credential"
+
+    class AmbiguousAPI(CheckpointingOpenAIAPI):
+        def generate_edit(self, **_kwargs):
+            self.create_posts += 1
+            raise OpenAIImageAPIError(
+                "ambiguous_submission",
+                f"submission result unknown for {secret}",
+            )
+
+    first_api = AmbiguousAPI(())
+    first_api.config.api_key = secret
+    request = support_request(tmp_path, input_fingerprint="support-input")
+
+    first = OpenAIImageProvider(first_api).generate_support_image(request)
+
+    checkpoint = read_support_task_checkpoint(tmp_path, "white_bg")
+    assert first_api.create_posts == 1
+    assert checkpoint["state"] == "ambiguous_submission"
+    assert checkpoint["error_code"] == "ambiguous_submission"
+    assert secret not in checkpoint["error"]
+
+    normal_resume_api = CheckpointingOpenAIAPI((
+        task_snapshot("must-not-create", state="success", is_final=True),
+    ))
+    resumed = OpenAIImageProvider(normal_resume_api).generate_support_image(request)
+
+    assert resumed.succeeded is False
+    assert resumed.raw_result == {"error_code": "ambiguous_submission"}
+    assert normal_resume_api.create_posts == 0
+    assert normal_resume_api.calls == []
+
+    replacement = task_snapshot(
+        "explicit-replacement",
+        state="success",
+        is_final=True,
+        result_url="https://cdn.example/replacement.png",
+    )
+    explicit_api = CheckpointingOpenAIAPI((replacement,))
+    restarted = OpenAIImageProvider(explicit_api).generate_support_image(
+        support_request(
+            tmp_path,
+            input_fingerprint="support-input",
+            resume=False,
+        )
+    )
+
+    assert restarted.succeeded is True
+    assert explicit_api.create_posts == 1
+
+
+def test_ambiguous_detail_create_is_blocked_on_resume_until_explicit_restart(
+    tmp_path: Path,
+):
+    from image_providers import OpenAIImageProvider
+    from openai_image_api import OpenAIImageAPIError
+    from utils import read_status
+
+    class AmbiguousAPI(CheckpointingOpenAIAPI):
+        def generate_edit(self, **_kwargs):
+            self.create_posts += 1
+            raise OpenAIImageAPIError(
+                "ambiguous_submission",
+                "detail submission result unknown",
+            )
+
+    request = single_detail_request(tmp_path)
+    first_api = AmbiguousAPI(())
+
+    first = OpenAIImageProvider(first_api).generate_detail_set(request)
+
+    checkpoint = read_status(tmp_path)["detail_checkpoints"]["1"]
+    assert first_api.create_posts == 1
+    assert first.raw_result == {"error_code": "ambiguous_submission"}
+    assert checkpoint["state"] == "ambiguous_submission"
+    assert checkpoint["error_code"] == "ambiguous_submission"
+
+    normal_resume_api = CheckpointingOpenAIAPI((
+        task_snapshot("must-not-create", state="success", is_final=True),
+    ))
+    resumed = OpenAIImageProvider(normal_resume_api).generate_detail_set(request)
+
+    assert resumed.succeeded is False
+    assert resumed.raw_result == {"error_code": "ambiguous_submission"}
+    assert normal_resume_api.create_posts == 0
+    assert normal_resume_api.calls == []
+
+    replacement = task_snapshot(
+        "detail-explicit-replacement",
+        state="success",
+        is_final=True,
+        result_url="https://cdn.example/detail-replacement.png",
+    )
+    explicit_api = CheckpointingOpenAIAPI((replacement,))
+    restarted = OpenAIImageProvider(explicit_api).generate_detail_set(
+        single_detail_request(tmp_path, resume=False)
+    )
+
+    assert restarted.succeeded is True
+    assert explicit_api.create_posts == 1
+
+
 def test_support_poll_exception_preserves_running_task_for_zero_create_resume(
     tmp_path: Path,
 ):

@@ -43,6 +43,7 @@ _SUPPORT_TASK_CHECKPOINT_KEYS = frozenset(
         "result_url",
         "result_type",
         "error",
+        "error_code",
         "cost",
         "input_fingerprint",
         "prompt_hash",
@@ -109,6 +110,7 @@ class ImageProviderResult:
     raw_result: Mapping[str, object] | None = None
     still_running: bool = False
     task_id_suffix: str = ""
+    active_index: int = 0
 
 
 class LazyImageProviderRegistry:
@@ -144,6 +146,7 @@ def record_detail_checkpoint(
     result_type: str = "",
     cost: object = None,
     request_settings: Mapping[str, object] | None = None,
+    error_code: str = "",
 ) -> None:
     """Atomically persist the state of one GPT detail screen."""
     product_status = read_status(product_dir)
@@ -157,6 +160,8 @@ def record_detail_checkpoint(
         "input_fingerprint": str(input_fingerprint or ""),
         "prompt_hash": str(prompt_hash or ""),
     }
+    if error_code:
+        checkpoint["error_code"] = str(error_code)
     if task_id:
         checkpoint.update(
             task_id=str(task_id),
@@ -279,6 +284,17 @@ class OpenAIImageProvider:
         identity = _support_request_identity(self.api, request)
         checkpoint = read_support_task_checkpoint(request.product_dir, request.step_name)
         identity_matches = _checkpoint_matches_identity(checkpoint, identity)
+        if (
+            request.resume
+            and identity_matches
+            and str(checkpoint.get("state") or "") == "ambiguous_submission"
+            and str(checkpoint.get("error_code") or "") == "ambiguous_submission"
+        ):
+            return ImageProviderResult(
+                succeeded=False,
+                error=str(checkpoint.get("error") or ""),
+                raw_result={"error_code": "ambiguous_submission"},
+            )
         saved_task = (
             _task_snapshot_from_checkpoint(checkpoint)
             if request.resume and identity_matches
@@ -362,6 +378,19 @@ class OpenAIImageProvider:
             )
             safe_error = _sanitized_provider_error(self.api, exc)
             error_code = _stable_provider_error_code(exc)
+            if error_code == "ambiguous_submission":
+                record_support_task_checkpoint(
+                    request.product_dir,
+                    request.step_name,
+                    {
+                        **identity,
+                        "state": "ambiguous_submission",
+                        "local_path": "",
+                        "error": safe_error,
+                        "error_code": error_code,
+                        "attempts": attempts,
+                    },
+                )
             if (
                 isinstance(task, ImageTaskSnapshot)
                 and task.is_final
@@ -446,6 +475,7 @@ class OpenAIImageProvider:
         still_running = False
         last_task_suffix = ""
         last_error_code = ""
+        active_index = 0
         config = getattr(self.api, "config", None)
         used_model = str(
             getattr(config, "model", "gpt-image-2") or "gpt-image-2"
@@ -461,6 +491,22 @@ class OpenAIImageProvider:
                 **request_settings,
             }
             identity_matches = _checkpoint_matches_identity(checkpoint, identity)
+            if (
+                request.resume
+                and identity_matches
+                and str(checkpoint.get("state") or "") == "ambiguous_submission"
+                and str(checkpoint.get("error_code") or "")
+                == "ambiguous_submission"
+            ):
+                failed.append(screen.index)
+                last_error_code = "ambiguous_submission"
+                saved_error = str(checkpoint.get("error") or "")
+                errors.append(
+                    f"screen {screen.index}: {saved_error}"
+                    if saved_error
+                    else f"screen {screen.index}: ambiguous submission"
+                )
+                break
             saved_task = (
                 _task_snapshot_from_checkpoint(checkpoint)
                 if request.resume and identity_matches
@@ -520,6 +566,7 @@ class OpenAIImageProvider:
             except ImageTaskStillRunning as exc:
                 persist(exc.task)
                 still_running = True
+                active_index = screen.index
                 last_error_code = exc.code
                 last_task_suffix = safe_task_display_token(exc.task.task_id)
                 break
@@ -534,7 +581,19 @@ class OpenAIImageProvider:
                     if isinstance(exception_task, ImageTaskSnapshot)
                     else last_task
                 )
-                if (
+                if last_error_code == "ambiguous_submission":
+                    record_detail_checkpoint(
+                        request.product_dir,
+                        screen.index,
+                        "ambiguous_submission",
+                        error=safe_error,
+                        error_code=last_error_code,
+                        attempts=attempts,
+                        input_fingerprint=request.input_fingerprint,
+                        prompt_hash=prompt_hashes[screen.index],
+                        request_settings=request_settings,
+                    )
+                elif (
                     isinstance(task, ImageTaskSnapshot)
                     and task.is_final
                     and task.state == "failed"
@@ -614,6 +673,7 @@ class OpenAIImageProvider:
             ),
             still_running=still_running,
             task_id_suffix=last_task_suffix,
+            active_index=active_index,
         )
 
 

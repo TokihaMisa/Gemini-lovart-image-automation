@@ -1649,6 +1649,108 @@ def test_support_requests_use_content_identity_and_pipeline_resume_flag(tmp_path
     assert changed_provider.requests[0].input_fingerprint != fingerprints[0][0]
 
 
+@pytest.mark.parametrize(
+    ("mutation", "expected_creates"),
+    [("prompt", 2), ("settings", 2), ("content", 1)],
+)
+def test_openai_support_changed_identity_regenerates_stale_artifacts(
+    tmp_path, mutation, expected_creates
+):
+    from main import _generate_support_images
+
+    product_image = Path(write_valid_png(tmp_path / "product.png"))
+    product = SimpleNamespace(
+        id="SKU-SUPPORT-IDENTITY",
+        name_cn="Product",
+        language="English",
+        selling_points="Durable",
+        image_size="1:1",
+        image_paths=[str(product_image)],
+    )
+    first_api = _ScriptedTaskAPI({
+        "white_bg": [("success", "white-first-1234")],
+        "scene": [("success", "scene-first-1234")],
+    })
+    _generate_support_images(
+        product,
+        tmp_path,
+        OpenAIImageProvider(first_api),
+        {},
+        read_status(tmp_path),
+    )
+
+    prompt_settings = {}
+    second_api_kwargs = {}
+    if mutation == "prompt":
+        prompt_settings = {
+            "white_background_requirements": "changed white prompt",
+            "scene_requirements": "changed scene prompt",
+        }
+    elif mutation == "settings":
+        second_api_kwargs["model"] = "gpt-image-next"
+    else:
+        Image.new("RGB", (2, 2), (0, 0, 255)).save(product_image, format="PNG")
+    second_api = _ScriptedTaskAPI(
+        {
+            "white_bg": [("success", "white-second-1234")],
+            "scene": [("success", "scene-second-1234")],
+        },
+        **second_api_kwargs,
+    )
+
+    _generate_support_images(
+        product,
+        tmp_path,
+        OpenAIImageProvider(second_api),
+        prompt_settings,
+        read_status(tmp_path),
+    )
+
+    assert second_api.create_posts == expected_creates
+    assert [Path(call["output_path"]).stem for call in second_api.calls] == [
+        "white_bg"
+    ] + (["scene"] if expected_creates == 2 else [])
+
+
+def test_openai_support_no_resume_regenerates_valid_artifacts(tmp_path):
+    from main import _generate_support_images
+
+    product = SimpleNamespace(
+        id="SKU-SUPPORT-RESTART",
+        name_cn="Product",
+        language="English",
+        selling_points="Durable",
+        image_size="1:1",
+        image_paths=[write_valid_png(tmp_path / "product.png")],
+    )
+    first_api = _ScriptedTaskAPI({
+        "white_bg": [("success", "white-first-1234")],
+        "scene": [("success", "scene-first-1234")],
+    })
+    _generate_support_images(
+        product,
+        tmp_path,
+        OpenAIImageProvider(first_api),
+        {},
+        read_status(tmp_path),
+    )
+    second_api = _ScriptedTaskAPI({
+        "white_bg": [("success", "white-second-1234")],
+        "scene": [("success", "scene-second-1234")],
+    })
+
+    _generate_support_images(
+        product,
+        tmp_path,
+        OpenAIImageProvider(second_api),
+        {},
+        read_status(tmp_path),
+        resume=False,
+    )
+
+    assert second_api.create_posts == 2
+
+
 def test_white_live_task_stops_product_without_failure_and_resumes_same_task(
     tmp_path, capsys
 ):
@@ -1687,6 +1789,67 @@ def test_white_live_task_stops_product_without_failure_and_resumes_same_task(
     assert final_status["openai_image_still_running"] is False
     assert final_status["openai_image_active_stage"] == ""
     assert final_status["openai_image_task_suffix"] == ""
+
+
+def test_live_first_product_does_not_block_second_product(tmp_path):
+    import main
+
+    product_dirs = {
+        product_id: tmp_path / "products" / product_id
+        for product_id in ("SKU-LIVE-FIRST", "SKU-SUCCESS-SECOND")
+    }
+    products = []
+    for product_id, product_dir in product_dirs.items():
+        products.append(SimpleNamespace(
+            id=product_id,
+            name_cn=product_id,
+            language="English",
+            selling_points="Durable",
+            image_size="1:1",
+            image_paths=[write_valid_png(product_dir / "product.png")],
+            reference_images_are_product=False,
+        ))
+    api = _ScriptedTaskAPI({
+        "white_bg": [
+            ("still_running", "first-white-live-1234"),
+            ("success", "second-white-done-1234"),
+        ],
+        "scene": [("success", "second-scene-done-1234")],
+        "01": [("success", "second-detail-done-1234")],
+    })
+    provider = OpenAIImageProvider(api)
+    registry = RecordingRegistry(RecordingImageProvider("lovart"), provider)
+    gemini = Mock()
+    gemini.generate_prompt.return_value = (
+        "[[SCREEN 01]]\nHero\n[[/SCREEN 01]]"
+    )
+    run_dir = tmp_path / "run"
+    with (
+        patch("main.product_output_dir", side_effect=lambda product_id: product_dirs[product_id]),
+        patch("main._backfill_result_project_urls", return_value=0),
+        patch("main.append_result"),
+        patch("utils.organize_output_folders"),
+    ):
+        counters = main._process_products_once(
+            products,
+            gemini,
+            None,
+            Mock(),
+            run_dir,
+            image_registry=registry,
+            routing=GenerationRouting("openai_image", "openai_image", 1),
+        )
+
+    assert counters == (1, 0, 0, 1)
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    assert [row["status"] for row in summary] == [
+        "openai_image_task_still_running",
+        "success",
+    ]
+    assert read_status(product_dirs["SKU-LIVE-FIRST"])["failed"] is False
+    assert read_status(product_dirs["SKU-SUCCESS-SECOND"])[
+        "detail_generation_complete"
+    ] is True
 
 
 def test_scene_live_task_reuses_white_and_resumes_only_scene(tmp_path):
@@ -1762,6 +1925,46 @@ def test_detail_live_task_resumes_screen_four_then_uses_snapshot_target(tmp_path
     status = read_status(second.product_dir)
     assert status["detail_page_count_snapshot"] == 6
     assert status["detail_completed_count"] == 6
+
+
+def test_non_contiguous_detail_checkpoints_report_exact_live_screen(tmp_path):
+    first_api = _ScriptedTaskAPI({
+        "white_bg": [("success", "white-done-1234")],
+        "scene": [("success", "scene-done-1234")],
+        "01": [("success", "detail-1-done-1234")],
+        "02": [("success", "detail-2-live-1234")],
+        "03": [("success", "detail-3-done-1234")],
+        "04": [("success", "detail-4-done-1234")],
+    })
+    first = _run_scripted_openai_pipeline(tmp_path, first_api, detail_count=4)
+    status = read_status(first.product_dir)
+    checkpoints = dict(status["detail_checkpoints"])
+    checkpoints["2"] = {
+        **checkpoints["2"],
+        "state": "running",
+        "is_final": False,
+        "result_url": "",
+        "result_type": "",
+        "local_path": "",
+    }
+    Path(status["detail_images"][1]).unlink()
+    update_status(
+        first.product_dir,
+        "detail_screen_two_running_for_test",
+        detail_checkpoints=checkpoints,
+        detail_generation_complete=False,
+    )
+    second_api = _ScriptedTaskAPI({
+        "02": [("still_running", "detail-2-live-1234")],
+    })
+
+    second = _run_scripted_openai_pipeline(tmp_path, second_api, detail_count=4)
+
+    assert second.counters == (0, 0, 0, 1)
+    assert second_api.calls[0]["resume_task"].task_id == "detail-2-live-1234"
+    status = read_status(second.product_dir)
+    assert status["detail_completed_count"] == 3
+    assert status["openai_image_active_stage"] == "detail_screen_2"
 
 
 def test_lovart_restart_reuses_only_new_white_after_scene_timeout(tmp_path):
