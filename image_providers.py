@@ -52,6 +52,9 @@ _SUPPORT_TASK_CHECKPOINT_KEYS = frozenset(
         "attempts",
     }
 )
+_REQUEST_SETTING_CHECKPOINT_KEYS = frozenset(
+    {"model", "size", "base_url", "merge_reference_images"}
+)
 
 
 @dataclass(frozen=True)
@@ -169,6 +172,7 @@ def record_detail_checkpoint(
             {
                 str(key): _json_safe_setting(value)
                 for key, value in request_settings.items()
+                if str(key) in _REQUEST_SETTING_CHECKPOINT_KEYS
             }
         )
     saved[str(index)] = checkpoint
@@ -313,7 +317,11 @@ class OpenAIImageProvider:
             str(checkpoint.get("local_path") or "") if saved_task is not None else ""
         )
 
+        last_task = saved_task
+
         def persist(task: ImageTaskSnapshot) -> None:
+            nonlocal last_task
+            last_task = task
             record_support_task_checkpoint(
                 request.product_dir,
                 request.step_name,
@@ -343,16 +351,25 @@ class OpenAIImageProvider:
                 task_id_suffix=_task_id_suffix(exc.task.task_id),
             )
         except Exception as exc:
-            task = getattr(exc, "task", None)
+            exception_task = getattr(exc, "task", None)
+            task = (
+                exception_task
+                if isinstance(exception_task, ImageTaskSnapshot)
+                else last_task
+            )
             safe_error = _sanitized_provider_error(self.api, exc)
-            failed_checkpoint = {
-                **identity,
-                "state": "failed",
-                "local_path": "",
-                "error": safe_error,
-                "attempts": attempts,
-            }
-            if isinstance(task, ImageTaskSnapshot):
+            if (
+                isinstance(task, ImageTaskSnapshot)
+                and task.is_final
+                and task.state == "failed"
+            ):
+                failed_checkpoint = {
+                    **identity,
+                    "state": "failed",
+                    "local_path": callback_local_path,
+                    "error": safe_error,
+                    "attempts": attempts,
+                }
                 failed_checkpoint.update(
                     _checkpoint_fields_for_persistence(self.api, task)
                 )
@@ -360,11 +377,11 @@ class OpenAIImageProvider:
                 failed_checkpoint["error"] = (
                     _sanitized_task_text(self.api, task.error) or safe_error
                 )
-            record_support_task_checkpoint(
-                request.product_dir,
-                request.step_name,
-                failed_checkpoint,
-            )
+                record_support_task_checkpoint(
+                    request.product_dir,
+                    request.step_name,
+                    failed_checkpoint,
+                )
             return ImageProviderResult(
                 succeeded=False,
                 error=safe_error,
@@ -465,7 +482,11 @@ class OpenAIImageProvider:
                 else ""
             )
 
+            last_task = saved_task
+
             def persist(task: ImageTaskSnapshot) -> None:
+                nonlocal last_task
+                last_task = task
                 fields = _checkpoint_fields_for_persistence(self.api, task)
                 record_detail_checkpoint(
                     request.product_dir,
@@ -499,28 +520,34 @@ class OpenAIImageProvider:
                 failed.append(screen.index)
                 safe_error = _sanitized_provider_error(self.api, exc)
                 errors.append(f"screen {screen.index}: {safe_error}")
-                task = getattr(exc, "task", None)
-                task_fields: dict[str, object] = {}
-                if isinstance(task, ImageTaskSnapshot):
+                exception_task = getattr(exc, "task", None)
+                task = (
+                    exception_task
+                    if isinstance(exception_task, ImageTaskSnapshot)
+                    else last_task
+                )
+                if (
+                    isinstance(task, ImageTaskSnapshot)
+                    and task.is_final
+                    and task.state == "failed"
+                ):
                     task_fields = _checkpoint_fields_for_persistence(self.api, task)
                     task_fields.pop("state", None)
                     task_fields.pop("error", None)
                     last_task_suffix = _task_id_suffix(task.task_id)
-                record_detail_checkpoint(
-                    request.product_dir,
-                    screen.index,
-                    "failed",
-                    error=(
-                        _sanitized_task_text(self.api, task.error) or safe_error
-                        if isinstance(task, ImageTaskSnapshot)
-                        else safe_error
-                    ),
-                    attempts=attempts,
-                    input_fingerprint=request.input_fingerprint,
-                    prompt_hash=prompt_hashes[screen.index],
-                    request_settings=request_settings,
-                    **task_fields,
-                )
+                    record_detail_checkpoint(
+                        request.product_dir,
+                        screen.index,
+                        "failed",
+                        error=_sanitized_task_text(self.api, task.error) or safe_error,
+                        attempts=attempts,
+                        input_fingerprint=request.input_fingerprint,
+                        prompt_hash=prompt_hashes[screen.index],
+                        request_settings=request_settings,
+                        **task_fields,
+                    )
+                elif isinstance(task, ImageTaskSnapshot):
+                    last_task_suffix = _task_id_suffix(task.task_id)
                 if request.progress_callback:
                     request.progress_callback(
                         screen.index,
@@ -902,7 +929,13 @@ def _checkpoint_attempt_value(checkpoint: Mapping[str, object]) -> int:
 
 
 def _task_id_suffix(task_id: str) -> str:
-    return str(task_id or "")[-8:]
+    value = str(task_id or "")
+    if not value:
+        return ""
+    if len(value) <= 8:
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
+        return f"hash:{digest}"
+    return value[-8:]
 
 
 def _remove_file(path: str | Path) -> None:

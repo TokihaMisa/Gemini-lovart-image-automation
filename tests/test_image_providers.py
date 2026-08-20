@@ -64,6 +64,23 @@ def support_request(tmp_path: Path, **overrides):
     return SupportImageRequest(**values)
 
 
+def single_detail_request(tmp_path: Path, **overrides):
+    from image_providers import DetailSetRequest
+
+    values = {
+        "product_id": "P1",
+        "product_dir": tmp_path,
+        "screens": (DetailScreen(1, "hero"),),
+        "image_paths": (write_valid_png(tmp_path / "reference.png"),),
+        "image_size": "1:1",
+        "target_count": 1,
+        "input_fingerprint": "inputs-v1",
+        "resume": True,
+    }
+    values.update(overrides)
+    return DetailSetRequest(**values)
+
+
 def test_support_task_callback_persists_full_identity_before_poll_crash(tmp_path: Path):
     import json
 
@@ -218,6 +235,80 @@ def test_support_wait_timeout_retains_running_checkpoint(tmp_path: Path):
     assert result.task_id_suffix == "ask-live"
 
 
+def test_support_poll_exception_preserves_running_task_for_zero_create_resume(
+    tmp_path: Path,
+):
+    from image_providers import OpenAIImageProvider, read_support_task_checkpoint
+
+    first_api = CheckpointingOpenAIAPI(
+        (task_snapshot("support-running"),),
+        outcome="error",
+    )
+
+    first = OpenAIImageProvider(first_api).generate_support_image(support_request(tmp_path))
+
+    checkpoint = read_support_task_checkpoint(tmp_path, "white_bg")
+    assert first.succeeded is False
+    assert checkpoint["state"] == "running"
+    assert checkpoint["task_id"] == "support-running"
+    success = task_snapshot(
+        "support-running",
+        state="success",
+        is_final=True,
+        result_url="https://cdn.example/support-running.png",
+    )
+    resumed_api = CheckpointingOpenAIAPI((success,))
+
+    resumed = OpenAIImageProvider(resumed_api).generate_support_image(
+        support_request(tmp_path)
+    )
+
+    assert resumed_api.create_posts == 0
+    assert resumed_api.calls[0]["resume_task"].task_id == "support-running"
+    assert resumed.succeeded is True
+
+
+def test_support_download_exception_preserves_success_task_for_zero_create_redownload(
+    tmp_path: Path,
+):
+    from image_providers import OpenAIImageProvider, read_support_task_checkpoint
+
+    success = task_snapshot(
+        "support-success",
+        state="success",
+        is_final=True,
+        result_url="https://cdn.example/support-success.png",
+    )
+    first_api = CheckpointingOpenAIAPI((success,), outcome="error")
+
+    first = OpenAIImageProvider(first_api).generate_support_image(support_request(tmp_path))
+
+    checkpoint = read_support_task_checkpoint(tmp_path, "white_bg")
+    assert first.succeeded is False
+    assert checkpoint["state"] == "success"
+    assert checkpoint["task_id"] == "support-success"
+    assert checkpoint["result_url"] == "https://cdn.example/support-success.png"
+    resumed_api = CheckpointingOpenAIAPI(())
+
+    resumed = OpenAIImageProvider(resumed_api).generate_support_image(
+        support_request(tmp_path)
+    )
+
+    assert resumed_api.create_posts == 0
+    assert resumed_api.calls[0]["resume_task"].result_url == checkpoint["result_url"]
+    assert resumed.succeeded is True
+
+
+def test_short_task_id_result_suffix_is_hashed_instead_of_exposed(tmp_path: Path):
+    from image_providers import OpenAIImageProvider
+
+    api = CheckpointingOpenAIAPI((task_snapshot("tiny"),), outcome="still_running")
+
+    result = OpenAIImageProvider(api).generate_support_image(support_request(tmp_path))
+
+    assert result.task_id_suffix == "hash:8950abfd"
+
+
 def test_support_new_task_callback_does_not_restore_stale_local_path(tmp_path: Path):
     from image_providers import (
         OpenAIImageProvider,
@@ -307,6 +398,104 @@ def test_detail_task_callback_persists_id_and_restart_resumes_only_missing_scree
     assert Path(resumed_api.calls[0]["output_path"]).name == "02.png"
     assert first.read_bytes() == first_bytes
     assert resumed.succeeded is True
+
+
+def test_detail_poll_exception_preserves_running_task_for_zero_create_resume(
+    tmp_path: Path,
+):
+    from image_providers import OpenAIImageProvider
+    from utils import read_status
+
+    first_api = CheckpointingOpenAIAPI(
+        (task_snapshot("detail-running"),),
+        outcome="error",
+    )
+    request = single_detail_request(tmp_path)
+
+    first = OpenAIImageProvider(first_api).generate_detail_set(request)
+
+    checkpoint = read_status(tmp_path)["detail_checkpoints"]["1"]
+    assert first.failed_indexes == (1,)
+    assert checkpoint["state"] == "running"
+    assert checkpoint["task_id"] == "detail-running"
+    success = task_snapshot(
+        "detail-running",
+        state="success",
+        is_final=True,
+        result_url="https://cdn.example/detail-running.png",
+    )
+    resumed_api = CheckpointingOpenAIAPI((success,))
+
+    resumed = OpenAIImageProvider(resumed_api).generate_detail_set(request)
+
+    assert resumed_api.create_posts == 0
+    assert resumed_api.calls[0]["resume_task"].task_id == "detail-running"
+    assert resumed.succeeded is True
+
+
+def test_detail_download_exception_preserves_success_task_for_zero_create_redownload(
+    tmp_path: Path,
+):
+    from image_providers import OpenAIImageProvider
+    from utils import read_status
+
+    success = task_snapshot(
+        "detail-success-error",
+        state="success",
+        is_final=True,
+        result_url="https://cdn.example/detail-success-error.png",
+    )
+    first_api = CheckpointingOpenAIAPI((success,), outcome="error")
+    request = single_detail_request(tmp_path)
+
+    first = OpenAIImageProvider(first_api).generate_detail_set(request)
+
+    checkpoint = read_status(tmp_path)["detail_checkpoints"]["1"]
+    assert first.failed_indexes == (1,)
+    assert checkpoint["state"] == "success"
+    assert checkpoint["task_id"] == "detail-success-error"
+    assert checkpoint["result_url"] == "https://cdn.example/detail-success-error.png"
+    resumed_api = CheckpointingOpenAIAPI(())
+
+    resumed = OpenAIImageProvider(resumed_api).generate_detail_set(request)
+
+    assert resumed_api.create_posts == 0
+    assert resumed_api.calls[0]["resume_task"].result_url == checkpoint["result_url"]
+    assert resumed.succeeded is True
+
+
+def test_detail_checkpoint_whitelists_persisted_request_settings(tmp_path: Path):
+    from image_providers import record_detail_checkpoint
+    from utils import read_status
+
+    record_detail_checkpoint(
+        tmp_path,
+        1,
+        "running",
+        request_settings={
+            "model": "gpt-image-2",
+            "size": "1024x1024",
+            "base_url": "https://api.lk888.ai",
+            "merge_reference_images": False,
+            "api_key": "never-save-me",
+            "Authorization": "Bearer never-save-me",
+            "headers": {"X-Secret": "never-save-me"},
+        },
+    )
+
+    checkpoint = read_status(tmp_path)["detail_checkpoints"]["1"]
+    assert checkpoint == {
+        "state": "running",
+        "local_path": "",
+        "error": "",
+        "attempts": 0,
+        "input_fingerprint": "",
+        "prompt_hash": "",
+        "model": "gpt-image-2",
+        "size": "1024x1024",
+        "base_url": "https://api.lk888.ai",
+        "merge_reference_images": False,
+    }
 
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt"])

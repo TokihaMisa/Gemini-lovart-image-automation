@@ -73,6 +73,8 @@ class CheckpointingOpenAIAPI:
             raise ImageTaskStillRunning(final)
         if self.outcome == "crash":
             raise KeyboardInterrupt("poll crashed after task callback")
+        if self.outcome == "error":
+            raise RuntimeError("ordinary transport failure after task callback")
         if self.outcome == "failed":
             error = RuntimeError(final.error or "provider task failed")
             error.task = final
