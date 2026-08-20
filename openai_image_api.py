@@ -560,8 +560,17 @@ class OpenAIImageAPI:
         if task.is_final and task.state == "success":
             return self._download_task_result(task, output_path, status_callback)
 
-        task = self._poll_task(task, status_callback, task_callback)
-        return self._download_task_result(task, output_path, status_callback)
+        task, operational_result_url = self._poll_task(
+            task,
+            status_callback,
+            task_callback,
+        )
+        return self._download_task_result(
+            task,
+            output_path,
+            status_callback,
+            operational_result_url=operational_result_url,
+        )
 
     def test_edit(self, output_dir: str | Path) -> GeneratedImage:
         directory = Path(output_dir)
@@ -692,7 +701,7 @@ class OpenAIImageAPI:
         self,
         payload: Mapping[str, Any],
         previous: ImageTaskSnapshot,
-    ) -> ImageTaskSnapshot:
+    ) -> tuple[ImageTaskSnapshot, str]:
         values = _task_payload(payload)
         task_id = _normalize_task_id(values.get("task_id"))
         if task_id != previous.task_id:
@@ -709,6 +718,10 @@ class OpenAIImageAPI:
             raise OpenAIImageAPIError(
                 "invalid_response", "GPT Image API returned no final-state flag."
             )
+        raw_result_url = values.get("result_url")
+        operational_result_url = (
+            raw_result_url if isinstance(raw_result_url, str) else ""
+        )
         task = ImageTaskSnapshot(
             task_id=task_id,
             state=state_value.strip().lower(),
@@ -717,13 +730,14 @@ class OpenAIImageAPI:
             progress=_task_text(values.get("progress"), limit=80),
             status=_task_text(values.get("status"), limit=160),
             status_group=_task_text(values.get("status_group"), limit=160),
-            result_url=_task_text(values.get("result_url"), limit=4096),
+            result_url=_task_text(operational_result_url, limit=4096),
             result_type=_task_text(values.get("result_type"), limit=80),
             error=_task_text(values.get("error")),
             cost=values.get("cost"),
         )
-        return _validate_task_state(
-            _sanitize_task_snapshot(task, self.config.api_key)
+        return (
+            _validate_task_state(_sanitize_task_snapshot(task, self.config.api_key)),
+            operational_result_url,
         )
 
     def _poll_task(
@@ -731,7 +745,7 @@ class OpenAIImageAPI:
         task: ImageTaskSnapshot,
         status_callback: Callable[[str], None] | None,
         task_callback: Callable[[ImageTaskSnapshot], None] | None,
-    ) -> ImageTaskSnapshot:
+    ) -> tuple[ImageTaskSnapshot, str]:
         started_at = time.monotonic()
         deadline = started_at + TASK_WAIT_LIMIT_SECONDS
         status_url = _media_endpoint(self.config.base_url, "status", task_id=task.task_id)
@@ -748,14 +762,14 @@ class OpenAIImageAPI:
                 raise ImageTaskStillRunning(task) from None
             if time.monotonic() >= deadline:
                 raise ImageTaskStillRunning(task)
-            task = self._parse_status_task(payload, task)
+            task, operational_result_url = self._parse_status_task(payload, task)
             _notify_task(task_callback, task)
             elapsed = max(0.0, time.monotonic() - started_at)
             if task.state == "failed":
                 raise _task_failed_error(task, self.config.api_key)
             if task.is_final:
                 _notify_status(status_callback, "✅ GPT Image 生成完成，正在安全下载图片")
-                return task
+                return task, operational_result_url
 
             display = task.status or task.status_group or task.state
             progress = f" · {task.progress}" if task.progress else ""
@@ -775,13 +789,22 @@ class OpenAIImageAPI:
         task: ImageTaskSnapshot,
         output_path: str | Path,
         status_callback: Callable[[str], None] | None = None,
+        *,
+        operational_result_url: str | None = None,
     ) -> GeneratedImage:
         task = _validate_task_state(task)
         if task.state != "success":
             raise OpenAIImageAPIError(
                 "invalid_response", "GPT Image task has no downloadable result."
             )
-        resolved_url = validate_remote_image_url(task.result_url)
+        result_url = task.result_url
+        if operational_result_url is not None:
+            result_url = operational_result_url
+        elif "[redacted]" in result_url or (
+            self.config.api_key and self.config.api_key in result_url
+        ):
+            _raise_unsafe_result_url()
+        resolved_url = validate_remote_image_url(result_url)
         image_bytes = _download_resolved_image(
             resolved_url,
             self.config.timeout,

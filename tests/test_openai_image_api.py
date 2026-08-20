@@ -784,6 +784,54 @@ def test_provider_fields_and_nested_cost_are_redacted_before_callbacks(build_ope
 
 
 @patch("openai_image_api.urllib.request.build_opener")
+def test_final_credentialed_result_url_downloads_raw_but_exposes_only_redacted_snapshot(
+    build_opener, monkeypatch, tmp_path
+):
+    import openai_image_api as module
+
+    secret = "test-key"
+    raw_url = f"https://cdn.example/result.png?token={secret}"
+    callbacks = []
+    statuses = []
+    validated_urls = []
+    sentinel = object()
+
+    def validate(url):
+        validated_urls.append(url)
+        return sentinel
+
+    monkeypatch.setattr(module, "validate_remote_image_url", validate)
+    monkeypatch.setattr(
+        module,
+        "_download_resolved_image",
+        lambda resolved, *_args: (
+            base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
+            if resolved is sentinel
+            else (_ for _ in ()).throw(AssertionError("unexpected resolved URL"))
+        ),
+    )
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(b'{"task_id":"t-1"}'),
+        FakeResponse(json.dumps({
+            "task_id": "t-1", "state": "success", "is_final": True,
+            "result_url": raw_url, "result_type": f"image/{secret}",
+        }).encode()),
+    ]
+
+    result = make_client().generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png",
+        task_callback=callbacks.append, status_callback=statuses.append,
+    )
+
+    assert validated_urls == [raw_url]
+    assert result.task == callbacks[-1]
+    assert result.task.result_url == "https://cdn.example/result.png?token=[redacted]"
+    assert secret not in repr(callbacks)
+    assert secret not in repr(result)
+    assert all(secret not in message for message in statuses)
+
+
+@patch("openai_image_api.urllib.request.build_opener")
 def test_stale_resume_fields_and_nested_cost_are_redacted_before_callbacks(build_opener, tmp_path):
     secret = "test-key"
     callbacks = []
@@ -1065,6 +1113,48 @@ def test_resume_success_redownloads_missing_or_corrupt_output_without_api_reques
     assert result.task == resume
     with Image.open(target) as image:
         image.verify()
+
+
+@pytest.mark.parametrize(
+    "saved_url",
+    [
+        "https://cdn.example/result.png?token=[redacted]",
+        "https://cdn.example/result.png?token=test-key",
+    ],
+)
+@patch("openai_image_api.urllib.request.build_opener")
+def test_resume_success_rejects_redacted_or_secret_result_url_without_network(
+    build_opener, monkeypatch, saved_url, tmp_path
+):
+    import openai_image_api as module
+
+    callbacks = []
+    monkeypatch.setattr(
+        module,
+        "validate_remote_image_url",
+        lambda _url: (_ for _ in ()).throw(AssertionError("must fail before URL validation")),
+    )
+    monkeypatch.setattr(
+        module,
+        "_download_resolved_image",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not download")),
+    )
+    resume = ImageTaskSnapshot(
+        "t-1", "success", True, 1787200000.0,
+        result_url=saved_url, result_type="image",
+    )
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client().generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png",
+            resume_task=resume, task_callback=callbacks.append,
+        )
+
+    assert ctx.value.code == "unsafe_result_url"
+    assert "test-key" not in str(ctx.value)
+    assert "test-key" not in repr(callbacks)
+    assert callbacks[-1].result_url.endswith("token=[redacted]")
+    build_opener.assert_not_called()
 
 
 @patch("openai_image_api.urllib.request.build_opener")
