@@ -11,12 +11,10 @@ import io
 import ipaddress
 import json
 import math
-import mimetypes
 import os
 from pathlib import Path
 import queue
 import re
-import secrets
 import socket
 import ssl
 import tempfile
@@ -24,7 +22,7 @@ import threading
 import time
 from typing import Any, Callable, Final, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 import urllib.request
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -32,9 +30,12 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from network_retry import PERMANENT_TLS_GUIDANCE, RetryKind, classify_network_error
 
 
-DEFAULT_OPENAI_IMAGE_BASE_URL: Final = "https://api.openai.com/v1"
+DEFAULT_OPENAI_IMAGE_BASE_URL: Final = ""
+MAX_REFERENCE_IMAGES: Final = 14
+MAX_REFERENCE_BYTES: Final = 10 * 1024 * 1024
+MAX_REFERENCE_TOTAL_BYTES: Final = 30 * 1024 * 1024
+MAX_CREATE_BODY_BYTES: Final = 50 * 1024 * 1024
 _VALID_RESOLUTIONS: Final = {"1K", "2K", "4K"}
-_LK888_IMAGE_HOSTS: Final = {"api.lk888.ai"}
 _PIXEL_SIZES_BY_RESOLUTION: Final = {
     "1K": (
         (1 / 2, "960x1920"),
@@ -147,7 +148,6 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
     timeout: float = 600.0
     max_attempts: int = 4
     retry_delays: tuple[float, ...] = (3.0, 6.0, 12.0)
-    async_edits: bool = False
     merge_reference_images: bool = False
 
     def __init__(
@@ -159,7 +159,6 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
         timeout: float = 600.0,
         max_attempts: int = 4,
         retry_delays: tuple[float, ...] = (3.0, 6.0, 12.0),
-        async_edits: bool = False,
         merge_reference_images: bool = False,
     ) -> None:
         object.__setattr__(self, "_api_key", api_key)
@@ -169,7 +168,6 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
         object.__setattr__(self, "timeout", timeout)
         object.__setattr__(self, "max_attempts", max_attempts)
         object.__setattr__(self, "retry_delays", retry_delays)
-        object.__setattr__(self, "async_edits", bool(async_edits))
         object.__setattr__(
             self,
             "merge_reference_images",
@@ -196,14 +194,13 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
         base_url = normalize_openai_image_base_url(section.get("base_url"))
         merge_reference_images = _config_boolean(
             section.get("merge_reference_images"),
-            default=_is_hapi_image_service(base_url),
+            default=False,
         )
         return cls(
             api_key=resolved_key,
             base_url=base_url,
             model=model,
             resolution=resolution,
-            async_edits=_is_hapi_image_service(base_url),
             merge_reference_images=merge_reference_images,
         )
 
@@ -242,29 +239,8 @@ def normalize_openai_image_base_url(value: object | None) -> str:
     return urlunsplit((parsed.scheme.lower(), parsed.netloc, path, "", ""))
 
 
-def _is_hapi_image_service(base_url: str) -> bool:
-    """Recognize HAPI's standard and dedicated image gateways."""
-    try:
-        parsed = urlsplit(base_url)
-        return (parsed.hostname or "").rstrip(".").lower() in {
-            "hapiopen.cc",
-            "image.hapiopen.cc",
-        } and parsed.path.rstrip("/") in {"", "/v1"}
-    except ValueError:
-        return False
-
-
-def _is_lk888_image_service(base_url: str) -> bool:
-    try:
-        return (urlsplit(base_url).hostname or "").rstrip(".").lower() in _LK888_IMAGE_HOSTS
-    except ValueError:
-        return False
-
-
-def _provider_image_size(base_url: str, resolution: str, image_size: str) -> str:
-    """Translate UI quality tiers to lk888's documented pixel-size values."""
-    if not _is_lk888_image_service(base_url):
-        return resolution
+def _provider_image_size(resolution: str, image_size: str) -> str:
+    """Map the requested ratio to the closest documented pixel size."""
     ratio_text = str(image_size or "").strip().replace("：", ":").replace("×", "x")
     match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*[:xX]\s*(\d+(?:\.\d+)?)", ratio_text)
     target_ratio = 1.0
@@ -274,27 +250,10 @@ def _provider_image_size(base_url: str, resolution: str, image_size: str) -> str
         if width > 0 and height > 0:
             target_ratio = width / height
     candidates = _PIXEL_SIZES_BY_RESOLUTION[resolution]
-    candidate_ratio, candidate_size = min(
+    _, candidate_size = min(
         candidates,
         key=lambda item: abs(item[0] - target_ratio),
     )
-    if not match or abs(candidate_ratio - target_ratio) < 1e-9:
-        return candidate_size
-
-    candidate_width, candidate_height = (
-        int(part) for part in candidate_size.split("x", 1)
-    )
-    if target_ratio < 1:
-        adjusted_width = candidate_width
-        adjusted_height = max(16, round(candidate_width / target_ratio / 16) * 16)
-    else:
-        adjusted_height = candidate_height
-        adjusted_width = max(16, round(candidate_height * target_ratio / 16) * 16)
-    if (
-        1 / 3 <= adjusted_width / adjusted_height <= 3
-        and 655_360 <= adjusted_width * adjusted_height <= 8_294_400
-    ):
-        return f"{adjusted_width}x{adjusted_height}"
     return candidate_size
 
 
@@ -311,13 +270,18 @@ def _config_boolean(value: object, *, default: bool) -> bool:
     return bool(default)
 
 
-def _hapi_images_endpoint(base_url: str, suffix: str) -> str:
-    parsed = urlsplit(base_url)
-    prefix = "/v1/images" if (
-        (parsed.hostname or "").rstrip(".").lower() == "hapiopen.cc"
-        and not parsed.path.rstrip("/")
-    ) else "/images"
-    return f"{prefix}{suffix}"
+def _protocol_base_url(base_url: str) -> str:
+    normalized = normalize_openai_image_base_url(base_url)
+    return normalized[:-3] if normalized.lower().endswith("/v1") else normalized
+
+
+def _media_endpoint(base_url: str, resource: str, *, task_id: str = "") -> str:
+    base = _protocol_base_url(base_url)
+    if resource == "generate":
+        return f"{base}/v1/media/generate"
+    if resource == "status" and task_id:
+        return f"{base}/v1/media/status?{urlencode({'task_id': task_id})}"
+    raise ValueError("invalid media endpoint")
 
 
 def _decode_json_response(raw_response: bytes) -> dict[str, Any]:
@@ -332,32 +296,6 @@ def _decode_json_response(raw_response: bytes) -> dict[str, Any]:
             "invalid_response", "GPT Image API returned an invalid response."
         )
     return decoded
-
-
-def _validated_hapi_task_id(value: object) -> str:
-    task_id = str(value or "").strip()
-    if (
-        not task_id
-        or len(task_id) > 160
-        or any(
-            character
-            not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
-            for character in task_id
-        )
-    ):
-        raise OpenAIImageAPIError(
-            "invalid_response", "GPT Image API returned an invalid async task ID."
-        )
-    return task_id
-
-
-def _hapi_task_result(payload: Mapping[str, Any]) -> dict[str, Any]:
-    result = payload.get("result")
-    if not isinstance(result, Mapping):
-        raise OpenAIImageAPIError(
-            "invalid_response", "GPT Image API returned no async task result."
-        )
-    return dict(result)
 
 
 def _notify_status(callback: Callable[[str], None] | None, message: str) -> None:
@@ -379,7 +317,7 @@ def _retry_after_seconds(headers: Mapping[str, str]) -> float | None:
 
 
 class OpenAIImageAPI:
-    """Minimal transport for the standard OpenAI-compatible Images edits API."""
+    """Transport for the documented GPT Image media task protocol."""
 
     def __init__(
         self,
@@ -390,7 +328,6 @@ class OpenAIImageAPI:
         self.config = config
         self.logger = logger
         self._sleep = sleep or time.sleep
-        self._hapi_async_available: bool | None = None
 
     def generate_edit(
         self,
@@ -400,51 +337,22 @@ class OpenAIImageAPI:
         image_size: str = "",
         status_callback: Callable[[str], None] | None = None,
     ) -> GeneratedImage:
-        files = _validated_image_paths(image_paths)
-        use_hapi_async = bool(self.config.async_edits)
-        merge_references = bool(self.config.merge_reference_images)
-        temporary_upload: Path | None = None
-        upload_files = files
-        if merge_references and len(files) > 1:
-            temporary_upload = _build_reference_sheet(files)
-            upload_files = [temporary_upload]
-        image_field = "image" if (
-            use_hapi_async
-            or merge_references
-            or _is_lk888_image_service(self.config.base_url) and len(upload_files) == 1
-        ) else "image[]"
-        try:
-            body, content_type = encode_multipart(
-                fields={
-                    "model": self.config.model,
-                    "prompt": append_aspect_instruction(prompt, image_size),
-                    "size": _provider_image_size(
-                        self.config.base_url,
-                        self.config.resolution,
-                        image_size,
-                    ),
-                },
-                files=[(image_field, path) for path in upload_files],
-            )
-        finally:
-            if temporary_upload is not None:
-                try:
-                    temporary_upload.unlink()
-                except FileNotFoundError:
-                    pass
-        if use_hapi_async:
-            payload = self._request_hapi_async_edit(
-                body,
-                content_type,
-                status_callback=status_callback,
-            )
-        else:
-            payload = self._request_sync_edit(
-                "/images/edits",
-                body,
-                content_type,
-                status_callback=status_callback,
-            )
+        images = _encode_reference_images(
+            image_paths,
+            merge=bool(self.config.merge_reference_images),
+        )
+        body = _build_create_body(
+            self.config.model,
+            append_aspect_instruction(prompt, image_size),
+            _provider_image_size(self.config.resolution, image_size),
+            images,
+        )
+        payload = self._request_sync_edit(
+            _media_endpoint(self.config.base_url, "generate"),
+            body,
+            "application/json",
+            status_callback=status_callback,
+        )
         image_bytes = self._extract_image_bytes(payload, status_callback=status_callback)
         target = Path(output_path)
         atomic_save_validated_image(image_bytes, target)
@@ -482,9 +390,7 @@ class OpenAIImageAPI:
         max_attempts: int | None = None,
         status_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
-        request = urllib.request.Request(
-            f"{self.config.base_url}{endpoint}", data=body, method="POST"
-        )
+        request = urllib.request.Request(endpoint, data=body, method="POST")
         request.add_header("Accept", "application/json")
         request.add_header("Authorization", f"Bearer {self.config.api_key}")
         request.add_header("Content-Type", content_type)
@@ -516,133 +422,6 @@ class OpenAIImageAPI:
             response_headers=response_headers,
         )
         return _decode_json_response(raw_response), _retry_after_seconds(response_headers)
-
-    def _request_hapi_async_edit(
-        self,
-        body: bytes,
-        content_type: str,
-        *,
-        status_callback: Callable[[str], None] | None = None,
-    ) -> dict[str, Any]:
-        if self._hapi_async_available is False:
-            return self._request_hapi_sync_edit(
-                body,
-                content_type,
-                status_callback=status_callback,
-            )
-        # An ambiguous retry of a multipart submit can create a second paid job.
-        # Submit once, then make all subsequent retries against the safe task GET.
-        try:
-            payload = self._request_json(
-                _hapi_images_endpoint(self.config.base_url, "/edits/async"),
-                body,
-                content_type,
-                max_attempts=1,
-                status_callback=status_callback,
-            )
-        except OpenAIImageAPIError as exc:
-            if exc.status_code != 404:
-                raise
-            self._hapi_async_available = False
-            if self.logger is not None:
-                self.logger.warning(
-                    "HAPI async image tasks are unavailable; falling back to sync edits."
-                )
-            _notify_status(
-                status_callback,
-                "↩️ HAPI 未启用异步任务，已切换为同步生成",
-            )
-            return self._request_hapi_sync_edit(
-                body,
-                content_type,
-                status_callback=status_callback,
-            )
-        self._hapi_async_available = True
-        task_id = _validated_hapi_task_id(payload.get("task_id"))
-        _notify_status(status_callback, "📨 GPT Image 任务已提交，正在等待生成")
-        if self.logger is not None:
-            self.logger.info("GPT Image async task submitted: %s", task_id)
-
-        status = str(payload.get("status") or "").strip().lower()
-        if status == "completed":
-            return _hapi_task_result(payload)
-        if status == "failed":
-            self._raise_hapi_task_failure(payload)
-        if status not in {"processing", "pending", "queued"}:
-            raise OpenAIImageAPIError(
-                "invalid_response",
-                "GPT Image API returned an invalid async task status.",
-            )
-
-        poll_url = (
-            f"{self.config.base_url}"
-            f"{_hapi_images_endpoint(self.config.base_url, f'/tasks/{task_id}')}"
-        )
-        poll_interval = 3.0
-        max_polls = max(
-            1,
-            int(max(float(self.config.timeout), poll_interval) / poll_interval),
-        )
-        deadline = time.monotonic() + max(float(self.config.timeout), poll_interval)
-        for poll_number in range(1, max_polls + 1):
-            polled, retry_after = self._request_json_url(
-                poll_url,
-                status_callback=status_callback,
-            )
-            polled_task_id = polled.get("task_id")
-            if polled_task_id not in {None, "", task_id}:
-                raise OpenAIImageAPIError(
-                    "invalid_response",
-                    "GPT Image API returned a mismatched async task.",
-                )
-            status = str(polled.get("status") or "").strip().lower()
-            if self.logger is not None:
-                self.logger.info(
-                    "GPT Image async task %s: %s (poll %s/%s)",
-                    task_id,
-                    status or "unknown",
-                    poll_number,
-                    max_polls,
-                )
-            if status == "completed":
-                _notify_status(status_callback, "✅ GPT Image 生成完成，正在保存图片")
-                return _hapi_task_result(polled)
-            if status == "failed":
-                self._raise_hapi_task_failure(polled)
-            if status not in {"processing", "pending", "queued"}:
-                raise OpenAIImageAPIError(
-                    "invalid_response",
-                    "GPT Image API returned an invalid async task status.",
-                )
-            _notify_status(
-                status_callback,
-                f"⏳ GPT Image 正在生成（状态检查 {poll_number}/{max_polls}）",
-            )
-            if poll_number < max_polls:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                self._sleep(min(retry_after or poll_interval, remaining))
-
-        raise OpenAIImageAPIError(
-            "timeout",
-            "GPT Image async task did not finish before the local wait timeout.",
-            retryable=True,
-        )
-
-    def _request_hapi_sync_edit(
-        self,
-        body: bytes,
-        content_type: str,
-        *,
-        status_callback: Callable[[str], None] | None = None,
-    ) -> dict[str, Any]:
-        return self._request_sync_edit(
-            _hapi_images_endpoint(self.config.base_url, "/edits"),
-            body,
-            content_type,
-            status_callback=status_callback,
-        )
 
     def _request_sync_edit(
         self,
@@ -710,34 +489,6 @@ class OpenAIImageAPI:
                     raise _ambiguous_sync_submission_error() from None
                 raise value
             raise value
-
-    def _raise_hapi_task_failure(self, payload: Mapping[str, Any]) -> None:
-        raw_status = payload.get("http_status")
-        try:
-            status_code = int(raw_status) if raw_status is not None else None
-        except (TypeError, ValueError):
-            status_code = None
-        error_value = payload.get("error")
-        if isinstance(error_value, Mapping):
-            detail = str(
-                error_value.get("message") or error_value.get("type") or ""
-            ).strip()
-        else:
-            detail = str(error_value or "").strip()
-        detail = " ".join(detail.replace(self.config.api_key, "[redacted]").split())[:300]
-        if status_code == 429:
-            code = "rate_limit"
-            retryable = True
-        elif status_code is not None and 500 <= status_code < 600:
-            code = "server_error"
-            retryable = True
-        else:
-            code = "task_failed"
-            retryable = False
-        message = "GPT Image async task failed."
-        if detail:
-            message = f"GPT Image async task failed: {detail}"
-        raise OpenAIImageAPIError(code, message, status_code, retryable)
 
     def _request_bytes(
         self,
@@ -836,34 +587,69 @@ def append_aspect_instruction(prompt: str, image_size: str) -> str:
     return f"{source}\n\nPreserve the requested image aspect ratio exactly: {aspect}."
 
 
-def encode_multipart(
-    fields: Mapping[str, str], files: Sequence[tuple[str, Path]]
-) -> tuple[bytes, str]:
-    """Create a conventional multipart body using a fresh opaque boundary."""
-    boundary = secrets.token_hex(24)
-    chunks: list[bytes] = []
-    for name, value in fields.items():
-        chunks.extend((
-            f"--{boundary}\r\n".encode("ascii"),
-            f'Content-Disposition: form-data; name="{_safe_multipart_token(name)}"\r\n\r\n'.encode("utf-8"),
-            str(value).encode("utf-8"),
-            b"\r\n",
-        ))
-    for field_name, path in files:
-        filename = _safe_filename(path.name)
-        media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        chunks.extend((
-            f"--{boundary}\r\n".encode("ascii"),
-            (
-                "Content-Disposition: form-data; "
-                f'name="{_safe_multipart_token(field_name)}"; filename="{filename}"\r\n'
-            ).encode("utf-8"),
-            f"Content-Type: {media_type}\r\n\r\n".encode("ascii"),
-            path.read_bytes(),
-            b"\r\n",
-        ))
-    chunks.append(f"--{boundary}--\r\n".encode("ascii"))
-    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+def _read_validated_reference(path: str | Path) -> tuple[str, bytes]:
+    source = Path(path)
+    try:
+        raw = source.read_bytes()
+        if not raw:
+            raise ValueError
+        with Image.open(io.BytesIO(raw)) as image:
+            image.verify()
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            image_format = str(image.format or "").upper()
+    except (OSError, UnidentifiedImageError, SyntaxError, ValueError):
+        raise OpenAIImageAPIError(
+            "invalid_input_image", "Each source file must be a non-empty readable image."
+        ) from None
+
+    media_types = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
+    try:
+        return media_types[image_format], raw
+    except KeyError:
+        raise OpenAIImageAPIError(
+            "invalid_input_image", "Each source image must be PNG, JPEG, or WebP."
+        ) from None
+
+
+def _encode_reference_images(paths: Sequence[str | Path], merge: bool) -> list[str]:
+    source_paths = [Path(path) for path in paths]
+    if not source_paths:
+        raise OpenAIImageAPIError("missing_input_image", "At least one source image is required.")
+    if len(source_paths) > MAX_REFERENCE_IMAGES:
+        raise OpenAIImageAPIError(
+            "reference_image_limit", f"At most {MAX_REFERENCE_IMAGES} reference images are allowed."
+        )
+
+    validated = [_read_validated_reference(path) for path in source_paths]
+    total_bytes = sum(len(raw) for _, raw in validated)
+    if any(len(raw) > MAX_REFERENCE_BYTES for _, raw in validated):
+        raise OpenAIImageAPIError("reference_image_too_large", "A reference image exceeds the size limit.")
+    if total_bytes > MAX_REFERENCE_TOTAL_BYTES:
+        raise OpenAIImageAPIError("reference_total_too_large", "Reference images exceed the total size limit.")
+
+    if merge and len(source_paths) > 1:
+        reference_sheet = _build_reference_sheet(source_paths)
+        try:
+            validated = [_read_validated_reference(reference_sheet)]
+        finally:
+            try:
+                reference_sheet.unlink()
+            except FileNotFoundError:
+                pass
+    return [f"data:{media_type};base64,{base64.b64encode(raw).decode('ascii')}" for media_type, raw in validated]
+
+
+def _build_create_body(model: str, prompt: str, size: str, images: Sequence[str]) -> bytes:
+    payload = {
+        "model": str(model),
+        "prompt": str(prompt),
+        "params": {"images": list(images), "size": str(size), "quality": "auto", "n": 1},
+    }
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(body) > MAX_CREATE_BODY_BYTES:
+        raise OpenAIImageAPIError("create_body_too_large", "Image request body exceeds the size limit.")
+    return body
 
 
 def validate_remote_image_url(url: str) -> _ResolvedResultURL:
@@ -1209,23 +995,6 @@ def _is_expected_content_type(content_type: str, expected: str) -> bool:
     return media_type.startswith("image/") and len(media_type) > len("image/")
 
 
-def _validated_image_paths(image_paths: Sequence[str | Path]) -> list[Path]:
-    paths = [Path(path) for path in image_paths]
-    if not paths:
-        raise OpenAIImageAPIError("missing_input_image", "At least one source image is required.")
-    for path in paths:
-        try:
-            if not path.is_file() or path.stat().st_size <= 0:
-                raise ValueError
-            with Image.open(path) as image:
-                image.verify()
-        except (OSError, UnidentifiedImageError, SyntaxError, ValueError):
-            raise OpenAIImageAPIError(
-                "invalid_input_image", "Each source file must be a non-empty readable image."
-            ) from None
-    return paths
-
-
 def _build_reference_sheet(image_paths: Sequence[Path]) -> Path:
     """Flatten multiple references for providers that accept one `image` upload."""
     descriptor, raw_path = tempfile.mkstemp(
@@ -1349,13 +1118,6 @@ def _retry_delay(delays: Sequence[float], failed_attempt: int) -> float:
     return max(0.0, float(delays[min(failed_attempt - 1, len(delays) - 1)]))
 
 
-def _safe_multipart_token(value: str) -> str:
-    return str(value).replace("\r", "").replace("\n", "").replace('"', "")
-
-
-def _safe_filename(filename: str) -> str:
-    safe = _safe_multipart_token(Path(filename).name)
-    return safe or "image"
 
 
 def _raise_unsafe_result_url() -> None:

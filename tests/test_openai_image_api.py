@@ -14,9 +14,17 @@ import pytest
 from PIL import Image
 
 from openai_image_api import (
+    MAX_CREATE_BODY_BYTES,
+    MAX_REFERENCE_BYTES,
+    MAX_REFERENCE_IMAGES,
+    MAX_REFERENCE_TOTAL_BYTES,
     OpenAIImageAPI,
     OpenAIImageAPIConfig,
     OpenAIImageAPIError,
+    _build_create_body,
+    _encode_reference_images,
+    _media_endpoint,
+    append_aspect_instruction,
     normalize_openai_image_base_url,
     validate_remote_image_url,
 )
@@ -154,10 +162,9 @@ def fake_png_response() -> FakeResponse:
 def make_client(*, sleep=None, **overrides) -> OpenAIImageAPI:
     settings = {
         "api_key": "test-key",
-        "base_url": "https://hapiopen.cc/v1",
+        "base_url": "https://api.lk888.ai/v1",
         "timeout": 12.5,
         "retry_delays": (0.0,),
-        "async_edits": False,
         "merge_reference_images": False,
     }
     settings.update(overrides)
@@ -268,29 +275,147 @@ def test_config_normalizes_defaults_and_provider_values():
 
 
 @pytest.mark.parametrize(
-    ("base_url", "expected"),
+    ("base_url", "create_url", "status_url"),
     [
-        ("https://image.hapiopen.cc", True),
-        ("https://image.hapiopen.cc/v1", True),
-        ("https://hapiopen.cc/v1", True),
-        ("https://api.openai.com/v1", False),
-        ("https://gateway.test/v1", False),
+        ("https://api.lk888.ai", "https://api.lk888.ai/v1/media/generate", "https://api.lk888.ai/v1/media/status?task_id=abc-123"),
+        ("https://api.lk888.ai/v1", "https://api.lk888.ai/v1/media/generate", "https://api.lk888.ai/v1/media/status?task_id=abc-123"),
     ],
 )
-def test_config_enables_async_edits_only_for_hapi(base_url, expected):
-    config = OpenAIImageAPIConfig.from_config(
-        {"openai_image": {"base_url": base_url}},
-        api_key="test-key",
+def test_media_endpoints_strip_exactly_one_trailing_v1(base_url, create_url, status_url):
+    assert _media_endpoint(base_url, "generate") == create_url
+    assert _media_endpoint(base_url, "status", task_id="abc-123") == status_url
+
+
+def test_build_create_body_uses_documented_json_contract():
+    encoded_images = ["data:image/png;base64,cG5n"]
+    prompt = append_aspect_instruction("sell it", "2:3")
+
+    payload = json.loads(
+        _build_create_body("gpt-image-2", prompt, "1024x1536", encoded_images)
     )
 
-    assert config.async_edits is expected
+    assert payload == {
+        "model": "gpt-image-2",
+        "prompt": prompt,
+        "params": {
+            "images": encoded_images,
+            "size": "1024x1536",
+            "quality": "auto",
+            "n": 1,
+        },
+    }
+
+
+def make_image(path: Path, image_format: str) -> Path:
+    Image.new("RGB", (2, 2), "navy").save(path, format=image_format)
+    return path
+
+
+@pytest.mark.parametrize(
+    ("image_format", "extension", "prefix"),
+    [
+        ("PNG", ".jpg", "data:image/png;base64,"),
+        ("JPEG", ".png", "data:image/jpeg;base64,"),
+        ("WEBP", ".jpeg", "data:image/webp;base64,"),
+    ],
+)
+def test_encode_reference_images_uses_verified_content_format(
+    tmp_path, image_format, extension, prefix
+):
+    source = make_image(tmp_path / f"reference{extension}", image_format)
+
+    encoded = _encode_reference_images([source], merge=False)
+
+    assert encoded[0].startswith(prefix)
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_reference_count_is_limited_before_network_access(build_opener, tmp_path):
+    references = [make_png(tmp_path / f"reference-{index}.png") for index in range(MAX_REFERENCE_IMAGES)]
+    assert len(_encode_reference_images(references, merge=False)) == MAX_REFERENCE_IMAGES
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client().generate_edit(
+            "prompt",
+            references + [make_png(tmp_path / "too-many.png")],
+            tmp_path / "out.png",
+        )
+
+    assert ctx.value.code == "reference_image_limit"
+    build_opener.assert_not_called()
+
+
+def test_reference_byte_limits_accept_boundaries_and_reject_excess(monkeypatch, tmp_path):
+    source = make_png(tmp_path / "source.png")
+    raw = source.read_bytes()
+    monkeypatch.setattr("openai_image_api.MAX_REFERENCE_BYTES", len(raw))
+    monkeypatch.setattr("openai_image_api.MAX_REFERENCE_TOTAL_BYTES", len(raw))
+    assert _encode_reference_images([source], merge=False)
+
+    oversized = tmp_path / "oversized.png"
+    oversized.write_bytes(raw + b"x")
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        _encode_reference_images([oversized], merge=False)
+    assert ctx.value.code == "reference_image_too_large"
+
+
+def test_total_reference_byte_limit_rejects_excess(monkeypatch, tmp_path):
+    first = make_png(tmp_path / "first.png")
+    second = make_png(tmp_path / "second.png")
+    raw = first.read_bytes()
+    monkeypatch.setattr("openai_image_api.MAX_REFERENCE_BYTES", len(raw) + 1)
+    monkeypatch.setattr("openai_image_api.MAX_REFERENCE_TOTAL_BYTES", len(raw) * 2)
+    assert len(_encode_reference_images([first, second], merge=False)) == 2
+
+    second.write_bytes(raw + b"x")
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        _encode_reference_images([first, second], merge=False)
+    assert ctx.value.code == "reference_total_too_large"
+
+
+def test_create_body_limit_rejects_utf8_byte_overage(monkeypatch):
+    images = ["data:image/png;base64,cG5n"]
+    accepted = _build_create_body("model", "你好", "1024x1024", images)
+    monkeypatch.setattr("openai_image_api.MAX_CREATE_BODY_BYTES", len(accepted))
+    assert _build_create_body("model", "你好", "1024x1024", images) == accepted
+
+    monkeypatch.setattr("openai_image_api.MAX_CREATE_BODY_BYTES", len(accepted) - 1)
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        _build_create_body("model", "你好", "1024x1024", images)
+    assert ctx.value.code == "create_body_too_large"
+
+
+def test_reference_merge_is_explicit_and_uses_one_data_url(tmp_path):
+    references = [
+        make_png(tmp_path / "first.png"),
+        make_png(tmp_path / "second.png"),
+    ]
+
+    assert len(_encode_reference_images(references, merge=False)) == 2
+    merged = _encode_reference_images(references, merge=True)
+
+    assert len(merged) == 1
+    assert merged[0].startswith("data:image/png;base64,")
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+@pytest.mark.parametrize("raw", [b"not an image", base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)[:-8]])
+def test_invalid_reference_images_fail_before_network_access(build_opener, raw, tmp_path):
+    source = tmp_path / "invalid.png"
+    source.write_bytes(raw)
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        make_client().generate_edit("prompt", [source], tmp_path / "out.png")
+
+    assert ctx.value.code == "invalid_input_image"
+    build_opener.assert_not_called()
 
 
 @pytest.mark.parametrize(
     ("base_url", "configured", "expected"),
     [
-        ("https://image.hapiopen.cc", None, True),
-        ("https://hapiopen.cc/v1", None, True),
+        ("https://image.hapiopen.cc", None, False),
+        ("https://hapiopen.cc/v1", None, False),
         ("https://gateway.test/v1", None, False),
         ("https://gateway.test/v1", True, True),
         ("https://image.hapiopen.cc", False, False),
@@ -323,8 +448,8 @@ def test_config_rejects_unsupported_resolution_without_disclosing_key():
 
 
 @patch("openai_image_api.urllib.request.build_opener")
-def test_generate_edit_posts_multipart_and_saves_b64_png(build_opener, tmp_path):
-    """Fails if a standard Images edit request is not multipart or its image is lost."""
+def test_generate_edit_posts_json_create_body_and_saves_b64_png(build_opener, tmp_path):
+    """The media task submit uses JSON Data URLs, never multipart edit fields."""
     build_opener.return_value.open.return_value = fake_png_response()
 
     result = make_client().generate_edit(
@@ -336,13 +461,22 @@ def test_generate_edit_posts_multipart_and_saves_b64_png(build_opener, tmp_path)
 
     request = build_opener.return_value.open.call_args.args[0]
     body = request.data
-    assert request.full_url == "https://hapiopen.cc/v1/images/edits"
+    assert request.full_url == "https://api.lk888.ai/v1/media/generate"
     assert request.get_header("Authorization") == "Bearer test-key"
-    assert request.get_header("Content-type").startswith("multipart/form-data; boundary=")
-    assert b'name="model"' in body and b"gpt-image-2" in body
-    assert b'name="size"' in body and b"1K" in body
-    assert b'name="image[]"; filename="source.png"' in body
-    assert b"keep the product exact" in body and b"4:5" in body
+    assert request.get_header("Content-type") == "application/json"
+    assert b"/images/edits" not in request.full_url.encode()
+    assert b"multipart" not in body and b"boundary" not in body
+    assert b'"image"' not in body and b'"image[]"' not in body
+    assert json.loads(body) == {
+        "model": "gpt-image-2",
+        "prompt": append_aspect_instruction("keep the product exact", "4:5"),
+        "params": {
+            "images": _encode_reference_images([tmp_path / "source.png"], merge=False),
+            "size": "1024x1280",
+            "quality": "auto",
+            "n": 1,
+        },
+    }
     assert result.local_path == str(tmp_path / "out.png")
     with Image.open(tmp_path / "out.png") as output:
         output.verify()
@@ -350,6 +484,7 @@ def test_generate_edit_posts_multipart_and_saves_b64_png(build_opener, tmp_path)
 
 
 @patch("openai_image_api.urllib.request.build_opener")
+@pytest.mark.skip(reason="HAPI multipart async protocol was removed")
 def test_generate_edit_uses_provider_root_without_inserting_v1(build_opener, tmp_path):
     build_opener.return_value.open.side_effect = [
         FakeResponse(json.dumps({
@@ -390,6 +525,7 @@ def test_generate_edit_uses_provider_root_without_inserting_v1(build_opener, tmp
 
 
 @patch("openai_image_api.urllib.request.build_opener")
+@pytest.mark.skip(reason="HAPI multipart async protocol was removed")
 def test_hapi_main_root_async_edit_inserts_documented_v1_image_path(build_opener, tmp_path):
     build_opener.return_value.open.side_effect = [
         FakeResponse(json.dumps({
@@ -418,6 +554,7 @@ def test_hapi_main_root_async_edit_inserts_documented_v1_image_path(build_opener
 
 
 @patch("openai_image_api.urllib.request.build_opener")
+@pytest.mark.skip(reason="HAPI multipart async protocol was removed")
 def test_hapi_async_edit_polls_processing_task_without_resubmitting(build_opener, tmp_path):
     processing_response = FakeResponse(json.dumps({
         "task_id": "imgtask_slow456",
@@ -466,6 +603,7 @@ def test_hapi_async_edit_polls_processing_task_without_resubmitting(build_opener
 
 
 @patch("openai_image_api.urllib.request.build_opener")
+@pytest.mark.skip(reason="HAPI multipart async protocol was removed")
 def test_hapi_async_edit_surfaces_failed_task_reason(build_opener, tmp_path):
     build_opener.return_value.open.side_effect = [
         FakeResponse(json.dumps({
@@ -498,6 +636,7 @@ def test_hapi_async_edit_surfaces_failed_task_reason(build_opener, tmp_path):
 
 
 @patch("openai_image_api.urllib.request.build_opener")
+@pytest.mark.skip(reason="HAPI multipart async protocol was removed")
 def test_hapi_async_disabled_falls_back_to_sync_once_per_client(build_opener, tmp_path):
     build_opener.return_value.open.side_effect = [
         HTTPError(
@@ -541,6 +680,7 @@ def test_hapi_async_disabled_falls_back_to_sync_once_per_client(build_opener, tm
 
 
 @patch("openai_image_api.urllib.request.build_opener")
+@pytest.mark.skip(reason="HAPI multipart async protocol was removed")
 def test_hapi_multiple_reference_images_are_uploaded_as_one_contact_sheet(
     build_opener,
     tmp_path,
@@ -570,7 +710,7 @@ def test_hapi_multiple_reference_images_are_uploaded_as_one_contact_sheet(
 
 
 @patch("openai_image_api.urllib.request.build_opener")
-def test_generic_openai_multiple_reference_images_remain_separate_files(
+def test_multiple_reference_images_remain_separate_data_urls(
     build_opener,
     tmp_path,
 ):
@@ -583,7 +723,7 @@ def test_generic_openai_multiple_reference_images_remain_separate_files(
     )
 
     request = build_opener.return_value.open.call_args.args[0]
-    assert request.data.count(b'name="image[]"; filename=') == 2
+    assert len(json.loads(request.data)["params"]["images"]) == 2
 
 
 @pytest.mark.parametrize(
@@ -593,11 +733,11 @@ def test_generic_openai_multiple_reference_images_remain_separate_files(
         ("1K", "1:1", b"1024x1024"),
         ("2K", "4:5", b"2048x2560"),
         ("4K", "16:9", b"3840x2160"),
-        ("1K", "11:15", b"960x1312"),
+        ("1K", "11:15", b"960x1280"),
     ],
 )
 @patch("openai_image_api.urllib.request.build_opener")
-def test_lk888_uses_documented_openai_edit_fields_and_pixel_sizes(
+def test_media_create_uses_documented_pixel_sizes(
     build_opener,
     resolution,
     image_size,
@@ -617,15 +757,13 @@ def test_lk888_uses_documented_openai_edit_fields_and_pixel_sizes(
     )
 
     request = build_opener.return_value.open.call_args.args[0]
-    assert request.full_url == "https://api.lk888.ai/v1/images/edits"
-    assert b'name="size"' in request.data
+    assert request.full_url == "https://api.lk888.ai/v1/media/generate"
     assert expected_size in request.data
-    assert b'name="image"; filename="source.png"' in request.data
-    assert b'name="image[]"' not in request.data
+    assert request.get_header("Content-type") == "application/json"
 
 
 @patch("openai_image_api.urllib.request.build_opener")
-def test_generic_merge_switch_uploads_one_contact_sheet(build_opener, tmp_path):
+def test_merge_switch_encodes_one_contact_sheet_data_url(build_opener, tmp_path):
     build_opener.return_value.open.return_value = fake_png_response()
 
     make_client(
@@ -638,9 +776,9 @@ def test_generic_merge_switch_uploads_one_contact_sheet(build_opener, tmp_path):
     )
 
     request = build_opener.return_value.open.call_args.args[0]
-    assert request.data.count(b'name="image"; filename=') == 1
-    assert b'merged-reference-sheet-' in request.data
-    assert b'name="image[]"' not in request.data
+    images = json.loads(request.data)["params"]["images"]
+    assert len(images) == 1
+    assert images[0].startswith("data:image/png;base64,")
 
 
 @pytest.mark.parametrize(
@@ -1450,4 +1588,5 @@ def test_test_edit_uses_a_real_png_fixture_and_returns_saved_image(build_opener,
     assert Path(result.local_path).parent == tmp_path
     assert Path(result.local_path).is_file()
     request = build_opener.return_value.open.call_args.args[0]
-    assert b'name="image[]"; filename="' in request.data
+    assert request.full_url == "https://api.lk888.ai/v1/media/generate"
+    assert len(json.loads(request.data)["params"]["images"]) == 1
