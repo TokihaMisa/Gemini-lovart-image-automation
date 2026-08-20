@@ -285,10 +285,31 @@ def test_ambiguous_support_create_is_blocked_on_resume_until_explicit_restart(
     assert checkpoint["error_code"] == "ambiguous_submission"
     assert secret not in checkpoint["error"]
 
-    normal_resume_api = CheckpointingOpenAIAPI((
-        task_snapshot("must-not-create", state="success", is_final=True),
-    ))
-    resumed = OpenAIImageProvider(normal_resume_api).generate_support_image(request)
+    changed_reference = tmp_path / "changed-reference.png"
+    Image.new("RGB", (2, 2), (0, 0, 255)).save(
+        changed_reference,
+        format="PNG",
+    )
+    changed_request = support_request(
+        tmp_path,
+        prompt="changed support prompt",
+        input_fingerprint="changed-support-input",
+        image_paths=(str(changed_reference),),
+        image_size="1:1",
+    )
+    changed_api_settings = {
+        "base_url": "https://changed.example/v1",
+        "model": "gpt-image-changed",
+        "resolution": "4K",
+        "merge_reference_images": True,
+    }
+    normal_resume_api = CheckpointingOpenAIAPI(
+        (task_snapshot("must-not-create", state="success", is_final=True),),
+        **changed_api_settings,
+    )
+    resumed = OpenAIImageProvider(normal_resume_api).generate_support_image(
+        changed_request
+    )
 
     assert resumed.succeeded is False
     assert resumed.raw_result == {"error_code": "ambiguous_submission"}
@@ -301,13 +322,12 @@ def test_ambiguous_support_create_is_blocked_on_resume_until_explicit_restart(
         is_final=True,
         result_url="https://cdn.example/replacement.png",
     )
-    explicit_api = CheckpointingOpenAIAPI((replacement,))
+    explicit_api = CheckpointingOpenAIAPI(
+        (replacement,),
+        **changed_api_settings,
+    )
     restarted = OpenAIImageProvider(explicit_api).generate_support_image(
-        support_request(
-            tmp_path,
-            input_fingerprint="support-input",
-            resume=False,
-        )
+        type(changed_request)(**{**changed_request.__dict__, "resume": False})
     )
 
     assert restarted.succeeded is True
@@ -340,10 +360,31 @@ def test_ambiguous_detail_create_is_blocked_on_resume_until_explicit_restart(
     assert checkpoint["state"] == "ambiguous_submission"
     assert checkpoint["error_code"] == "ambiguous_submission"
 
-    normal_resume_api = CheckpointingOpenAIAPI((
-        task_snapshot("must-not-create", state="success", is_final=True),
-    ))
-    resumed = OpenAIImageProvider(normal_resume_api).generate_detail_set(request)
+    changed_reference = tmp_path / "changed-detail-reference.png"
+    Image.new("RGB", (2, 2), (0, 255, 0)).save(
+        changed_reference,
+        format="PNG",
+    )
+    changed_request = single_detail_request(
+        tmp_path,
+        screens=(DetailScreen(1, "changed detail prompt"),),
+        image_paths=(str(changed_reference),),
+        image_size="2:3",
+        input_fingerprint="changed-detail-input",
+    )
+    changed_api_settings = {
+        "base_url": "https://changed.example/v1",
+        "model": "gpt-image-changed",
+        "resolution": "4K",
+        "merge_reference_images": True,
+    }
+    normal_resume_api = CheckpointingOpenAIAPI(
+        (task_snapshot("must-not-create", state="success", is_final=True),),
+        **changed_api_settings,
+    )
+    resumed = OpenAIImageProvider(normal_resume_api).generate_detail_set(
+        changed_request
+    )
 
     assert resumed.succeeded is False
     assert resumed.raw_result == {"error_code": "ambiguous_submission"}
@@ -356,9 +397,12 @@ def test_ambiguous_detail_create_is_blocked_on_resume_until_explicit_restart(
         is_final=True,
         result_url="https://cdn.example/detail-replacement.png",
     )
-    explicit_api = CheckpointingOpenAIAPI((replacement,))
+    explicit_api = CheckpointingOpenAIAPI(
+        (replacement,),
+        **changed_api_settings,
+    )
     restarted = OpenAIImageProvider(explicit_api).generate_detail_set(
-        single_detail_request(tmp_path, resume=False)
+        type(changed_request)(**{**changed_request.__dict__, "resume": False})
     )
 
     assert restarted.succeeded is True

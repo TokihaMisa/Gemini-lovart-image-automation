@@ -281,12 +281,9 @@ class OpenAIImageProvider:
 
     def generate_support_image(self, request: SupportImageRequest) -> ImageProviderResult:
         output_path = request.product_dir / "gpt_image" / "support" / f"{request.step_name}.png"
-        identity = _support_request_identity(self.api, request)
         checkpoint = read_support_task_checkpoint(request.product_dir, request.step_name)
-        identity_matches = _checkpoint_matches_identity(checkpoint, identity)
         if (
             request.resume
-            and identity_matches
             and str(checkpoint.get("state") or "") == "ambiguous_submission"
             and str(checkpoint.get("error_code") or "") == "ambiguous_submission"
         ):
@@ -295,6 +292,8 @@ class OpenAIImageProvider:
                 error=str(checkpoint.get("error") or ""),
                 raw_result={"error_code": "ambiguous_submission"},
             )
+        identity = _support_request_identity(self.api, request)
+        identity_matches = _checkpoint_matches_identity(checkpoint, identity)
         saved_task = (
             _task_snapshot_from_checkpoint(checkpoint)
             if request.resume and identity_matches
@@ -485,15 +484,8 @@ class OpenAIImageProvider:
                 continue
             output_path = request.product_dir / "gpt_image" / "detail" / f"{screen.index:02d}.png"
             checkpoint = _read_detail_checkpoint(request.product_dir, screen.index)
-            identity = {
-                "input_fingerprint": request.input_fingerprint,
-                "prompt_hash": prompt_hashes[screen.index],
-                **request_settings,
-            }
-            identity_matches = _checkpoint_matches_identity(checkpoint, identity)
             if (
                 request.resume
-                and identity_matches
                 and str(checkpoint.get("state") or "") == "ambiguous_submission"
                 and str(checkpoint.get("error_code") or "")
                 == "ambiguous_submission"
@@ -507,6 +499,12 @@ class OpenAIImageProvider:
                     else f"screen {screen.index}: ambiguous submission"
                 )
                 break
+            identity = {
+                "input_fingerprint": request.input_fingerprint,
+                "prompt_hash": prompt_hashes[screen.index],
+                **request_settings,
+            }
+            identity_matches = _checkpoint_matches_identity(checkpoint, identity)
             saved_task = (
                 _task_snapshot_from_checkpoint(checkpoint)
                 if request.resume and identity_matches
