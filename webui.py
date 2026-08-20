@@ -7,7 +7,6 @@ import atexit
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import gradio as gr
 import yaml
@@ -52,10 +51,12 @@ from lovart_api import AgentSkill, AgentSkillError
 from lovart_bot import LOVART_IMAGE_MODELS, LOVART_MODEL_LABELS, unlimited_model_catalog
 from image_generation import normalize_image_provider
 from openai_image_api import (
+    ImageTaskSnapshot,
     OpenAIImageAPI,
     OpenAIImageAPIConfig,
     OpenAIImageAPIError,
     normalize_openai_image_base_url,
+    safe_task_display_token,
 )
 
 
@@ -92,6 +93,122 @@ def _live_product_status(product: dict, *, now: float | None = None) -> str:
     minutes, seconds = divmod(elapsed, 60)
     elapsed_text = f"{minutes}分{seconds:02d}秒" if minutes else f"{seconds}秒"
     return f"{status} · 已等待 {elapsed_text}"
+
+
+def _openai_image_stage_label(stage: object) -> str:
+    normalized = str(stage or "")
+    if normalized == "support_white":
+        return "白底图"
+    if normalized == "support_scene":
+        return "场景图"
+    if normalized == "detail":
+        return "详情图"
+    if normalized.startswith("detail_screen_"):
+        index = normalized.removeprefix("detail_screen_")
+        return f"详情图 {index}" if index.isdigit() else "详情图"
+    return ""
+
+
+def _safe_ui_task_suffix(value: object) -> str:
+    token = " ".join(str(value or "").split())
+    if not token:
+        return ""
+    if token.startswith("hash:"):
+        return token[:13]
+    return token[-8:]
+
+
+def _format_openai_image_ui_status(data: dict, message: str) -> str:
+    """Render display-only async task fields while ignoring full task identifiers."""
+    sensitive_values = tuple(
+        str(data.get(field) or "").strip()
+        for field in ("task_id", "api_key")
+    )
+
+    def redact(value: object) -> str:
+        text = " ".join(str(value or "").split())
+        for sensitive in sensitive_values:
+            if sensitive:
+                text = text.replace(sensitive, "[已隐藏]")
+        return text
+
+    stage_label = _openai_image_stage_label(data.get("stage"))
+    message = redact(message)
+    progress = redact(data.get("progress"))[:80]
+    display_status = redact(
+        data.get("display_status") or data.get("status")
+    )[:160]
+    suffix = _safe_ui_task_suffix(
+        data.get("task_suffix") or data.get("task_display_token")
+    )
+    try:
+        elapsed = max(0, int(float(data.get("elapsed_seconds"))))
+    except (TypeError, ValueError):
+        elapsed = None
+
+    parts = [part for part in (stage_label, display_status, progress) if part]
+    if elapsed is not None:
+        parts.append(f"已等待 {elapsed} 秒")
+    if suffix:
+        parts.append(f"任务 …{suffix}")
+    if len(parts) > bool(stage_label):
+        return " · ".join(parts)
+    if stage_label and stage_label not in message:
+        return f"{stage_label} · {message}"
+    return message
+
+
+def _find_product_status_path(output_dir: Path, product_id: str) -> Path | None:
+    try:
+        base = output_dir.resolve()
+    except OSError:
+        return None
+    candidates = [base / product_id]
+    candidates.extend(
+        base / category / product_id
+        for category in ("1_完全做好", "2_待确认", "3_处理中", "4_异常")
+    )
+    for product_dir in candidates:
+        try:
+            resolved = product_dir.resolve()
+            if not resolved.is_relative_to(base):
+                continue
+        except (OSError, ValueError):
+            continue
+        status_path = resolved / "status.json"
+        if status_path.is_file():
+            return status_path
+    return None
+
+
+def _refresh_openai_image_product_statuses(
+    products: dict[str, dict], output_dir: str | Path
+) -> None:
+    base = Path(output_dir)
+    for product_id, product in products.items():
+        status_path = _find_product_status_path(base, str(product_id))
+        if status_path is None:
+            continue
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(status, dict) or status.get("openai_image_still_running") is not True:
+            continue
+        stage = str(status.get("openai_image_active_stage") or product.get("stage") or "")
+        suffix = _safe_ui_task_suffix(status.get("openai_image_task_suffix"))
+        status_parts = [_openai_image_stage_label(stage)]
+        if suffix:
+            status_parts.append(f"任务 …{suffix}")
+        status_parts.append("任务仍在平台运行，下次将继续查询")
+        product.update({
+            "stage": stage,
+            "status": " · ".join(part for part in status_parts if part),
+            "color": "#f59e0b",
+            "still_running": True,
+        })
+
+
 OPENAI_IMAGE_TEST_BUTTON_LABEL = "真实图像编辑测试（可能产生一次图片费用）"
 _gemini_login_launch_lock = threading.Lock()
 _gemini_login_launches: dict[str, float] = {}
@@ -824,13 +941,7 @@ def normalize_resolution(resolution) -> str:
 
 
 def default_merge_reference_images(base_url) -> bool:
-    try:
-        hostname = (
-            urlsplit(str(base_url or "").strip()).hostname or ""
-        ).rstrip(".").lower()
-    except ValueError:
-        return False
-    return hostname in {"hapiopen.cc", "image.hapiopen.cc"}
+    return False
 
 
 def resolve_merge_reference_images(value, base_url) -> bool:
@@ -866,31 +977,83 @@ def test_openai_image_edit(
     model,
     resolution,
     merge_reference_images=None,
-) -> str:
+):
     """Run the explicitly requested, potentially billable GPT Image edit probe."""
-    try:
-        config = {
-            "openai_image": {
-                "base_url": base_url,
-                "model": model,
-                "resolution": resolution,
-                "merge_reference_images": (
-                    resolve_merge_reference_images(
+    import queue
+
+    events: queue.Queue = queue.Queue()
+    finished = object()
+    outcome: dict[str, object] = {}
+    task_ids: set[str] = set()
+
+    def sanitize(value: object) -> str:
+        text = " ".join(str(value or "").split())
+        sensitive_values = [str(api_key or "").strip(), *task_ids]
+        for sensitive in sensitive_values:
+            if sensitive:
+                text = text.replace(sensitive, "[已隐藏]")
+        return text[:500]
+
+    def report_status(message: str) -> None:
+        events.put(sanitize(message))
+
+    def report_task(task: ImageTaskSnapshot) -> None:
+        task_id = str(task.task_id or "")
+        is_new = task_id not in task_ids
+        if task_id:
+            task_ids.add(task_id)
+        if is_new:
+            suffix = safe_task_display_token(task_id)
+            suffix_text = f" · 任务 …{suffix}" if suffix else ""
+            events.put(f"📨 **进度：0/1** 异步任务已提交{suffix_text}，正在等待平台处理。")
+
+    def run_test() -> None:
+        try:
+            config = {
+                "openai_image": {
+                    "base_url": base_url,
+                    "model": model,
+                    "resolution": resolution,
+                    "merge_reference_images": resolve_merge_reference_images(
                         merge_reference_images,
                         base_url,
-                    )
-                ),
+                    ),
+                }
             }
-        }
-        client = OpenAIImageAPI(
-            OpenAIImageAPIConfig.from_config(config, api_key=api_key),
-            logger=None,
+            client = OpenAIImageAPI(
+                OpenAIImageAPIConfig.from_config(config, api_key=api_key),
+                logger=None,
+            )
+            outcome["result"] = client.test_edit(
+                Path("output") / ".api-tests",
+                status_callback=report_status,
+                task_callback=report_task,
+            )
+        except Exception as exc:
+            outcome["error"] = exc
+        finally:
+            events.put(finished)
+
+    worker = threading.Thread(target=run_test, daemon=True)
+    worker.start()
+    while True:
+        event = events.get()
+        if event is finished:
+            break
+        yield str(event)
+    worker.join()
+
+    error = outcome.get("error")
+    if error is not None:
+        message = (
+            error.user_message
+            if isinstance(error, OpenAIImageAPIError)
+            else str(error)
         )
-        result = client.test_edit(Path("output") / ".api-tests")
-    except (OpenAIImageAPIError, OSError, ValueError) as exc:
-        message = exc.user_message if isinstance(exc, OpenAIImageAPIError) else str(exc)
-        return f"❌ **进度：0/1** GPT Image 图生图测试失败：{message}"
-    return (
+        yield f"❌ **进度：0/1** GPT Image 图生图测试失败：{sanitize(message)}"
+        return
+    result = outcome["result"]
+    yield (
         f"✅ **进度：1/1** GPT Image 图生图测试成功：{Path(result.local_path).name}。"
         "本次测试可能已产生一次图片费用。"
     )
@@ -906,10 +1069,20 @@ def persist_openai_image_settings(
     merge_reference_images=None,
 ):
     updated = deepcopy(config)
-    normalized_base_url = normalize_openai_image_base_url(base_url)
+    support_route = normalize_image_provider(support_provider)
+    detail_route = normalize_image_provider(detail_provider)
+    raw_base_url = str(base_url or "").strip()
+    uses_openai_image = "openai_image" in {support_route, detail_route}
+    normalized_base_url = (
+        normalize_openai_image_base_url(raw_base_url)
+        if raw_base_url or uses_openai_image
+        else ""
+    )
+    existing = updated.get("openai_image", {})
+    if not isinstance(existing, dict):
+        existing = {}
     if merge_reference_images is None:
-        existing = updated.get("openai_image", {})
-        if isinstance(existing, dict) and "merge_reference_images" in existing:
+        if "merge_reference_images" in existing:
             merge_reference_images = resolve_merge_reference_images(
                 existing["merge_reference_images"],
                 normalized_base_url,
@@ -917,7 +1090,7 @@ def persist_openai_image_settings(
         else:
             merge_reference_images = default_merge_reference_images(normalized_base_url)
     updated["openai_image"] = {
-        **updated.get("openai_image", {}),
+        **existing,
         "base_url": normalized_base_url,
         "model": str(model or "gpt-image-2").strip() or "gpt-image-2",
         "resolution": normalize_resolution(resolution),
@@ -927,6 +1100,7 @@ def persist_openai_image_settings(
         ),
     }
     updated["openai_image"].pop("api_key", None)
+    updated["openai_image"].pop("async_edits", None)
     updated["image_generation"] = {
         **updated.get("image_generation", {}),
         "support_provider": normalize_image_provider(support_provider),
@@ -940,6 +1114,7 @@ def persist_image_routing_settings(config, support_provider, detail_provider):
     openai_image = updated.get("openai_image")
     if isinstance(openai_image, dict):
         openai_image.pop("api_key", None)
+        openai_image.pop("async_edits", None)
     updated["image_generation"] = {
         **updated.get("image_generation", {}),
         "support_provider": normalize_image_provider(support_provider),
@@ -1401,12 +1576,14 @@ def run_process(
     products_dict = {}
     
     import html
+    status_output_dir = custom_output_dir.strip() if custom_output_dir and custom_output_dir.strip() else "output"
     def render_board():
+        _refresh_openai_image_product_statuses(products_dict, status_output_dir)
         cards_html = ""
         if products_dict:
             cards_html += "<div style='display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 15px; margin-top: 20px;'>"
             for pid, pdata in products_dict.items():
-                live_status = _live_product_status(pdata)
+                live_status = html.escape(_live_product_status(pdata))
                 img_tag = ""
                 if pdata.get("image"):
                     try:
@@ -1434,7 +1611,7 @@ def run_process(
                     # Clean dark background for logs
                     logs_html = f"<div style='margin-top: 10px; background: #0f172a; color: #94a3b8; padding: 12px; border-radius: 6px; border: 1px solid #334155; font-family: \"Cascadia Code\", monospace; font-size: 0.75em; max-height: 150px; overflow-y: auto;'>{logs_content}</div>"
 
-                is_active = pid == current_pid
+                is_active = pid == current_pid and not pdata.get("still_running")
                 animation_css = "animation: pulse-glow 2s infinite;" if is_active else ""
                 active_border = "border-color: #8b5cf6;" if is_active else ""
                 
@@ -1565,12 +1742,14 @@ def run_process(
                 if "INFO" not in clean_line: # ignore basic INFO lines to save space
                     products_dict[current_pid].setdefault("logs", []).append(f"▶ {clean_msg}")
         
+        render_immediately = False
         if is_uistatus:
             try:
                 data = json.loads(clean_line.replace("[UI_STATUS]", "", 1).strip())
                 pid = str(data.get("id") or "")
                 stage = str(data.get("stage") or "product")
                 message = str(data.get("message") or "🔄 正在处理")
+                message = _format_openai_image_ui_status(data, message)
                 if pid in products_dict:
                     current_pid = pid
                     current_product = f"{pid} - {products_dict[pid]['name']}"
@@ -1591,6 +1770,7 @@ def run_process(
                     product_logs = products_dict[pid].setdefault("logs", [])
                     if not product_logs or product_logs[-1] != stage_log:
                         product_logs.append(stage_log)
+                    render_immediately = True
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
         elif is_uidetail:
@@ -1627,6 +1807,7 @@ def run_process(
                 if pid not in products_dict:
                     products_dict[pid] = {"name": data["name"], "status": "⏳ 等待处理", "color": "#94a3b8", "logs": []}
                 products_dict[pid]["image"] = data.get("image", "")
+                render_immediately = True
             except:
                 pass
         elif is_uisuccess:
@@ -1729,7 +1910,7 @@ def run_process(
                     products_dict[pid].setdefault("logs", []).append("⏭️ 命中缓存，任务已跳过")
             
         # Throttling rendering to avoid freezing UI
-        if time.time() - last_yield_time > 0.5:
+        if render_immediately or time.time() - last_yield_time > 0.5:
             yield render_board()
             last_yield_time = time.time()
                 
@@ -2457,9 +2638,10 @@ def build_ui():
                     nvidia_test_btn = gr.Button("测试 NVIDIA 模型")
                     nvidia_status = gr.Markdown("")
 
-                    gr.Markdown("### OpenAI-compatible GPT Image")
+                    gr.Markdown("### GPT Image 异步媒体任务 API")
                     gr.Markdown(
-                        "保存设置不会调用图像 API。只有点击下方的明确付费测试按钮才会发起真实图像编辑请求。"
+                        "兼容网关必须实现创建任务、查询任务状态和返回结果 URL 的异步媒体任务语义。"
+                        "保存设置不会调用图像 API；只有点击下方的明确付费测试按钮才会发起真实请求。"
                     )
                     openai_image_key = gr.Textbox(
                         label="GPT Image API 密钥",
@@ -2475,7 +2657,7 @@ def build_ui():
                     openai_image_base_url = gr.Textbox(
                         label="GPT Image API 地址",
                         value=openai_image_config.get("base_url", ""),
-                        placeholder="例如：https://api.openai.com/v1",
+                        placeholder="例如：https://api.lk888.ai 或 https://api.lk888.ai/v1",
                         info="可以带或不带 /v1，请按服务商提供的完整 Base URL 填写",
                     )
                     with gr.Row():
@@ -2492,8 +2674,7 @@ def build_ui():
                         label="将多张参考图合并为一张上传",
                         value=merge_reference_images_value,
                         info=(
-                            "兼容只接受单个 image 文件的代理。开启后会先在本地生成参考拼图；"
-                            "HAPI 地址默认开启，其他 OpenAI 兼容地址默认关闭。"
+                            "最多可直接上传 14 张参考图；仅在网关限制或体积超限时手动开启合并"
                         ),
                     )
                     openai_image_test_status = gr.Markdown(

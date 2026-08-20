@@ -584,7 +584,12 @@ class OpenAIImageAPI:
             operational_result_url=operational_result_url,
         )
 
-    def test_edit(self, output_dir: str | Path) -> GeneratedImage:
+    def test_edit(
+        self,
+        output_dir: str | Path,
+        status_callback: Callable[[str], None] | None = None,
+        task_callback: Callable[[ImageTaskSnapshot], None] | None = None,
+    ) -> GeneratedImage:
         directory = Path(output_dir)
         directory.mkdir(parents=True, exist_ok=True)
         source_path: Path | None = None
@@ -599,6 +604,8 @@ class OpenAIImageAPI:
                 "Generate a small product-image API compatibility test.",
                 [source_path],
                 directory / "openai-image-test.png",
+                status_callback=status_callback,
+                task_callback=task_callback,
             )
         finally:
             if source_path is not None:

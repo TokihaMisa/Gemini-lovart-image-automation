@@ -11,6 +11,7 @@ import yaml
 import webui
 
 from model_provider import DiscoveredModel, ModelProviderError, ModelTestResult
+from openai_image_api import _media_endpoint
 from prompt_settings import DEFAULT_PROMPT_SETTINGS
 from webui import (
     build_ui,
@@ -66,9 +67,10 @@ class WebUIModelSettingsTests(unittest.TestCase):
     def test_paid_image_test_runs_only_when_handler_is_explicitly_called(self, api_cls):
         api_cls.return_value.test_edit.return_value.local_path = "test-output.png"
 
-        message = webui.test_openai_image_edit(
+        messages = list(webui.test_openai_image_edit(
             "test-key", "https://hapiopen.cc", "gpt-image-2", "1K"
-        )
+        ))
+        message = messages[-1]
 
         self.assertIn("测试成功", message)
         self.assertIn("进度：1/1", message)
@@ -78,9 +80,10 @@ class WebUIModelSettingsTests(unittest.TestCase):
     def test_paid_image_test_failure_reports_terminal_progress(self, api_cls):
         api_cls.return_value.test_edit.side_effect = ValueError("invalid request")
 
-        message = webui.test_openai_image_edit(
+        messages = list(webui.test_openai_image_edit(
             "test-key", "https://hapiopen.cc/v1", "gpt-image-2", "1K"
-        )
+        ))
+        message = messages[-1]
 
         self.assertIn("测试失败", message)
         self.assertIn("进度：0/1", message)
@@ -127,7 +130,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertEqual(by_label["GPT Image API 地址"]["props"]["value"], "")
         self.assertEqual(
             by_label["GPT Image API 地址"]["props"]["placeholder"],
-            "例如：https://api.openai.com/v1",
+            "例如：https://api.lk888.ai 或 https://api.lk888.ai/v1",
         )
         self.assertIn(
             "可以带或不带 /v1",
@@ -160,6 +163,12 @@ class WebUIModelSettingsTests(unittest.TestCase):
             if item["type"] == "markdown"
         ]
         self.assertTrue(any("GPT Image 密钥状态：" in value for value in markdown_values))
+        self.assertTrue(any("GPT Image 异步媒体任务 API" in value for value in markdown_values))
+        self.assertTrue(any("创建任务、查询任务状态和返回结果 URL" in value for value in markdown_values))
+        self.assertIn(
+            "最多可直接上传 14 张参考图；仅在网关限制或体积超限时手动开启合并",
+            by_label["将多张参考图合并为一张上传"]["props"]["info"],
+        )
 
         paid_test = dependencies["test_openai_image_edit"]
         self.assertGreaterEqual(
@@ -211,7 +220,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
         "webui.load_config",
         return_value={"openai_image": {"base_url": "https://image.hapiopen.cc"}},
     )
-    def test_hapi_legacy_config_defaults_reference_merge_switch_on(self, _load_config):
+    def test_hapi_legacy_config_defaults_reference_merge_switch_off(self, _load_config):
         demo = build_ui()
         by_label = {
             item.get("props", {}).get("label"): item
@@ -219,7 +228,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
             if item.get("props", {}).get("label")
         }
 
-        self.assertTrue(
+        self.assertFalse(
             by_label["将多张参考图合并为一张上传"]["props"]["value"]
         )
 
@@ -379,7 +388,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
             "base_url": "https://hapiopen.cc",
             "model": "custom-image",
             "resolution": "2K",
-            "merge_reference_images": True,
+            "merge_reference_images": False,
         })
         self.assertEqual(updated["image_generation"], {
             "support_provider": "openai_image",
@@ -398,6 +407,94 @@ class WebUIModelSettingsTests(unittest.TestCase):
         )
 
         self.assertTrue(updated["openai_image"]["merge_reference_images"])
+
+    def test_missing_or_invalid_merge_setting_defaults_off_for_every_gateway(self):
+        for base_url in (
+            "https://api.lk888.ai",
+            "https://image.hapiopen.cc",
+            "https://future-gateway.example/v1",
+        ):
+            for stored_value in (None, "invalid"):
+                with self.subTest(base_url=base_url, stored_value=stored_value):
+                    self.assertFalse(
+                        webui.resolve_merge_reference_images(stored_value, base_url)
+                    )
+
+    def test_openai_settings_scrub_legacy_protocol_and_secret_fields(self):
+        original = {
+            "openai_image": {
+                "api_key": "legacy-secret",
+                "async_edits": True,
+                "future_protocol_option": "keep-me",
+            }
+        }
+
+        updated = webui.persist_openai_image_settings(
+            original,
+            "https://api.lk888.ai/v1",
+            "gpt-image-2",
+            "1K",
+            "openai_image",
+            "openai_image",
+        )
+
+        self.assertNotIn("api_key", updated["openai_image"])
+        self.assertNotIn("async_edits", updated["openai_image"])
+        self.assertEqual(
+            updated["openai_image"]["future_protocol_option"], "keep-me"
+        )
+
+    def test_blank_gpt_base_url_saves_only_when_gpt_route_is_unused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path, env_path = Path(tmp) / "config.yaml", Path(tmp) / ".env"
+            config_path.write_text(
+                "openai_image:\n  async_edits: true\n  api_key: legacy-secret\n",
+                encoding="utf-8",
+            )
+
+            unused_status = save_api_settings(
+                "", "", "", "", "",
+                "https://gemini.test/v1beta", "gemini-test",
+                "https://nvidia.test/v1", "nvidia-test",
+                "", "gpt-image-2", "1K", "lovart", "lovart",
+                config_path=config_path,
+                env_path=env_path,
+            )
+            saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            selected_status = save_api_settings(
+                "", "", "", "", "",
+                "https://gemini.test/v1beta", "gemini-test",
+                "https://nvidia.test/v1", "nvidia-test",
+                "", "gpt-image-2", "1K", "openai_image", "lovart",
+                config_path=config_path,
+                env_path=env_path,
+            )
+
+        self.assertEqual(unused_status, webui.API_SETTINGS_SAVE_SUCCESS)
+        self.assertEqual(saved["openai_image"]["base_url"], "")
+        self.assertNotIn("async_edits", saved["openai_image"])
+        self.assertNotIn("api_key", saved["openai_image"])
+        self.assertIn("保存失败", selected_status)
+
+    def test_valid_and_future_gateway_base_urls_are_preserved(self):
+        lk888_endpoints = []
+        for base_url in (
+            "https://api.lk888.ai",
+            "https://api.lk888.ai/v1",
+            "https://future-gateway.example/custom-root",
+        ):
+            with self.subTest(base_url=base_url):
+                updated = webui.persist_openai_image_settings(
+                    {}, base_url, "gpt-image-2", "1K",
+                    "openai_image", "openai_image",
+                )
+                self.assertEqual(updated["openai_image"]["base_url"], base_url)
+                if base_url.startswith("https://api.lk888.ai"):
+                    lk888_endpoints.append(_media_endpoint(base_url, "generate"))
+        self.assertEqual(lk888_endpoints, [
+            "https://api.lk888.ai/v1/media/generate",
+            "https://api.lk888.ai/v1/media/generate",
+        ])
 
     def test_persist_openai_image_settings_preserves_unrelated_image_routing_fields(self):
         original = {
