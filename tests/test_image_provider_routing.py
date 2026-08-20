@@ -52,13 +52,19 @@ class _ScriptedTaskAPI(CheckpointingOpenAIAPI):
         self.output_existed_at_call.append(output_path.exists())
         resume_task = kwargs.get("resume_task")
         if resume_task is None:
+            if kwargs.get("submission_callback"):
+                kwargs["submission_callback"]()
             self.create_posts += 1
         outcome, task_id = self.actions[stage].pop(0)
         if kwargs.get("status_callback"):
             kwargs["status_callback"](f"{stage}: provider progress 50%")
-        if outcome == "ambiguous":
+        if outcome in {
+            "ambiguous", "submission_unknown", "rate_limit", "server_error",
+            "invalid_response", "invalid_request", "malformed_json", "missing_id",
+            "generic_4xx",
+        }:
             raise OpenAIImageAPIError(
-                "ambiguous_submission",
+                "submission_unknown" if outcome != "ambiguous" else "ambiguous_submission",
                 "localized display text must not drive retries",
             )
         snapshot = _task(
@@ -1943,11 +1949,29 @@ def test_ambiguous_support_submission_records_stable_permanent_stop_code(tmp_pat
     assert run.counters == (0, 1, 0, 0)
     summary = json.loads((run.run_dir / "summary.json").read_text(encoding="utf-8"))
     assert summary[0]["status"] == "failed"
-    assert summary[0]["failure_code"] == "ambiguous_submission"
+    assert summary[0]["failure_code"] == "submission_unknown"
     status = read_status(run.product_dir)
     assert status["openai_image_still_running"] is False
     assert status["openai_image_active_stage"] == ""
     assert status["openai_image_task_suffix"] == ""
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    ["rate_limit", "server_error", "malformed_json", "missing_id", "generic_4xx"],
+)
+def test_unknown_paid_create_outcomes_block_pipeline_restart_without_second_post(tmp_path, outcome):
+    first_api = _ScriptedTaskAPI({"white_bg": [(outcome, "unused")]})
+    first = _run_scripted_openai_pipeline(tmp_path, first_api, detail_count=2)
+    assert first.counters == (0, 1, 0, 0)
+    summary = json.loads((first.run_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary[0]["failure_code"] == "submission_unknown"
+
+    second_api = _ScriptedTaskAPI({"white_bg": [("success", "must-not-submit")]})
+    second = _run_scripted_openai_pipeline(tmp_path, second_api, detail_count=2)
+    assert second.counters == (0, 1, 0, 0)
+    assert second_api.create_posts == 0
+    assert second_api.calls == []
 
 
 def test_detail_live_task_resumes_screen_four_then_uses_snapshot_target(tmp_path):

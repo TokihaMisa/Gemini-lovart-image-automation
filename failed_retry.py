@@ -103,6 +103,7 @@ _CATEGORY_MARKERS = (
 _PERMANENT_FAILURE_CODES = frozenset(
     {
         "ambiguous_submission",
+        "submission_unknown",
         "task_still_running",
         "authentication",
         "missing_key",

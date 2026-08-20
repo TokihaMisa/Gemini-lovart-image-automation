@@ -22,7 +22,7 @@ import threading
 import time
 from typing import Any, Callable, Final, Sequence, cast
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import unquote, urlencode, urlsplit, urlunsplit
 import urllib.request
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -427,11 +427,19 @@ def _validate_task_state(task: ImageTaskSnapshot) -> ImageTaskSnapshot:
 
 
 def _redact_snapshot_value(value: object, *sensitive_values: str) -> object:
-    sensitive = tuple(item for item in sensitive_values if item)
+    sensitive = tuple(str(item) for item in sensitive_values if item)
     if isinstance(value, str):
+        probe = value
+        for _ in range(3):
+            decoded = unquote(probe)
+            if decoded == probe:
+                break
+            if any(item.casefold() in decoded.casefold() for item in sensitive):
+                return "[redacted]"
+            probe = decoded
         redacted = value
         for item in sensitive:
-            redacted = redacted.replace(item, "[redacted]")
+            redacted = re.sub(re.escape(item), "[redacted]", redacted, flags=re.IGNORECASE)
         return redacted
     if isinstance(value, Mapping):
         return {
@@ -450,26 +458,31 @@ def _redact_snapshot_value(value: object, *sensitive_values: str) -> object:
     return value
 
 
+def sanitize_external_value(value: object, *sensitive_values: str) -> object:
+    """Recursively redact bounded encoded/case variants of external identifiers."""
+    return _redact_snapshot_value(value, *sensitive_values)
+
+
 def _sanitize_task_snapshot(
     task: ImageTaskSnapshot,
     api_key: str,
 ) -> ImageTaskSnapshot:
-    if api_key and api_key in task.task_id:
+    if api_key and sanitize_external_value(task.task_id, api_key) != task.task_id:
         raise OpenAIImageAPIError(
             "invalid_response", "GPT Image API returned an unsafe task ID."
         )
     return ImageTaskSnapshot(
         task_id=task.task_id,
-        state=str(_redact_snapshot_value(task.state, api_key)),
+        state=str(sanitize_external_value(task.state, api_key)),
         is_final=task.is_final,
         task_created_at=task.task_created_at,
-        progress=str(_redact_snapshot_value(task.progress, api_key, task.task_id)),
-        status=str(_redact_snapshot_value(task.status, api_key, task.task_id)),
-        status_group=str(_redact_snapshot_value(task.status_group, api_key, task.task_id)),
-        result_url=str(_redact_snapshot_value(task.result_url, api_key)),
-        result_type=str(_redact_snapshot_value(task.result_type, api_key, task.task_id)),
-        error=str(_redact_snapshot_value(task.error, api_key, task.task_id)),
-        cost=_redact_snapshot_value(task.cost, api_key, task.task_id),
+        progress=str(sanitize_external_value(task.progress, api_key, task.task_id)),
+        status=str(sanitize_external_value(task.status, api_key, task.task_id)),
+        status_group=str(sanitize_external_value(task.status_group, api_key, task.task_id)),
+        result_url=str(sanitize_external_value(task.result_url, api_key)),
+        result_type=str(sanitize_external_value(task.result_type, api_key, task.task_id)),
+        error=str(sanitize_external_value(task.error, api_key, task.task_id)),
+        cost=sanitize_external_value(task.cost, api_key, task.task_id),
     )
 
 
@@ -577,6 +590,7 @@ class OpenAIImageAPI:
         self.config = config
         self.logger = logger
         self._sleep = sleep or time.sleep
+        self._status_worker_lock = threading.Lock()
 
     def generate_edit(
         self,
@@ -588,6 +602,7 @@ class OpenAIImageAPI:
         task_callback: Callable[[ImageTaskSnapshot], None] | None = None,
         resume_task: ImageTaskSnapshot | None = None,
         display_callback: Callable[[ImageTaskDisplayStatus], None] | None = None,
+        submission_callback: Callable[[], None] | None = None,
     ) -> GeneratedImage:
         images = _encode_reference_images(
             image_paths,
@@ -600,6 +615,8 @@ class OpenAIImageAPI:
             images,
         )
         if resume_task is None:
+            if submission_callback is not None:
+                submission_callback()
             task = self._submit_task_once(body)
         else:
             task = _validate_resume_task(resume_task, self.config.api_key)
@@ -703,8 +720,20 @@ class OpenAIImageAPI:
         request = urllib.request.Request(url, method="GET")
         request.add_header("Accept", "application/json")
         request.add_header("Authorization", f"Bearer {self.config.api_key}")
-        opener = urllib.request.build_opener(_RejectRedirectHandler())
+        active_connection: list[http.client.HTTPSConnection | None] = [None]
+
+        def remember_connection(connection: http.client.HTTPSConnection) -> None:
+            active_connection[0] = connection
+
+        opener = urllib.request.build_opener(
+            _RejectRedirectHandler(),
+            _TrackedHTTPSHandler(remember_connection),
+        )
         result_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+        active_response: list[Any | None] = [None]
+
+        def remember_response(response: Any) -> None:
+            active_response[0] = response
 
         def request_status() -> None:
             response_headers: dict[str, str] = {}
@@ -716,6 +745,7 @@ class OpenAIImageAPI:
                     status_callback=status_callback,
                     response_headers=response_headers,
                     deadline=deadline,
+                    response_callback=remember_response,
                 )
                 result = (
                     _decode_json_response(raw_response),
@@ -726,25 +756,37 @@ class OpenAIImageAPI:
             else:
                 result_queue.put(("result", result))
 
-        # A status GET is idempotent. Running it in a daemon worker gives the
-        # caller a hard invocation deadline even if urllib is stuck parsing a
-        # peer that dribbles response headers without ever timing out a read.
-        threading.Thread(
-            target=request_status,
-            name="gpt-image-status-get",
-            daemon=True,
-        ).start()
-        remaining = _deadline_remaining(deadline)
-        try:
-            result_type, value = result_queue.get(timeout=remaining)
-        except queue.Empty:
-            raise _InvocationDeadlineExceeded from None
-        _deadline_remaining(deadline)
-        if result_type == "error":
-            if isinstance(value, BaseException):
-                raise value
-            raise RuntimeError("image status worker returned an invalid error")
-        return cast(tuple[dict[str, Any], float | None], value)
+        with self._status_worker_lock:
+            worker = threading.Thread(
+                target=request_status,
+                name="gpt-image-status-get",
+                daemon=False,
+            )
+            worker.start()
+            remaining = _deadline_remaining(deadline)
+            try:
+                result_type, value = result_queue.get(timeout=remaining)
+            except queue.Empty:
+                response = active_response[0]
+                close_response = getattr(response, "close", None)
+                if callable(close_response):
+                    close_response()
+                connection = active_connection[0]
+                close_connection = getattr(connection, "close", None)
+                if callable(close_connection):
+                    close_connection()
+                close_opener = getattr(opener, "close", None)
+                if callable(close_opener):
+                    close_opener()
+                worker.join()
+                raise _InvocationDeadlineExceeded from None
+            worker.join()
+            _deadline_remaining(deadline)
+            if result_type == "error":
+                if isinstance(value, BaseException):
+                    raise value
+                raise RuntimeError("image status worker returned an invalid error")
+            return cast(tuple[dict[str, Any], float | None], value)
 
     def _submit_task_once(self, body: bytes) -> ImageTaskSnapshot:
         try:
@@ -754,14 +796,12 @@ class OpenAIImageAPI:
                 "application/json",
                 max_attempts=1,
             )
-        except OpenAIImageAPIError as exc:
-            if exc.status_code is None and exc.code in {"timeout", "network"}:
-                raise OpenAIImageAPIError(
-                    "ambiguous_submission",
-                    "GPT Image task submission may have reached the provider, but no task ID was returned; automatic resubmission is disabled.",
-                ) from None
-            raise
-        task_id = _normalize_task_id(_task_payload(payload).get("task_id"))
+            task_id = _normalize_task_id(_task_payload(payload).get("task_id"))
+        except OpenAIImageAPIError:
+            raise OpenAIImageAPIError(
+                "submission_unknown",
+                "GPT Image task submission started, but no validated task ID was persisted; automatic resubmission is disabled.",
+            ) from None
         return _sanitize_task_snapshot(
             ImageTaskSnapshot(
                 task_id=task_id,
@@ -920,6 +960,7 @@ class OpenAIImageAPI:
         status_callback: Callable[[str], None] | None = None,
         response_headers: dict[str, str] | None = None,
         deadline: float | None = None,
+        response_callback: Callable[[Any], None] | None = None,
     ) -> bytes:
         attempts = max(
             1,
@@ -933,6 +974,8 @@ class OpenAIImageAPI:
                 if remaining is not None:
                     request_timeout = min(request_timeout, remaining)
                 with request_opener(request, timeout=request_timeout) as response:
+                    if response_callback is not None:
+                        response_callback(response)
                     response_body = _read_response_body(response, deadline)
                     if expected_content_type is not None:
                         _validate_response_contract(
@@ -1335,6 +1378,10 @@ def atomic_save_validated_image(image_bytes: bytes, target: Path) -> None:
     try:
         with Image.open(io.BytesIO(image_bytes)) as image:
             image.verify()
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            image.load()
+            if not image.format or image.width <= 0 or image.height <= 0:
+                raise ValueError
     except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
         raise OpenAIImageAPIError("invalid_image", "GPT Image API returned an invalid image.") from None
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1517,6 +1564,27 @@ class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, *args: Any, **kwargs: Any) -> urllib.request.Request:
         _raise_unsafe_result_url()
+
+
+class _TrackedHTTPSHandler(urllib.request.HTTPSHandler):
+    """Expose the live HTTPSConnection so a hard deadline can close its socket."""
+
+    def __init__(self, connection_callback: Callable[[http.client.HTTPSConnection], None]):
+        super().__init__()
+        self._connection_callback = connection_callback
+
+    def _connection_factory(self, host: str, **kwargs: Any) -> http.client.HTTPSConnection:
+        connection = http.client.HTTPSConnection(host, **kwargs)
+        self._connection_callback(connection)
+        return connection
+
+    def https_open(self, request: urllib.request.Request) -> Any:
+        return self.do_open(
+            self._connection_factory,
+            request,
+            context=self._context,
+            check_hostname=self._check_hostname,
+        )
 
 
 def _raise_invalid_base_url() -> None:

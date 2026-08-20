@@ -58,6 +58,9 @@ class CheckpointingOpenAIAPI:
         self.output_existed_at_call.append(Path(kwargs["output_path"]).exists())
         resume_task = kwargs.get("resume_task")
         if resume_task is None:
+            submission_callback = kwargs.get("submission_callback")
+            if submission_callback is not None:
+                submission_callback()
             self.create_posts += 1
         emitted = list(self.snapshots)
         if not emitted:

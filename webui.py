@@ -57,6 +57,7 @@ from openai_image_api import (
     OpenAIImageAPIError,
     normalize_openai_image_base_url,
     safe_task_display_token,
+    sanitize_external_value,
 )
 
 
@@ -127,10 +128,9 @@ def _format_openai_image_ui_status(data: dict, message: str) -> str:
 
     def redact(value: object) -> str:
         text = " ".join(str(value or "").split())
-        for sensitive in sensitive_values:
-            if sensitive:
-                text = text.replace(sensitive, "[已隐藏]")
-        return text
+        return str(sanitize_external_value(text, *sensitive_values)).replace(
+            "[redacted]", "[已隐藏]"
+        )
 
     stage_label = _openai_image_stage_label(data.get("stage"))
     message = redact(message)
@@ -996,10 +996,9 @@ def test_openai_image_edit(
     def sanitize(value: object) -> str:
         text = " ".join(str(value or "").split())
         sensitive_values = [submitted_api_key, resolved_api_key, *task_ids]
-        for sensitive in sensitive_values:
-            if sensitive:
-                text = text.replace(sensitive, "[已隐藏]")
-        return text[:500]
+        return str(sanitize_external_value(text, *sensitive_values)).replace(
+            "[redacted]", "[已隐藏]"
+        )[:500]
 
     def report_status(message: str) -> None:
         events.put(sanitize(message))

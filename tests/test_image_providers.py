@@ -81,6 +81,145 @@ def single_detail_request(tmp_path: Path, **overrides):
     return DetailSetRequest(**values)
 
 
+class CrashAfterSubmissionMarkerAPI:
+    def __init__(self, *, base_url="https://api.lk888.ai"):
+        from types import SimpleNamespace
+        self.config = SimpleNamespace(
+            base_url=base_url, model="gpt-image-2", resolution="1K",
+            merge_reference_images=False, api_key="test-key",
+        )
+        self.create_posts = 0
+
+    def generate_edit(self, **kwargs):
+        kwargs["submission_callback"]()
+        self.create_posts += 1
+        raise KeyboardInterrupt("process crashed after paid POST started")
+
+
+@pytest.mark.parametrize("kind", ["support", "detail"])
+def test_submission_started_marker_blocks_restart_after_crash(tmp_path: Path, kind):
+    from image_providers import OpenAIImageProvider
+    from utils import read_status
+
+    crashed = CrashAfterSubmissionMarkerAPI()
+    provider = OpenAIImageProvider(crashed)
+    with pytest.raises(KeyboardInterrupt):
+        if kind == "support":
+            provider.generate_support_image(support_request(tmp_path))
+        else:
+            provider.generate_detail_set(single_detail_request(tmp_path))
+
+    status = read_status(tmp_path)
+    checkpoint = (
+        status["support_task_checkpoints"]["white_bg"]
+        if kind == "support" else status["detail_checkpoints"]["1"]
+    )
+    assert checkpoint["state"] == "submission_unknown"
+    assert checkpoint["error_code"] == "submission_unknown"
+
+    resumed = CheckpointingOpenAIAPI((completed_image_task(),))
+    provider = OpenAIImageProvider(resumed)
+    result = (
+        provider.generate_support_image(support_request(tmp_path))
+        if kind == "support" else provider.generate_detail_set(single_detail_request(tmp_path))
+    )
+    assert result.succeeded is False
+    assert result.raw_result == {"error_code": "submission_unknown"}
+    assert resumed.create_posts == 0
+
+
+@pytest.mark.parametrize("kind", ["support", "detail"])
+def test_optional_v1_gateway_spelling_resumes_live_task_without_post(tmp_path: Path, kind):
+    from image_providers import OpenAIImageProvider
+
+    running = task_snapshot("live-task-12345678")
+    first = CheckpointingOpenAIAPI((running,), base_url="https://gateway.example", outcome="still_running")
+    first_provider = OpenAIImageProvider(first)
+    if kind == "support":
+        first_provider.generate_support_image(support_request(tmp_path))
+    else:
+        first_provider.generate_detail_set(single_detail_request(tmp_path))
+
+    success = task_snapshot(
+        "live-task-12345678", state="success", is_final=True,
+        result_url="https://cdn.example/result.png",
+    )
+    second = CheckpointingOpenAIAPI((success,), base_url="https://gateway.example/v1")
+    second_provider = OpenAIImageProvider(second)
+    result = (
+        second_provider.generate_support_image(support_request(tmp_path))
+        if kind == "support" else second_provider.generate_detail_set(single_detail_request(tmp_path))
+    )
+    assert result.succeeded is True
+    assert second.create_posts == 0
+    assert second.calls[0]["resume_task"].task_id == "live-task-12345678"
+
+
+@pytest.mark.parametrize("kind", ["support", "detail"])
+def test_task_id_persistence_failure_keeps_unknown_marker_and_blocks_restart(
+    tmp_path: Path, monkeypatch, kind
+):
+    import image_providers as module
+    from image_providers import OpenAIImageProvider
+
+    running = task_snapshot("accepted-task-12345678")
+    api = CheckpointingOpenAIAPI((running,), outcome="still_running")
+    if kind == "support":
+        original = module.record_support_task_checkpoint
+
+        def fail_on_task(product_dir, step_name, checkpoint):
+            if checkpoint.get("task_id"):
+                raise OSError("simulated durable task-id write failure")
+            return original(product_dir, step_name, checkpoint)
+
+        monkeypatch.setattr(module, "record_support_task_checkpoint", fail_on_task)
+        result = OpenAIImageProvider(api).generate_support_image(support_request(tmp_path))
+    else:
+        original = module.record_detail_checkpoint
+
+        def fail_on_task(product_dir, index, state, *args, **kwargs):
+            if kwargs.get("task_id"):
+                raise OSError("simulated durable task-id write failure")
+            return original(product_dir, index, state, *args, **kwargs)
+
+        monkeypatch.setattr(module, "record_detail_checkpoint", fail_on_task)
+        result = OpenAIImageProvider(api).generate_detail_set(single_detail_request(tmp_path))
+    assert result.succeeded is False
+    monkeypatch.undo()
+
+    replacement = CheckpointingOpenAIAPI((completed_image_task(),))
+    provider = OpenAIImageProvider(replacement)
+    blocked = (
+        provider.generate_support_image(support_request(tmp_path))
+        if kind == "support" else provider.generate_detail_set(single_detail_request(tmp_path))
+    )
+    assert blocked.raw_result == {"error_code": "submission_unknown"}
+    assert replacement.create_posts == 0
+
+
+def test_provider_checkpoint_recursively_redacts_encoded_secret_and_task_variants(tmp_path: Path):
+    from image_providers import OpenAIImageProvider, read_support_task_checkpoint
+
+    task_id = "Private-Task-12345678"
+    snapshot = ImageTaskSnapshot(
+        task_id=task_id, state="running", is_final=False,
+        task_created_at=1787200000.0,
+        status="key=TEST-KEY",
+        progress="task=Private%2DTask%2D12345678",
+        cost={"nested": ["TeSt%2DKey", "PRIVATE-TASK-12345678"]},
+    )
+    api = CheckpointingOpenAIAPI((snapshot,), outcome="still_running")
+    api.config.api_key = "TeSt-Key"
+    OpenAIImageProvider(api).generate_support_image(support_request(tmp_path))
+    checkpoint = read_support_task_checkpoint(tmp_path, "white_bg")
+    rendered = repr(checkpoint)
+    assert checkpoint["task_id"] == task_id
+    assert "TEST-KEY" not in rendered
+    assert "TeSt%2DKey" not in rendered
+    assert "Private%2DTask%2D12345678" not in rendered
+    assert "PRIVATE-TASK-12345678" not in rendered
+
+
 def test_support_task_callback_persists_full_identity_before_poll_crash(tmp_path: Path):
     import json
 

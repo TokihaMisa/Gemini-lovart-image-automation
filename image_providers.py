@@ -22,10 +22,11 @@ from openai_image_api import (
     ImageTaskSnapshot,
     ImageTaskStillRunning,
     OpenAIImageAPIError,
+    _protocol_base_url,
     _provider_image_size,
     append_aspect_instruction,
-    normalize_openai_image_base_url,
     safe_task_display_token,
+    sanitize_external_value,
 )
 from utils import read_status, update_status
 
@@ -272,7 +273,7 @@ class OpenAIImageProvider:
         """Return only non-secret values that alter an Images edit request."""
         config = getattr(self.api, "config", None)
         return {
-            "base_url": normalize_openai_image_base_url(
+            "base_url": _protocol_base_url(
                 getattr(config, "base_url", None)
             ),
             "model": str(getattr(config, "model", "gpt-image-2") or "gpt-image-2").strip(),
@@ -287,13 +288,13 @@ class OpenAIImageProvider:
         checkpoint = read_support_task_checkpoint(request.product_dir, request.step_name)
         if (
             request.resume
-            and str(checkpoint.get("state") or "") == "ambiguous_submission"
-            and str(checkpoint.get("error_code") or "") == "ambiguous_submission"
+            and _is_submission_unknown_checkpoint(checkpoint)
         ):
+            blocked_code = str(checkpoint.get("error_code") or "submission_unknown")
             return ImageProviderResult(
                 succeeded=False,
                 error=str(checkpoint.get("error") or ""),
-                raw_result={"error_code": "ambiguous_submission"},
+                raw_result={"error_code": blocked_code},
             )
         identity = _support_request_identity(self.api, request)
         identity_matches = _checkpoint_matches_identity(checkpoint, identity)
@@ -353,6 +354,20 @@ class OpenAIImageProvider:
                 },
             )
 
+        def persist_submission_started() -> None:
+            record_support_task_checkpoint(
+                request.product_dir,
+                request.step_name,
+                {
+                    **identity,
+                    "state": "submission_unknown",
+                    "local_path": "",
+                    "error": "GPT Image paid submission started without a persisted task ID.",
+                    "error_code": "submission_unknown",
+                    "attempts": attempts,
+                },
+            )
+
         try:
             generated = self.api.generate_edit(
                 prompt=request.prompt,
@@ -363,6 +378,7 @@ class OpenAIImageProvider:
                 task_callback=persist,
                 resume_task=saved_task,
                 display_callback=request.task_status_callback,
+                submission_callback=persist_submission_started,
             )
         except ImageTaskStillRunning as exc:
             persist(exc.task)
@@ -380,17 +396,25 @@ class OpenAIImageProvider:
                 else last_task
             )
             safe_error = _sanitized_provider_error(self.api, exc)
+            if isinstance(task, ImageTaskSnapshot):
+                safe_error = str(sanitize_external_value(safe_error, task.task_id))
             error_code = _stable_provider_error_code(exc)
-            if error_code == "ambiguous_submission":
+            current_checkpoint = read_support_task_checkpoint(
+                request.product_dir, request.step_name
+            )
+            if _is_submission_unknown_checkpoint(current_checkpoint):
+                error_code = "submission_unknown"
+            if error_code in {"ambiguous_submission", "submission_unknown"}:
+                stored_code = error_code
                 record_support_task_checkpoint(
                     request.product_dir,
                     request.step_name,
                     {
                         **identity,
-                        "state": "ambiguous_submission",
+                        "state": stored_code,
                         "local_path": "",
                         "error": safe_error,
-                        "error_code": error_code,
+                        "error_code": stored_code,
                         "attempts": attempts,
                     },
                 )
@@ -411,7 +435,7 @@ class OpenAIImageProvider:
                 )
                 failed_checkpoint["state"] = "failed"
                 failed_checkpoint["error"] = (
-                    _sanitized_task_text(self.api, task.error) or safe_error
+                    _sanitized_task_text(self.api, task.error, task.task_id) or safe_error
                 )
                 record_support_task_checkpoint(
                     request.product_dir,
@@ -490,17 +514,17 @@ class OpenAIImageProvider:
             checkpoint = _read_detail_checkpoint(request.product_dir, screen.index)
             if (
                 request.resume
-                and str(checkpoint.get("state") or "") == "ambiguous_submission"
-                and str(checkpoint.get("error_code") or "")
-                == "ambiguous_submission"
+                and _is_submission_unknown_checkpoint(checkpoint)
             ):
                 failed.append(screen.index)
-                last_error_code = "ambiguous_submission"
+                last_error_code = str(
+                    checkpoint.get("error_code") or "submission_unknown"
+                )
                 saved_error = str(checkpoint.get("error") or "")
                 errors.append(
                     f"screen {screen.index}: {saved_error}"
                     if saved_error
-                    else f"screen {screen.index}: ambiguous submission"
+                    else f"screen {screen.index}: submission result unknown"
                 )
                 break
             identity = {
@@ -555,6 +579,19 @@ class OpenAIImageProvider:
                     **fields,
                 )
 
+            def persist_submission_started() -> None:
+                record_detail_checkpoint(
+                    request.product_dir,
+                    screen.index,
+                    "submission_unknown",
+                    error="GPT Image paid submission started without a persisted task ID.",
+                    error_code="submission_unknown",
+                    attempts=attempts,
+                    input_fingerprint=request.input_fingerprint,
+                    prompt_hash=prompt_hashes[screen.index],
+                    request_settings=request_settings,
+                )
+
             try:
                 generated = self.api.generate_edit(
                     prompt=screen.prompt,
@@ -564,6 +601,7 @@ class OpenAIImageProvider:
                     status_callback=request.status_callback,
                     task_callback=persist,
                     resume_task=saved_task,
+                    submission_callback=persist_submission_started,
                     display_callback=(
                         (
                             lambda display_status, detail_index=screen.index:
@@ -591,13 +629,21 @@ class OpenAIImageProvider:
                     if isinstance(exception_task, ImageTaskSnapshot)
                     else last_task
                 )
-                if last_error_code == "ambiguous_submission":
+                if isinstance(task, ImageTaskSnapshot):
+                    safe_error = str(sanitize_external_value(safe_error, task.task_id))
+                current_checkpoint = _read_detail_checkpoint(
+                    request.product_dir, screen.index
+                )
+                if _is_submission_unknown_checkpoint(current_checkpoint):
+                    last_error_code = "submission_unknown"
+                if last_error_code in {"ambiguous_submission", "submission_unknown"}:
+                    stored_code = last_error_code
                     record_detail_checkpoint(
                         request.product_dir,
                         screen.index,
-                        "ambiguous_submission",
+                        stored_code,
                         error=safe_error,
-                        error_code=last_error_code,
+                        error_code=stored_code,
                         attempts=attempts,
                         input_fingerprint=request.input_fingerprint,
                         prompt_hash=prompt_hashes[screen.index],
@@ -616,7 +662,7 @@ class OpenAIImageProvider:
                         request.product_dir,
                         screen.index,
                         "failed",
-                        error=_sanitized_task_text(self.api, task.error) or safe_error,
+                        error=_sanitized_task_text(self.api, task.error, task.task_id) or safe_error,
                         attempts=attempts,
                         input_fingerprint=request.input_fingerprint,
                         prompt_hash=prompt_hashes[screen.index],
@@ -646,7 +692,7 @@ class OpenAIImageProvider:
                 attempts=attempts,
                 input_fingerprint=request.input_fingerprint,
                 prompt_hash=prompt_hashes[screen.index],
-                error=_sanitized_task_text(self.api, task.error),
+                error=_sanitized_task_text(self.api, task.error, task.task_id),
                 request_settings=request_settings,
                 **task_fields,
             )
@@ -930,27 +976,20 @@ def _checkpoint_fields_for_persistence(
 ) -> dict[str, object]:
     fields = _task_checkpoint_fields(task)
     api_key = _resolved_api_key(api)
-    if not api_key:
-        return fields
     return {
-        key: value
-        if key == "task_id"
-        else _redact_checkpoint_value(value, api_key)
+        key: (
+            value
+            if key == "task_id"
+            else _redact_checkpoint_value(value, api_key)
+            if key == "result_url"
+            else _redact_checkpoint_value(value, api_key, task.task_id)
+        )
         for key, value in fields.items()
     }
 
 
-def _redact_checkpoint_value(value: object, api_key: str) -> object:
-    if isinstance(value, str):
-        return value.replace(api_key, "[redacted]")
-    if isinstance(value, Mapping):
-        return {
-            str(key): _redact_checkpoint_value(item, api_key)
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [_redact_checkpoint_value(item, api_key) for item in value]
-    return _json_safe_setting(value)
+def _redact_checkpoint_value(value: object, *sensitive_values: str) -> object:
+    return _json_safe_setting(sanitize_external_value(value, *sensitive_values))
 
 
 def _generated_task(generated: object) -> ImageTaskSnapshot:
@@ -965,7 +1004,7 @@ def _openai_request_settings(api: object, image_size: str) -> dict[str, object]:
     raw_base_url = getattr(config, "base_url", "") if config is not None else ""
     base_url = ""
     if isinstance(raw_base_url, str) and raw_base_url.strip():
-        base_url = normalize_openai_image_base_url(raw_base_url)
+        base_url = _protocol_base_url(raw_base_url)
     raw_model = getattr(config, "model", "gpt-image-2") if config is not None else "gpt-image-2"
     model = raw_model.strip() if isinstance(raw_model, str) and raw_model.strip() else "gpt-image-2"
     raw_resolution = getattr(config, "resolution", "1K") if config is not None else "1K"
@@ -1021,9 +1060,7 @@ def _remove_file(path: str | Path) -> None:
 def _sanitized_provider_error(api: object, exc: BaseException) -> str:
     message = str(exc)
     api_key = _resolved_api_key(api)
-    if api_key:
-        message = message.replace(api_key, "[redacted]")
-    return message
+    return str(sanitize_external_value(message, api_key))
 
 
 def _stable_provider_error_code(exc: BaseException) -> str:
@@ -1032,12 +1069,18 @@ def _stable_provider_error_code(exc: BaseException) -> str:
     return str(exc.code or "")
 
 
-def _sanitized_task_text(api: object, value: object) -> str:
+def _sanitized_task_text(api: object, value: object, *sensitive_values: str) -> str:
     message = str(value or "")
     api_key = _resolved_api_key(api)
-    if api_key:
-        message = message.replace(api_key, "[redacted]")
-    return message
+    return str(sanitize_external_value(message, api_key, *sensitive_values))
+
+
+def _is_submission_unknown_checkpoint(checkpoint: Mapping[str, object]) -> bool:
+    state = str(checkpoint.get("state") or "")
+    code = str(checkpoint.get("error_code") or "")
+    return state in {"ambiguous_submission", "submission_unknown"} and code in {
+        "ambiguous_submission", "submission_unknown"
+    }
 
 
 def _resolved_api_key(api: object) -> str:

@@ -27,6 +27,8 @@ from openai_image_api import (
     _build_create_body,
     _encode_reference_images,
     _media_endpoint,
+    _protocol_base_url,
+    atomic_save_validated_image,
     append_aspect_instruction,
     normalize_openai_image_base_url,
     validate_remote_image_url,
@@ -645,8 +647,10 @@ def test_create_prefers_root_task_id_when_data_is_unrelated_mapping(build_opener
 @pytest.mark.parametrize(
     ("side_effect", "expected_code"),
     [
-        (socket.timeout("submitted but response lost"), "ambiguous_submission"),
-        (HTTPError("https://api.lk888.ai/v1/media/generate", 400, "bad", {}, None), "invalid_request"),
+        (socket.timeout("submitted but response lost"), "submission_unknown"),
+        (HTTPError("https://api.lk888.ai/v1/media/generate", 400, "bad", {}, None), "submission_unknown"),
+        (HTTPError("https://api.lk888.ai/v1/media/generate", 429, "busy", {}, None), "submission_unknown"),
+        (HTTPError("https://api.lk888.ai/v1/media/generate", 503, "down", {}, None), "submission_unknown"),
     ],
 )
 @patch("openai_image_api.urllib.request.build_opener")
@@ -673,8 +677,31 @@ def test_invalid_create_response_does_not_poll_or_resubmit(build_opener, payload
             "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
         )
 
-    assert ctx.value.code == "invalid_response"
+    assert ctx.value.code == "submission_unknown"
     assert build_opener.return_value.open.call_count == 1
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_submission_marker_is_persisted_before_paid_post_opens(build_opener, tmp_path):
+    order = []
+
+    def open_request(*_args, **_kwargs):
+        order.append("post")
+        return FakeResponse(b'{"task_id":"t-1"}')
+
+    build_opener.return_value.open.side_effect = open_request
+    with pytest.raises(OpenAIImageAPIError):
+        make_client().generate_edit(
+            "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png",
+            submission_callback=lambda: order.append("marker"),
+        )
+    assert order[:2] == ["marker", "post"]
+
+
+def test_protocol_identity_treats_optional_v1_as_same_gateway():
+    assert _protocol_base_url("https://gateway.example") == "https://gateway.example"
+    assert _protocol_base_url("https://gateway.example/v1") == "https://gateway.example"
+    assert _protocol_base_url("https://other.example") != _protocol_base_url("https://gateway.example")
 
 
 @patch("openai_image_api.urllib.request.build_opener")
@@ -919,6 +946,33 @@ def test_provider_fields_and_nested_cost_are_redacted_before_callbacks(build_ope
 
 
 @patch("openai_image_api.urllib.request.build_opener")
+def test_percent_encoded_and_case_transformed_secrets_are_recursively_redacted(build_opener, tmp_path):
+    secret = "TeSt-Key"
+    task_id = "Private-Task-12345678"
+    callbacks = []
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(json.dumps({"task_id": task_id}).encode()),
+        FakeResponse(json.dumps({
+            "task_id": task_id, "state": "running", "is_final": False,
+            "status": "key=TEST-KEY",
+            "progress": "task=Private%2DTask%2D12345678",
+            "cost": {"nested": ["TeSt%2DKey", {"task": "PRIVATE-TASK-12345678"}]},
+        }).encode()),
+        FakeResponse(json.dumps({"task_id": task_id, "state": "success", "is_final": True,
+            "result_url": "https://cdn.example/result.png", "result_type": "image"}).encode()),
+    ]
+    make_client(api_key=secret).generate_edit(
+        "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png",
+        task_callback=callbacks.append,
+    )
+    rendered = json.dumps([asdict(task) for task in callbacks])
+    assert "TEST-KEY" not in rendered
+    assert "TeSt%2DKey" not in rendered
+    assert "Private%2DTask%2D12345678" not in rendered
+    assert "PRIVATE-TASK-12345678" not in rendered
+
+
+@patch("openai_image_api.urllib.request.build_opener")
 def test_final_credentialed_result_url_downloads_raw_but_exposes_only_redacted_snapshot(
     build_opener, monkeypatch, tmp_path
 ):
@@ -1119,12 +1173,21 @@ def test_poll_deadline_returns_while_get_is_still_dribbling(build_opener, tmp_pa
     release = threading.Event()
     worker_finished = threading.Event()
 
+    class CancellableResponse(FakeResponse):
+        def read1(self, _amount=None):
+            release.wait(1.0)
+            if release.is_set():
+                raise socket.timeout("cancelled")
+            return super().read1(_amount)
+
+        def close(self):
+            release.set()
+
     def open_request(request, *, timeout):
         if request.method == "POST":
             return FakeResponse(b'{"task_id":"t-1"}')
         try:
-            release.wait(1.0)
-            return FakeResponse(
+            return CancellableResponse(
                 b'{"task_id":"t-1","state":"running","is_final":false}'
             )
         finally:
@@ -1145,6 +1208,38 @@ def test_poll_deadline_returns_while_get_is_still_dribbling(build_opener, tmp_pa
     assert elapsed < 0.5
     requests = [call.args[0] for call in build_opener.return_value.open.call_args_list]
     assert [request.method for request in requests] == ["POST", "GET"]
+    assert not any(thread.name == "gpt-image-status-get" for thread in threading.enumerate())
+
+
+@pytest.mark.parametrize("fmt", ["JPEG", "WEBP"])
+def test_atomic_save_rejects_header_valid_truncated_image_and_preserves_target(tmp_path, fmt):
+    source = io.BytesIO()
+    Image.new("RGB", (64, 64), "red").save(source, format=fmt, quality=90)
+    raw = source.getvalue()
+    truncated = None
+    for trim in range(1, min(256, len(raw) - 1)):
+        candidate = raw[:-trim]
+        try:
+            with Image.open(io.BytesIO(candidate)) as image:
+                image.verify()
+            with Image.open(io.BytesIO(candidate)) as image:
+                image.load()
+        except OSError:
+            try:
+                with Image.open(io.BytesIO(candidate)) as image:
+                    image.verify()
+            except OSError:
+                continue
+            truncated = candidate
+            break
+    if truncated is None:
+        truncated = raw[: max(20, len(raw) // 2)]
+    target = tmp_path / "existing.img"
+    target.write_bytes(b"old-target")
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        atomic_save_validated_image(truncated, target)
+    assert ctx.value.code == "invalid_image"
+    assert target.read_bytes() == b"old-target"
 
 
 @patch("openai_image_api.time.monotonic")
@@ -1403,7 +1498,7 @@ def test_generate_edit_rejects_invalid_api_response_contract(
             "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
         )
 
-    assert ctx.value.code == "invalid_response"
+    assert ctx.value.code == "submission_unknown"
     assert "test-key" not in str(ctx.value)
 
 
@@ -1430,7 +1525,7 @@ def test_generate_edit_uses_redirect_rejecting_transport_for_authenticated_post(
 def test_generate_edit_does_not_retry_paid_post_for_429_or_401(build_opener, tmp_path):
     """Fails if an HTTP error can automatically resubmit a paid synchronous edit."""
     source = make_png(tmp_path / "source.png")
-    for status, expected_code in ((429, "rate_limit"), (401, "authentication")):
+    for status, expected_code in ((429, "submission_unknown"), (401, "submission_unknown")):
         build_opener.return_value.open.reset_mock()
         build_opener.return_value.open.side_effect = HTTPError(
             "https://gateway.test/v1/images/edits",
