@@ -78,4 +78,4 @@ Base: `73d4b27`
 - `compileall`, `git diff --check`, and dry-run with `config.example.yaml`: exit 0.
 - Release artifacts remain stale and were not rebuilt or modified.
 
-Round 2 commit: to be recorded after commit creation.
+Round 2 implementation commit: `0296b95` (`fix: make async status deadlines portable`).
