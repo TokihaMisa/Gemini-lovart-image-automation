@@ -1,4 +1,4 @@
-VERSION = "1.3.21"
+VERSION = "1.3.22"
 
 # URL pointing to a JSON file containing the latest version info.
 # Example JSON content:

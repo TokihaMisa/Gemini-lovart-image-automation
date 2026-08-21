@@ -1,7 +1,7 @@
 {
-  "version": "1.3.21",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.21/update.zip",
-  "changelog": "GPT Image 已迁移到异步媒体任务协议：支持最多 14 张参考图、任务 ID 持久化与断点续查、实时进度显示；创建结果未知时以 submission_unknown 阻止重复付费提交，并采用兼容 Python 3.14 的严格状态截止时间与任务 ID 脱敏。",
-  "sha256": "54618a619bbaf4ce6773fa5fc9bae7907a724f235ca5006b0f50fe958659ffe6",
-  "size": 131992694
+  "version": "1.3.22",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.22/update.zip",
+  "changelog": "修复 GPT Image 异步任务在 Meta/Clash TUN Fake-IP 网络下无法下载结果的问题；已有任务 ID 遇到查询超时会安全续查且不重复付费提交；详情图下载状态现在只显示在对应屏号行，并继续采用单行实时刷新。",
+  "sha256": "5c337c23dc9c637a143ebdf3acfb7d1990079459d9e99afa28357d6b20f4274a",
+  "size": 131990607
 }
