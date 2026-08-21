@@ -201,6 +201,58 @@ def test_product_card_immediately_renders_real_async_stage_and_progress(
     assert full_task_id not in "\n".join(frames)
 
 
+def test_product_card_replaces_live_poll_row_for_the_same_async_task(tmp_path):
+    def status(progress, elapsed):
+        return (
+            "[UI_STATUS] "
+            + json.dumps(
+                {
+                    "id": "SKU-1",
+                    "stage": "support_scene",
+                    "message": "⏳ GPT Image 异步任务正在处理",
+                    "progress": progress,
+                    "status": "running",
+                    "elapsed_seconds": elapsed,
+                    "task_suffix": "12345678",
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+    frames = _run_dashboard_frames(
+        [
+            '[UI_PRODUCT] {"id":"SKU-1","name":"测试商品","image":""}\n',
+            status("10%", 5),
+            status("45%", 10),
+            status("90%", 15),
+        ],
+        tmp_path,
+    )
+    final_card = frames[-1]
+
+    assert "平台进度 90%" in final_card
+    assert "平台进度 10%" not in final_card
+    assert "平台进度 45%" not in final_card
+    assert final_card.count("data-live-task-status=") == 1
+
+
+def test_async_task_status_labels_provider_progress_without_sync_wording():
+    rendered = webui._format_openai_image_ui_status(
+        {
+            "stage": "detail_screen_2",
+            "display_status": "running",
+            "progress": "45%",
+            "elapsed_seconds": 17,
+            "task_suffix": "12345678",
+        },
+        "GPT Image 异步任务正在处理",
+    )
+
+    assert "平台进度 45%" in rendered
+    assert "同步请求" not in rendered
+
+
 def test_product_card_reads_still_running_snapshot_as_resumable_not_failed(tmp_path):
     product_dir = tmp_path / "SKU-1"
     product_dir.mkdir()

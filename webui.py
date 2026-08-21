@@ -1,5 +1,6 @@
 import os
 import json
+import html
 import subprocess
 import threading
 import time
@@ -135,6 +136,8 @@ def _format_openai_image_ui_status(data: dict, message: str) -> str:
     stage_label = _openai_image_stage_label(data.get("stage"))
     message = redact(message)
     progress = redact(data.get("progress"))[:80]
+    if progress and not progress.startswith("平台进度"):
+        progress = f"平台进度 {progress}"
     display_status = redact(
         data.get("display_status") or data.get("status")
     )[:160]
@@ -156,6 +159,40 @@ def _format_openai_image_ui_status(data: dict, message: str) -> str:
     if stage_label and stage_label not in message:
         return f"{stage_label} · {message}"
     return message
+
+
+def _is_live_image_stage(stage: str) -> bool:
+    return stage in {"support_white", "support_scene", "detail"} or stage.startswith(
+        "detail_screen_"
+    )
+
+
+def _record_product_status_log(product: dict, stage: str, message: str) -> None:
+    """Keep one refreshable log row for each active image-generation stage."""
+    product_logs = product.setdefault("logs", [])
+    escaped_message = html.escape(message)
+    if not _is_live_image_stage(stage):
+        stage_log = f"▶ {escaped_message}"
+        if not product_logs or product_logs[-1] != stage_log:
+            product_logs.append(stage_log)
+        return
+
+    stage_log = (
+        f"<span data-live-task-status='{html.escape(stage)}'>"
+        f"▶ {escaped_message}</span>"
+    )
+    live_index = product.get("_live_task_log_index")
+    if (
+        product.get("_live_task_log_stage") == stage
+        and isinstance(live_index, int)
+        and 0 <= live_index < len(product_logs)
+        and "data-live-task-status=" in product_logs[live_index]
+    ):
+        product_logs[live_index] = stage_log
+        return
+    product_logs.append(stage_log)
+    product["_live_task_log_stage"] = stage
+    product["_live_task_log_index"] = len(product_logs) - 1
 
 
 def _find_product_status_path(output_dir: Path, product_id: str) -> Path | None:
@@ -1577,7 +1614,6 @@ def run_process(
     
     products_dict = {}
     
-    import html
     status_output_dir = custom_output_dir.strip() if custom_output_dir and custom_output_dir.strip() else "output"
     def render_board():
         _refresh_openai_image_product_statuses(products_dict, status_output_dir)
@@ -1768,10 +1804,7 @@ def run_process(
                     products_dict[pid]["stage"] = stage
                     products_dict[pid]["status"] = message
                     products_dict[pid]["color"] = status_color
-                    stage_log = f"▶ {html.escape(message)}"
-                    product_logs = products_dict[pid].setdefault("logs", [])
-                    if not product_logs or product_logs[-1] != stage_log:
-                        product_logs.append(stage_log)
+                    _record_product_status_log(products_dict[pid], stage, message)
                     render_immediately = True
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
