@@ -348,6 +348,59 @@ def test_real_provider_main_event_path_emits_exact_detail_screen_display_fields(
     assert "task_id" not in detail_event
 
 
+def test_openai_detail_live_status_is_emitted_only_on_its_screen_row(
+    tmp_path, capsys
+):
+    class _DownloadStatusAPI(_ScriptedTaskAPI):
+        def generate_edit(self, **kwargs):
+            result = super().generate_edit(**kwargs)
+            if Path(kwargs["output_path"]).stem == "01" and kwargs.get(
+                "display_callback"
+            ):
+                kwargs["display_callback"](SimpleNamespace(
+                    phase="downloading",
+                    state="success",
+                    progress="100%",
+                    status="completed",
+                    elapsed_seconds=18,
+                    task_suffix="12345678",
+                    message="✅ GPT Image 生成完成，正在安全下载图片",
+                ))
+            return result
+
+    api = _DownloadStatusAPI({
+        "white_bg": [("success", "white-task-done-12345678")],
+        "scene": [("success", "scene-task-done-12345678")],
+        "01": [("success", "detail-task-done-12345678")],
+    })
+
+    with patch.dict(os.environ, {"UI_MODE": "1"}):
+        _run_scripted_openai_pipeline(tmp_path, api, detail_count=1)
+
+    payloads = [
+        json.loads(line.split("]", 1)[1].strip())
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("[UI_STATUS]")
+    ]
+    download_message = "✅ GPT Image 生成完成，正在安全下载图片"
+
+    assert not any(
+        payload["stage"] == "detail" and payload.get("live_task") is True
+        for payload in payloads
+    )
+    matching_download_payloads = [
+        payload
+        for payload in payloads
+        if download_message in payload.get("message", "")
+    ]
+    assert matching_download_payloads
+    assert all(
+        payload["stage"] == "detail_screen_1"
+        and payload.get("live_task") is True
+        for payload in matching_download_payloads
+    )
+
+
 @pytest.mark.parametrize(
     ("support", "detail"),
     [

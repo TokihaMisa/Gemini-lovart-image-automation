@@ -1656,14 +1656,14 @@ def _process_products_once(
                     resume=resume,
                     confirmation_advisor=gemini,
                     progress_callback=_emit_ui_detail_progress,
-                    status_callback=lambda message: _emit_ui_status(
-                        product.id,
-                        "detail",
-                        message,
-                        live_task=(
-                            effective_routing.detail_provider
-                            == PROVIDER_OPENAI_IMAGE
-                        ),
+                    status_callback=(
+                        None
+                        if effective_routing.detail_provider == PROVIDER_OPENAI_IMAGE
+                        else lambda message: _emit_ui_status(
+                            product.id,
+                            "detail",
+                            message,
+                        )
                     ),
                     task_status_callback=lambda detail_index, task_status: _emit_ui_task_status(
                         product.id,
