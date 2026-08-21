@@ -214,6 +214,7 @@ def test_product_card_replaces_live_poll_row_for_the_same_async_task(tmp_path):
                     "status": "running",
                     "elapsed_seconds": elapsed,
                     "task_suffix": "12345678",
+                    "live_task": True,
                 },
                 ensure_ascii=False,
             )
@@ -235,6 +236,128 @@ def test_product_card_replaces_live_poll_row_for_the_same_async_task(tmp_path):
     assert "平台进度 10%" not in final_card
     assert "平台进度 45%" not in final_card
     assert final_card.count("data-live-task-status=") == 1
+
+
+def test_product_card_keeps_one_refreshable_row_per_live_stage(tmp_path):
+    def status(stage, progress):
+        return (
+            "[UI_STATUS] "
+            + json.dumps(
+                {
+                    "id": "SKU-1",
+                    "stage": stage,
+                    "message": "GPT Image 异步任务正在处理",
+                    "progress": progress,
+                    "status": "running",
+                    "live_task": True,
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+    frames = _run_dashboard_frames(
+        [
+            '[UI_PRODUCT] {"id":"SKU-1","name":"测试商品","image":""}\n',
+            status("support_white", "10%"),
+            status("support_scene", "20%"),
+            status("support_white", "90%"),
+        ],
+        tmp_path,
+    )
+    final_card = frames[-1]
+
+    assert "平台进度 10%" not in final_card
+    assert "平台进度 90%" in final_card
+    assert "平台进度 20%" in final_card
+    assert final_card.count("data-live-task-status='support_white'") == 1
+    assert final_card.count("data-live-task-status='support_scene'") == 1
+
+
+def test_terminal_event_ends_live_row_refresh_for_a_later_retry(tmp_path):
+    frames = _run_dashboard_frames(
+        [
+            '[UI_PRODUCT] {"id":"SKU-1","name":"测试商品","image":""}\n',
+            '[UI_STATUS] {"id":"SKU-1","stage":"support_scene","message":"处理中","progress":"10%","live_task":true}\n',
+            '[UI_FAIL] {"id":"SKU-1","reason":"第一次失败"}\n',
+            '[UI_STATUS] {"id":"SKU-1","stage":"support_scene","message":"重新处理","progress":"20%","live_task":true}\n',
+        ],
+        tmp_path,
+    )
+    final_card = frames[-1]
+
+    assert "平台进度 10%" in final_card
+    assert "第一次失败" in final_card
+    assert "平台进度 20%" in final_card
+    assert final_card.count("data-live-task-status='support_scene'") == 2
+
+
+def test_malformed_detail_screen_stage_is_not_treated_as_live(tmp_path):
+    frames = _run_dashboard_frames(
+        [
+            '[UI_PRODUCT] {"id":"SKU-1","name":"测试商品","image":""}\n',
+            '[UI_STATUS] {"id":"SKU-1","stage":"detail_screen_bad","message":"第一条","live_task":true}\n',
+            '[UI_STATUS] {"id":"SKU-1","stage":"detail_screen_bad","message":"第二条","live_task":true}\n',
+        ],
+        tmp_path,
+    )
+    final_card = frames[-1]
+
+    assert "第一条" in final_card
+    assert "第二条" in final_card
+    assert "data-live-task-status='detail_screen_bad'" not in final_card
+
+
+def test_provider_neutral_stage_messages_keep_existing_append_behavior(tmp_path):
+    frames = _run_dashboard_frames(
+        [
+            '[UI_PRODUCT] {"id":"SKU-1","name":"测试商品","image":""}\n',
+            '[UI_STATUS] {"id":"SKU-1","stage":"support_scene","message":"Lovart 已提交"}\n',
+            '[UI_STATUS] {"id":"SKU-1","stage":"support_scene","message":"Lovart 正在下载"}\n',
+        ],
+        tmp_path,
+    )
+    final_card = frames[-1]
+
+    assert "Lovart 已提交" in final_card
+    assert "Lovart 正在下载" in final_card
+    assert "data-live-task-status=" not in final_card
+
+
+def test_detail_polling_refreshes_generic_and_screen_rows_independently(tmp_path):
+    def status(stage, progress):
+        return (
+            "[UI_STATUS] "
+            + json.dumps(
+                {
+                    "id": "SKU-1",
+                    "stage": stage,
+                    "message": "GPT Image 异步任务正在处理",
+                    "progress": progress,
+                    "live_task": True,
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+    frames = _run_dashboard_frames(
+        [
+            '[UI_PRODUCT] {"id":"SKU-1","name":"测试商品","image":""}\n',
+            status("detail", "10%"),
+            status("detail_screen_1", "10%"),
+            status("detail", "45%"),
+            status("detail_screen_1", "45%"),
+        ],
+        tmp_path,
+    )
+    final_card = frames[-1]
+
+    assert "平台进度 10%" not in final_card
+    assert "平台进度 45%" in final_card
+    assert final_card.count("data-live-task-status=") == 2
+    assert final_card.count("data-live-task-status='detail'") == 1
+    assert final_card.count("data-live-task-status='detail_screen_1'") == 1
 
 
 def test_async_task_status_labels_provider_progress_without_sync_wording():

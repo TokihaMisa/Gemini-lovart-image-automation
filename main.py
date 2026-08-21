@@ -205,6 +205,7 @@ def _emit_ui_status(
     display_status: str = "",
     elapsed_seconds: int | None = None,
     task_suffix: str = "",
+    live_task: bool = False,
 ) -> None:
     if not _is_ui_mode():
         return
@@ -221,6 +222,8 @@ def _emit_ui_status(
         payload["elapsed_seconds"] = max(0, int(elapsed_seconds))
     if task_suffix:
         payload["task_suffix"] = str(task_suffix)
+    if live_task:
+        payload["live_task"] = True
     print(f"[UI_STATUS] {json.dumps(payload)}", flush=True)
 
 
@@ -237,6 +240,7 @@ def _emit_ui_task_status(
         display_status=task_status.status,
         elapsed_seconds=task_status.elapsed_seconds,
         task_suffix=task_status.task_suffix,
+        live_task=True,
     )
 
 
@@ -941,6 +945,7 @@ def _generate_support_images(
                     product.id,
                     stage,
                     message,
+                    live_task=provider_name == PROVIDER_OPENAI_IMAGE,
                 ),
                 task_status_callback=lambda task_status: _emit_ui_task_status(
                     product.id,
@@ -1655,6 +1660,10 @@ def _process_products_once(
                         product.id,
                         "detail",
                         message,
+                        live_task=(
+                            effective_routing.detail_provider
+                            == PROVIDER_OPENAI_IMAGE
+                        ),
                     ),
                     task_status_callback=lambda detail_index, task_status: _emit_ui_task_status(
                         product.id,

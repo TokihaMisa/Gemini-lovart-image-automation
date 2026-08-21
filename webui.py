@@ -162,16 +162,25 @@ def _format_openai_image_ui_status(data: dict, message: str) -> str:
 
 
 def _is_live_image_stage(stage: str) -> bool:
-    return stage in {"support_white", "support_scene", "detail"} or stage.startswith(
-        "detail_screen_"
-    )
+    if stage in {"support_white", "support_scene", "detail"}:
+        return True
+    if not stage.startswith("detail_screen_"):
+        return False
+    suffix = stage.removeprefix("detail_screen_")
+    return suffix.isdigit() and int(suffix) >= 1
 
 
-def _record_product_status_log(product: dict, stage: str, message: str) -> None:
+def _record_product_status_log(
+    product: dict,
+    stage: str,
+    message: str,
+    *,
+    live_task: bool = False,
+) -> None:
     """Keep one refreshable log row for each active image-generation stage."""
     product_logs = product.setdefault("logs", [])
     escaped_message = html.escape(message)
-    if not _is_live_image_stage(stage):
+    if not live_task or not _is_live_image_stage(stage):
         stage_log = f"▶ {escaped_message}"
         if not product_logs or product_logs[-1] != stage_log:
             product_logs.append(stage_log)
@@ -181,18 +190,22 @@ def _record_product_status_log(product: dict, stage: str, message: str) -> None:
         f"<span data-live-task-status='{html.escape(stage)}'>"
         f"▶ {escaped_message}</span>"
     )
-    live_index = product.get("_live_task_log_index")
+    live_indexes = product.setdefault("_live_task_log_indexes", {})
+    live_index = live_indexes.get(stage)
     if (
-        product.get("_live_task_log_stage") == stage
-        and isinstance(live_index, int)
+        isinstance(live_index, int)
         and 0 <= live_index < len(product_logs)
-        and "data-live-task-status=" in product_logs[live_index]
+        and f"data-live-task-status='{html.escape(stage)}'" in product_logs[live_index]
     ):
         product_logs[live_index] = stage_log
         return
     product_logs.append(stage_log)
-    product["_live_task_log_stage"] = stage
-    product["_live_task_log_index"] = len(product_logs) - 1
+    live_indexes[stage] = len(product_logs) - 1
+
+
+def _end_product_live_status(product: dict) -> None:
+    """End the current attempt so a later retry preserves its prior history."""
+    product.pop("_live_task_log_indexes", None)
 
 
 def _find_product_status_path(output_dir: Path, product_id: str) -> Path | None:
@@ -1804,7 +1817,12 @@ def run_process(
                     products_dict[pid]["stage"] = stage
                     products_dict[pid]["status"] = message
                     products_dict[pid]["color"] = status_color
-                    _record_product_status_log(products_dict[pid], stage, message)
+                    _record_product_status_log(
+                        products_dict[pid],
+                        stage,
+                        message,
+                        live_task=data.get("live_task") is True,
+                    )
                     render_immediately = True
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
@@ -1850,6 +1868,7 @@ def run_process(
                 data = json.loads(clean_line.replace("[UI_SUCCESS]", "").strip())
                 pid = data["id"]
                 if pid in products_dict:
+                    _end_product_live_status(products_dict[pid])
                     products_dict[pid]["url"] = data.get("url", "")
                     products_dict[pid]["stage"] = "complete"
                     products_dict[pid]["status"] = "🎉 成功生成"
@@ -1869,6 +1888,7 @@ def run_process(
                 reason = data.get("reason", "未知错误")
                 is_manual = data.get("is_manual", False)
                 if pid in products_dict:
+                    _end_product_live_status(products_dict[pid])
                     status_color = "#f59e0b" if is_manual else "#ef4444"
                     products_dict[pid]["stage"] = "manual" if is_manual else "failed"
                     products_dict[pid]["status"] = f"{'⚠️' if is_manual else '❌'} {reason}"
