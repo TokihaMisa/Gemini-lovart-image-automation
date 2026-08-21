@@ -88,6 +88,7 @@ _UNSAFE_IPV6_TRANSITION_NETWORKS: Final = (
     ipaddress.IPv6Network("2001::/32"),  # Teredo
     ipaddress.IPv6Network("2002::/16"),  # 6to4
 )
+_TUN_FAKE_IP_NETWORK: Final = ipaddress.IPv4Network("198.18.0.0/15")
 _TEST_IMAGE_BASE64: Final = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8Dw"
     "HwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
@@ -900,6 +901,10 @@ class OpenAIImageAPI:
                 )
             except _InvocationDeadlineExceeded:
                 raise ImageTaskStillRunning(task) from None
+            except OpenAIImageAPIError as exc:
+                if exc.retryable:
+                    raise ImageTaskStillRunning(task) from None
+                raise
             if time.monotonic() >= deadline:
                 raise ImageTaskStillRunning(task)
             task, operational_result_url = self._parse_status_task(payload, task)
@@ -1181,9 +1186,14 @@ def validate_remote_image_url(url: str) -> _ResolvedResultURL:
             address = ipaddress.ip_address(ip_literal)
         except (TypeError, ValueError, IndexError):
             _raise_unsafe_result_url()
-        if (
-            family not in {socket.AF_INET, socket.AF_INET6}
-            or not _is_safe_public_result_address(address)
+        if family not in {socket.AF_INET, socket.AF_INET6}:
+            _raise_unsafe_result_url()
+        if not _is_safe_public_result_address(address) and not (
+            scheme == "https"
+            and isinstance(address, ipaddress.IPv4Address)
+            and address in _TUN_FAKE_IP_NETWORK
+            and not _is_ip_literal(ascii_hostname)
+            and _uses_active_tun_fake_ip_route(address)
         ):
             _raise_unsafe_result_url()
         key = (family, str(address))
@@ -1273,6 +1283,38 @@ def _is_ipv6_literal(hostname: str) -> bool:
         return ipaddress.ip_address(hostname).version == 6
     except ValueError:
         return False
+
+
+def _is_ip_literal(hostname: str) -> bool:
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            # inet_aton also recognizes legacy one-part, hex, octal, and
+            # shortened IPv4 spellings accepted by platform resolvers.
+            socket.inet_aton(hostname)
+        except OSError:
+            return False
+    return True
+
+
+def _uses_active_tun_fake_ip_route(address: ipaddress.IPv4Address) -> bool:
+    """Confirm benchmark-range DNS is routed from a matching local TUN address."""
+    probe: socket.socket | None = None
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # UDP connect selects a route without transmitting application data.
+        probe.connect((str(address), 443))
+        source = ipaddress.ip_address(probe.getsockname()[0])
+        return (
+            isinstance(source, ipaddress.IPv4Address)
+            and source in _TUN_FAKE_IP_NETWORK
+        )
+    except (OSError, TypeError, ValueError, IndexError):
+        return False
+    finally:
+        if probe is not None:
+            probe.close()
 
 
 def _connect_validated_address(
@@ -1537,6 +1579,13 @@ def _transport_error(exc: BaseException) -> OpenAIImageAPIError:
                 "invalid_request",
                 f"GPT Image API request or endpoint is invalid (HTTP {exc.code}).",
                 exc.code,
+            )
+        if exc.code == 408:
+            return OpenAIImageAPIError(
+                "timeout",
+                "GPT Image API request timed out (HTTP 408).",
+                exc.code,
+                True,
             )
         if exc.code == 429:
             return OpenAIImageAPIError(

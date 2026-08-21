@@ -1,5 +1,6 @@
 import base64
 import io
+import ipaddress
 import json
 import socket
 import ssl
@@ -28,6 +29,7 @@ from openai_image_api import (
     _encode_reference_images,
     _media_endpoint,
     _protocol_base_url,
+    _uses_active_tun_fake_ip_route,
     atomic_save_validated_image,
     append_aspect_instruction,
     normalize_openai_image_base_url,
@@ -738,21 +740,25 @@ def test_running_task_polls_same_id_then_downloads_and_reports_progress(build_op
 
 
 @patch("openai_image_api.urllib.request.build_opener")
-def test_status_service_error_never_falls_back_to_another_paid_submit(build_opener, tmp_path):
+@pytest.mark.parametrize("status_code", [408, 503])
+def test_status_service_error_never_falls_back_to_another_paid_submit(
+    build_opener, tmp_path, status_code
+):
     task_id = "task-123"
     status_url = "https://api.lk888.ai/v1/media/status?task_id=task-123"
     build_opener.return_value.open.side_effect = [
         FakeResponse(json.dumps({"task_id": task_id}).encode()),
-        HTTPError(status_url, 503, "unavailable", {}, None),
+        HTTPError(status_url, status_code, "unavailable", {}, None),
     ]
 
-    with pytest.raises(OpenAIImageAPIError) as ctx:
+    with pytest.raises(ImageTaskStillRunning) as ctx:
         make_client(max_attempts=1).generate_edit(
             "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
         )
 
     requests = [call.args[0] for call in build_opener.return_value.open.call_args_list]
-    assert ctx.value.code == "server_error"
+    assert ctx.value.code == "task_still_running"
+    assert ctx.value.task.task_id == task_id
     assert [(request.method, request.full_url) for request in requests] == [
         ("POST", "https://api.lk888.ai/v1/media/generate"),
         ("GET", status_url),
@@ -1722,6 +1728,100 @@ def test_result_url_accepts_normal_public_native_ipv4_and_ipv6(getaddrinfo):
         "93.184.216.34",
         "2606:2800:220:1:248:1893:25c8:1946",
     ]
+
+
+@patch("openai_image_api._uses_active_tun_fake_ip_route", return_value=True)
+@patch("openai_image_api.socket.getaddrinfo")
+def test_result_url_accepts_https_hostname_routed_through_active_tun_fake_ip(
+    getaddrinfo, active_route
+):
+    getaddrinfo.return_value = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.1.139", 443)),
+    ]
+
+    resolved = validate_remote_image_url(
+        "https://cos.lingkeai.vip/generated.png?signature=opaque"
+    )
+
+    assert [address.ip_literal for address in resolved.addresses] == ["198.18.1.139"]
+    assert resolved.hostname == "cos.lingkeai.vip"
+    assert resolved.scheme == "https"
+    active_route.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "remote_url",
+    [
+        "http://cos.lingkeai.vip/generated.png",
+        "https://198.18.1.139/generated.png",
+        "https://3323068811/generated.png",
+        "https://0xc612018b/generated.png",
+        "https://030604400613/generated.png",
+        "https://198.18.395/generated.png",
+    ],
+)
+@patch("openai_image_api._uses_active_tun_fake_ip_route", return_value=True)
+@patch("openai_image_api.socket.getaddrinfo")
+def test_result_url_rejects_tun_fake_ip_without_https_hostname(
+    getaddrinfo, active_route, remote_url
+):
+    port = 443 if remote_url.startswith("https:") else 80
+    getaddrinfo.return_value = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.1.139", port)),
+    ]
+
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        validate_remote_image_url(remote_url)
+
+    assert ctx.value.code == "unsafe_result_url"
+
+
+@patch("openai_image_api.socket.socket", side_effect=OSError("socket unavailable"))
+def test_tun_fake_ip_probe_fails_closed_when_route_socket_cannot_open(
+    socket_constructor,
+):
+    assert _uses_active_tun_fake_ip_route(
+        ipaddress.IPv4Address("198.18.1.139")
+    ) is False
+    socket_constructor.assert_called_once_with(socket.AF_INET, socket.SOCK_DGRAM)
+
+
+@pytest.mark.parametrize(
+    ("source_ip", "expected"),
+    [
+        ("198.18.0.1", True),
+        ("192.168.1.10", False),
+    ],
+)
+@patch("openai_image_api.socket.socket")
+def test_tun_fake_ip_probe_requires_matching_local_route_and_closes_socket(
+    socket_constructor, source_ip, expected
+):
+    probe = socket_constructor.return_value
+    probe.getsockname.return_value = (source_ip, 50123)
+
+    assert _uses_active_tun_fake_ip_route(
+        ipaddress.IPv4Address("198.18.1.139")
+    ) is expected
+
+    probe.connect.assert_called_once_with(("198.18.1.139", 443))
+    probe.getsockname.assert_called_once_with()
+    probe.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("failing_method", ["connect", "getsockname"])
+@patch("openai_image_api.socket.socket")
+def test_tun_fake_ip_probe_closes_socket_when_route_inspection_fails(
+    socket_constructor, failing_method
+):
+    probe = socket_constructor.return_value
+    getattr(probe, failing_method).side_effect = OSError("route unavailable")
+
+    assert _uses_active_tun_fake_ip_route(
+        ipaddress.IPv4Address("198.18.1.139")
+    ) is False
+
+    probe.close.assert_called_once_with()
 
 
 @patch("openai_image_api.ssl.create_default_context")
