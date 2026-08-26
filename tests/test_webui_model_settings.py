@@ -148,23 +148,33 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertFalse(
             by_label["将多张参考图合并为一张上传"]["props"]["value"]
         )
+        self.assertEqual(by_label["GPT Image API 类型"]["props"]["value"], "wending")
+        self.assertEqual(by_label["Sub2API API 密钥"]["props"]["type"], "password")
+        self.assertEqual(by_label["Sub2API API 地址"]["props"]["value"], "")
+        self.assertEqual(by_label["Sub2API 模型"]["props"]["value"], "gpt-image-2")
+        self.assertFalse(by_label["清除已保存 Sub2API 密钥"]["props"]["value"])
 
         run_labels = {labels[item] for item in dependencies["run_process"]["inputs"]}
         self.assertIn("白底图和场景图来源", run_labels)
         self.assertIn("最终套图来源", run_labels)
         self.assertIn("清除已保存 GPT Image 密钥", run_labels)
         self.assertIn("将多张参考图合并为一张上传", run_labels)
+        self.assertIn("GPT Image API 类型", run_labels)
+        self.assertIn("Sub2API API 密钥", run_labels)
+        self.assertIn("Sub2API API 地址", run_labels)
         save_labels = {labels[item] for item in dependencies["save_api_settings"]["inputs"]}
         self.assertIn("清除已保存 GPT Image 密钥", save_labels)
         self.assertIn("将多张参考图合并为一张上传", save_labels)
+        self.assertIn("GPT Image API 类型", save_labels)
+        self.assertIn("Sub2API API 密钥", save_labels)
         markdown_values = [
             str(item.get("props", {}).get("value", ""))
             for item in components
             if item["type"] == "markdown"
         ]
         self.assertTrue(any("GPT Image 密钥状态：" in value for value in markdown_values))
-        self.assertTrue(any("GPT Image 异步媒体任务 API" in value for value in markdown_values))
-        self.assertTrue(any("创建任务、查询任务状态和返回结果 URL" in value for value in markdown_values))
+        self.assertTrue(any("问鼎 API / Sub2API" in value for value in markdown_values))
+        self.assertTrue(any("任务 ID 轮询" in value and "/v1/images/edits" in value for value in markdown_values))
         self.assertIn(
             "最多可直接上传 14 张参考图；仅在网关限制或体积超限时手动开启合并",
             by_label["将多张参考图合并为一张上传"]["props"]["info"],
@@ -180,6 +190,13 @@ class WebUIModelSettingsTests(unittest.TestCase):
                 "GPT Image 分辨率",
                 "将多张参考图合并为一张上传",
                 "清除已保存 GPT Image 密钥",
+                "GPT Image API 类型",
+                "Sub2API API 密钥",
+                "Sub2API API 地址",
+                "Sub2API 模型",
+                "Sub2API 分辨率",
+                "Sub2API 将多张参考图合并为一张上传",
+                "清除已保存 Sub2API 密钥",
             },
         )
         paid_test_index = demo.config["dependencies"].index(paid_test)
@@ -214,6 +231,10 @@ class WebUIModelSettingsTests(unittest.TestCase):
         )
         self.assertIn(
             "清除已保存 GPT Image 密钥",
+            {labels[item] for item in dependencies["run_process"]["outputs"]},
+        )
+        self.assertIn(
+            "清除已保存 Sub2API 密钥",
             {labels[item] for item in dependencies["run_process"]["outputs"]},
         )
 
@@ -329,9 +350,19 @@ class WebUIModelSettingsTests(unittest.TestCase):
             config["image_generation"],
             {"support_provider": "lovart", "detail_provider": "lovart"},
         )
-        self.assertEqual(config["openai_image"]["base_url"], "")
-        self.assertEqual(config["openai_image"]["model"], "gpt-image-2")
-        self.assertFalse(config["openai_image"]["merge_reference_images"])
+        self.assertEqual(config["openai_image"]["active_profile"], "wending")
+        self.assertEqual(
+            config["openai_image"]["profiles"]["wending"]["protocol"],
+            "wending_async",
+        )
+        self.assertEqual(
+            config["openai_image"]["profiles"]["sub2api"]["protocol"],
+            "sub2api_sync",
+        )
+        self.assertEqual(config["openai_image"]["profiles"]["sub2api"]["base_url"], "")
+        self.assertFalse(
+            config["openai_image"]["profiles"]["sub2api"]["merge_reference_images"]
+        )
 
     def test_blank_openai_image_key_preserves_existing_value(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -350,6 +381,48 @@ class WebUIModelSettingsTests(unittest.TestCase):
             save_env("", "", "", "", clear_openai_image_key=True, env_path=env_path)
 
             self.assertEqual(env_path.read_bytes(), b"# local credential\r\nOTHER=value\r\nGEMINI_API_KEY=\r\nNVIDIA_API_KEY=\r\nLOVART_ACCESS_KEY=\r\nLOVART_SECRET_KEY=\r\n")
+
+    def test_save_env_keeps_wending_and_sub2api_keys_independent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text(
+                "OPENAI_IMAGE_API_KEY=wending-old\n"
+                "SUB2API_IMAGE_API_KEY=sub2-old\n"
+                "OTHER=keep\n",
+                encoding="utf-8",
+            )
+
+            save_env(
+                "", "", "", "",
+                openai_image_key="",
+                sub2api_image_key="sub2-new",
+                env_path=env_path,
+            )
+            saved = env_path.read_text(encoding="utf-8")
+
+            self.assertIn("OPENAI_IMAGE_API_KEY=wending-old", saved)
+            self.assertIn("SUB2API_IMAGE_API_KEY=sub2-new", saved)
+            self.assertNotIn("SUB2API_IMAGE_API_KEY=sub2-old", saved)
+            self.assertIn("OTHER=keep", saved)
+
+    def test_clear_sub2api_key_does_not_clear_wending_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text(
+                "OPENAI_IMAGE_API_KEY=wending-key\n"
+                "SUB2API_IMAGE_API_KEY=sub2-key\n",
+                encoding="utf-8",
+            )
+
+            save_env(
+                "", "", "", "",
+                clear_sub2api_image_key=True,
+                env_path=env_path,
+            )
+            saved = env_path.read_text(encoding="utf-8")
+
+            self.assertIn("OPENAI_IMAGE_API_KEY=wending-key", saved)
+            self.assertNotIn("SUB2API_IMAGE_API_KEY=", saved)
 
     def test_explicit_openai_image_key_clear_wins_over_a_submitted_value(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -395,6 +468,102 @@ class WebUIModelSettingsTests(unittest.TestCase):
             "support_provider": "openai_image",
             "detail_provider": "lovart",
         })
+
+    def test_persist_openai_image_profiles_keeps_both_profiles_independent(self):
+        original = {"other": {"keep": True}}
+
+        updated = webui.persist_openai_image_profile_settings(
+            original,
+            "sub2api",
+            {
+                "base_url": "https://wending.example/v1/",
+                "model": "wending-model",
+                "resolution": "1k",
+                "merge_reference_images": False,
+            },
+            {
+                "base_url": "https://sub2.example/v1/",
+                "model": "sub2-model",
+                "resolution": "2k",
+                "merge_reference_images": True,
+            },
+        )
+
+        self.assertEqual(original, {"other": {"keep": True}})
+        self.assertEqual(updated["openai_image"]["active_profile"], "sub2api")
+        self.assertEqual(updated["openai_image"]["profiles"], {
+            "wending": {
+                "protocol": "wending_async",
+                "base_url": "https://wending.example/v1",
+                "model": "wending-model",
+                "resolution": "1K",
+                "merge_reference_images": False,
+            },
+            "sub2api": {
+                "protocol": "sub2api_sync",
+                "base_url": "https://sub2.example/v1",
+                "model": "sub2-model",
+                "resolution": "2K",
+                "merge_reference_images": True,
+            },
+        })
+        self.assertNotIn("api_key", yaml.safe_dump(updated))
+
+    def test_profile_values_migrate_legacy_settings_to_wending_without_inventing_sub2_url(self):
+        values = webui.openai_image_profile_values({
+            "base_url": "https://legacy.example/v1",
+            "model": "legacy-model",
+            "resolution": "2K",
+            "merge_reference_images": True,
+        })
+
+        self.assertEqual(values["active_profile"], "wending")
+        self.assertEqual(values["wending"]["base_url"], "https://legacy.example/v1")
+        self.assertEqual(values["wending"]["model"], "legacy-model")
+        self.assertTrue(values["wending"]["merge_reference_images"])
+        self.assertEqual(values["sub2api"]["base_url"], "")
+        self.assertEqual(values["sub2api"]["model"], "gpt-image-2")
+
+    def test_save_api_settings_persists_dual_profiles_and_credentials_transactionally(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            env_path = Path(tmp) / ".env"
+            config_path.write_text("other: keep\n", encoding="utf-8")
+            env_path.write_text("OTHER_ENV=keep\n", encoding="utf-8")
+
+            status = save_api_settings(
+                "", "", "", "", "wending-key",
+                "https://gemini.test/v1beta", "gemini-model",
+                "https://nvidia.test/v1", "nvidia-model",
+                "https://wending.example/v1", "wending-model", "1K",
+                "openai_image", "openai_image",
+                active_openai_image_profile="sub2api",
+                sub2api_image_key="sub2-key",
+                sub2api_image_base_url="https://sub2.example/v1",
+                sub2api_image_model="sub2-model",
+                sub2api_image_resolution="2K",
+                sub2api_merge_reference_images=True,
+                config_path=config_path,
+                env_path=env_path,
+            )
+
+            saved_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            saved_env = env_path.read_text(encoding="utf-8")
+
+        self.assertEqual(status, webui.API_SETTINGS_SAVE_SUCCESS)
+        self.assertEqual(saved_config["openai_image"]["active_profile"], "sub2api")
+        self.assertEqual(
+            saved_config["openai_image"]["profiles"]["wending"]["model"],
+            "wending-model",
+        )
+        self.assertEqual(
+            saved_config["openai_image"]["profiles"]["sub2api"]["model"],
+            "sub2-model",
+        )
+        self.assertIn("OPENAI_IMAGE_API_KEY=wending-key", saved_env)
+        self.assertIn("SUB2API_IMAGE_API_KEY=sub2-key", saved_env)
+        self.assertNotIn("wending-key", yaml.safe_dump(saved_config))
+        self.assertNotIn("sub2-key", yaml.safe_dump(saved_config))
 
     def test_persist_openai_image_settings_allows_merge_switch_for_any_gateway(self):
         updated = webui.persist_openai_image_settings(
@@ -1309,6 +1478,37 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--support-provider") + 1], "openai_image")
         self.assertEqual(argv[argv.index("--detail-provider") + 1], "lovart")
         self.assertIn("output folder with spaces", popen.call_args.kwargs["env"]["LOVART_OUTPUT_DIR"])
+
+    @patch("webui.subprocess.Popen")
+    def test_run_process_requires_selected_sub2api_key_not_saved_wending_key(self, popen):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            env_path = Path(tmp) / ".env"
+            config_path.write_text(
+                "gemini_api:\n  model: gemini-model\n"
+                "nvidia_api:\n  model: nvidia-model\n",
+                encoding="utf-8",
+            )
+            env_path.write_text(
+                "OPENAI_IMAGE_API_KEY=wending-only\n",
+                encoding="utf-8",
+            )
+
+            output = list(run_process(
+                None, "output", "gemini_api", "gemini-model", "unlimited", "auto",
+                "https://gemini.test/v1beta", "https://nvidia.test/v1",
+                "", "", "", "",
+                "", "https://wending.example/v1", "gpt-image-2", "1K",
+                "openai_image", "openai_image", False, False,
+                active_openai_image_profile="sub2api",
+                sub2api_image_key="",
+                sub2api_image_base_url="https://sub2.example/v1",
+                config_path=config_path,
+                env_path=env_path,
+            ))
+
+        self.assertTrue(any("当前所选" in frame and "密钥" in frame for frame in output))
+        popen.assert_not_called()
 
     @patch("webui.subprocess.Popen")
     @patch("webui.save_config")

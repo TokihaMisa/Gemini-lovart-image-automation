@@ -56,6 +56,7 @@ from openai_image_api import (
     OpenAIImageAPI,
     OpenAIImageAPIConfig,
     OpenAIImageAPIError,
+    OPENAI_IMAGE_PROFILE_PROTOCOLS,
     normalize_openai_image_base_url,
     safe_task_display_token,
     sanitize_external_value,
@@ -588,9 +589,20 @@ nvidia_api:
   models:
     kimi: moonshotai/kimi-k2.5
 openai_image:
-  base_url: ""
-  model: gpt-image-2
-  resolution: 1K
+  active_profile: wending
+  profiles:
+    wending:
+      protocol: wending_async
+      base_url: ""
+      model: gpt-image-2
+      resolution: 1K
+      merge_reference_images: false
+    sub2api:
+      protocol: sub2api_sync
+      base_url: ""
+      model: gpt-image-2
+      resolution: 1K
+      merge_reference_images: false
 image_generation:
   support_provider: lovart
   detail_provider: lovart
@@ -700,6 +712,8 @@ def _save_config_and_env_transaction(
     lovart_secret,
     openai_image_key=None,
     clear_openai_image_key=False,
+    sub2api_image_key=None,
+    clear_sub2api_image_key=False,
     config_path="config.yaml",
     env_path=".env",
     snapshots=None,
@@ -719,6 +733,8 @@ def _save_config_and_env_transaction(
             lovart_secret,
             openai_image_key=openai_image_key,
             clear_openai_image_key=clear_openai_image_key,
+            sub2api_image_key=sub2api_image_key,
+            clear_sub2api_image_key=clear_sub2api_image_key,
             env_path=env_path,
         )
     except Exception as primary:
@@ -1029,6 +1045,7 @@ def test_openai_image_edit(
     merge_reference_images=None,
     clear_openai_image_key=False,
     *,
+    profile="wending",
     env_path=".env",
 ):
     """Run the explicitly requested, potentially billable GPT Image edit probe."""
@@ -1039,8 +1056,11 @@ def test_openai_image_edit(
     outcome: dict[str, object] = {}
     task_ids: set[str] = set()
     submitted_api_key = str(api_key or "").strip()
+    key_env_name = (
+        "SUB2API_IMAGE_API_KEY" if profile == "sub2api" else "OPENAI_IMAGE_API_KEY"
+    )
     resolved_api_key = "" if clear_openai_image_key else (
-        submitted_api_key or get_env("OPENAI_IMAGE_API_KEY", env_path=env_path)
+        submitted_api_key or get_env(key_env_name, env_path=env_path)
     )
 
     def sanitize(value: object) -> str:
@@ -1058,22 +1078,27 @@ def test_openai_image_edit(
         is_new = task_id not in task_ids
         if task_id:
             task_ids.add(task_id)
-        if is_new:
+        if task_id and is_new:
             suffix = safe_task_display_token(task_id)
             suffix_text = f" · 任务 …{suffix}" if suffix else ""
             events.put(f"📨 **进度：0/1** 异步任务已提交{suffix_text}，正在等待平台处理。")
 
     def run_test() -> None:
         try:
+            profile_settings = {
+                "protocol": OPENAI_IMAGE_PROFILE_PROTOCOLS[profile],
+                "base_url": base_url,
+                "model": model,
+                "resolution": resolution,
+                "merge_reference_images": resolve_merge_reference_images(
+                    merge_reference_images,
+                    base_url,
+                ),
+            }
             config = {
                 "openai_image": {
-                    "base_url": base_url,
-                    "model": model,
-                    "resolution": resolution,
-                    "merge_reference_images": resolve_merge_reference_images(
-                        merge_reference_images,
-                        base_url,
-                    ),
+                    "active_profile": profile,
+                    "profiles": {profile: profile_settings},
                 }
             }
             client = OpenAIImageAPI(
@@ -1165,6 +1190,74 @@ def persist_openai_image_settings(
     return updated
 
 
+def persist_openai_image_profile_settings(
+    config,
+    active_profile,
+    wending_settings,
+    sub2api_settings,
+):
+    """Persist two non-secret GPT Image profiles without mutating input."""
+    profile = str(active_profile or "wending").strip().lower()
+    if profile not in OPENAI_IMAGE_PROFILE_PROTOCOLS:
+        raise OpenAIImageAPIError(
+            "invalid_profile",
+            "GPT Image API 类型必须选择“问鼎 API”或“Sub2API”。",
+        )
+
+    def normalize_profile(name, settings):
+        source = settings if isinstance(settings, dict) else {}
+        raw_base_url = str(source.get("base_url") or "").strip()
+        base_url = normalize_openai_image_base_url(raw_base_url) if raw_base_url else ""
+        return {
+            "protocol": OPENAI_IMAGE_PROFILE_PROTOCOLS[name],
+            "base_url": base_url,
+            "model": str(source.get("model") or "gpt-image-2").strip() or "gpt-image-2",
+            "resolution": normalize_resolution(source.get("resolution")),
+            "merge_reference_images": bool(source.get("merge_reference_images", False)),
+        }
+
+    updated = deepcopy(config)
+    updated["openai_image"] = {
+        "active_profile": profile,
+        "profiles": {
+            "wending": normalize_profile("wending", wending_settings),
+            "sub2api": normalize_profile("sub2api", sub2api_settings),
+        },
+    }
+    return updated
+
+
+def openai_image_profile_values(openai_image_config) -> dict[str, object]:
+    """Return UI-safe dual profiles, migrating the legacy flat block in memory."""
+    root = openai_image_config if isinstance(openai_image_config, dict) else {}
+    profiles = root.get("profiles")
+    if isinstance(profiles, dict):
+        active = str(root.get("active_profile") or "wending").strip().lower()
+        if active not in OPENAI_IMAGE_PROFILE_PROTOCOLS:
+            active = "wending"
+        sources = {
+            name: profiles.get(name, {}) if isinstance(profiles.get(name), dict) else {}
+            for name in OPENAI_IMAGE_PROFILE_PROTOCOLS
+        }
+    else:
+        active = "wending"
+        sources = {"wending": root, "sub2api": {}}
+
+    def values(source):
+        return {
+            "base_url": str(source.get("base_url") or "").strip(),
+            "model": str(source.get("model") or "gpt-image-2").strip() or "gpt-image-2",
+            "resolution": normalize_resolution(source.get("resolution")),
+            "merge_reference_images": bool(source.get("merge_reference_images", False)),
+        }
+
+    return {
+        "active_profile": active,
+        "wending": values(sources["wending"]),
+        "sub2api": values(sources["sub2api"]),
+    }
+
+
 def persist_image_routing_settings(config, support_provider, detail_provider):
     updated = deepcopy(config)
     openai_image = updated.get("openai_image")
@@ -1196,6 +1289,13 @@ def save_api_settings(
     detail_provider,
     clear_openai_image_key=False,
     merge_reference_images=None,
+    active_openai_image_profile=None,
+    sub2api_image_key=None,
+    sub2api_image_base_url="",
+    sub2api_image_model="gpt-image-2",
+    sub2api_image_resolution="1K",
+    clear_sub2api_image_key=False,
+    sub2api_merge_reference_images=None,
     config_path="config.yaml",
     env_path=".env",
 ):
@@ -1208,15 +1308,36 @@ def save_api_settings(
         updated = persist_provider_settings(
             current, gemini_base_url, gemini_model, nvidia_base_url, nvidia_model
         )
-        updated = persist_openai_image_settings(
-            updated,
-            openai_image_base_url,
-            openai_image_model,
-            openai_image_resolution,
-            support_provider,
-            detail_provider,
-            merge_reference_images,
-        )
+        if active_openai_image_profile is None:
+            updated = persist_openai_image_settings(
+                updated,
+                openai_image_base_url,
+                openai_image_model,
+                openai_image_resolution,
+                support_provider,
+                detail_provider,
+                merge_reference_images,
+            )
+        else:
+            updated = persist_openai_image_profile_settings(
+                updated,
+                active_openai_image_profile,
+                {
+                    "base_url": openai_image_base_url,
+                    "model": openai_image_model,
+                    "resolution": openai_image_resolution,
+                    "merge_reference_images": merge_reference_images,
+                },
+                {
+                    "base_url": sub2api_image_base_url,
+                    "model": sub2api_image_model,
+                    "resolution": sub2api_image_resolution,
+                    "merge_reference_images": sub2api_merge_reference_images,
+                },
+            )
+            updated = persist_image_routing_settings(
+                updated, support_provider, detail_provider
+            )
         _save_config_and_env_transaction(
             updated,
             gemini_key,
@@ -1225,6 +1346,8 @@ def save_api_settings(
             lovart_secret,
             openai_image_key=openai_image_key,
             clear_openai_image_key=clear_openai_image_key,
+            sub2api_image_key=sub2api_image_key,
+            clear_sub2api_image_key=clear_sub2api_image_key,
             config_path=target,
             env_path=env_path,
         )
@@ -1402,11 +1525,14 @@ def save_env(
     lovart_secret: str,
     openai_image_key: str | None = None,
     clear_openai_image_key: bool = False,
+    sub2api_image_key: str | None = None,
+    clear_sub2api_image_key: bool = False,
     env_path: str | Path = ".env",
 ):
     target = Path(env_path)
     lines = []
     openai_key_provided = bool(str(openai_image_key or "").strip())
+    sub2api_key_provided = bool(str(sub2api_image_key or "").strip())
     newline = "\n"
     if target.exists():
         with target.open("r", encoding="utf-8", newline="") as f:
@@ -1416,6 +1542,8 @@ def save_env(
                 if any(line.startswith(k) for k in ["GEMINI_API_KEY=", "NVIDIA_API_KEY=", "LOVART_ACCESS_KEY=", "LOVART_SECRET_KEY="]):
                     continue
                 if line.startswith("OPENAI_IMAGE_API_KEY=") and (clear_openai_image_key or openai_key_provided):
+                    continue
+                if line.startswith("SUB2API_IMAGE_API_KEY=") and (clear_sub2api_image_key or sub2api_key_provided):
                     continue
                 lines.append(line)
 
@@ -1427,6 +1555,8 @@ def save_env(
     lines.append(f"LOVART_SECRET_KEY={lovart_secret}{newline}")
     if openai_key_provided and not clear_openai_image_key:
         lines.append(f"OPENAI_IMAGE_API_KEY={str(openai_image_key).strip()}{newline}")
+    if sub2api_key_provided and not clear_sub2api_image_key:
+        lines.append(f"SUB2API_IMAGE_API_KEY={str(sub2api_image_key).strip()}{newline}")
     
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_name(f".{target.name}.tmp")
@@ -1449,12 +1579,16 @@ def get_env(key: str, env_path: str | Path = ".env") -> str:
 
 
 def _openai_image_key_is_saved(env_path: str | Path = ".env") -> bool:
+    return _image_key_is_saved("OPENAI_IMAGE_API_KEY", env_path)
+
+
+def _image_key_is_saved(env_name: str, env_path: str | Path = ".env") -> bool:
     target = Path(env_path)
     if not target.exists():
         return False
     with target.open("r", encoding="utf-8") as stream:
         return any(
-            line.startswith("OPENAI_IMAGE_API_KEY=")
+            line.startswith(f"{env_name}=")
             and bool(line.split("=", 1)[1].strip())
             for line in stream
         )
@@ -1465,6 +1599,58 @@ def openai_image_key_status(env_path: str | Path = ".env") -> str:
         "GPT Image 密钥状态：已保存"
         if _openai_image_key_is_saved(env_path)
         else "GPT Image 密钥状态：未保存"
+    )
+
+
+def test_selected_openai_image_edit(
+    active_profile,
+    wending_key,
+    wending_base_url,
+    wending_model,
+    wending_resolution,
+    wending_merge,
+    clear_wending_key,
+    sub2api_key,
+    sub2api_base_url,
+    sub2api_model,
+    sub2api_resolution,
+    sub2api_merge,
+    clear_sub2api_key,
+    *,
+    env_path=".env",
+):
+    profile = str(active_profile or "wending").strip().lower()
+    if profile == "sub2api":
+        arguments = (
+            sub2api_key,
+            sub2api_base_url,
+            sub2api_model,
+            sub2api_resolution,
+            sub2api_merge,
+            clear_sub2api_key,
+        )
+    else:
+        profile = "wending"
+        arguments = (
+            wending_key,
+            wending_base_url,
+            wending_model,
+            wending_resolution,
+            wending_merge,
+            clear_wending_key,
+        )
+    yield from test_openai_image_edit(
+        *arguments,
+        profile=profile,
+        env_path=env_path,
+    )
+
+
+def sub2api_image_key_status(env_path: str | Path = ".env") -> str:
+    return (
+        "Sub2API 密钥状态：已保存"
+        if _image_key_is_saved("SUB2API_IMAGE_API_KEY", env_path)
+        else "Sub2API 密钥状态：未保存"
     )
 
 
@@ -1490,6 +1676,13 @@ def run_process(
     clear_openai_image_key=False,
     merge_reference_images=None,
     *,
+    active_openai_image_profile=None,
+    sub2api_image_key=None,
+    sub2api_image_base_url="",
+    sub2api_image_model="gpt-image-2",
+    sub2api_image_resolution="1K",
+    clear_sub2api_image_key=False,
+    sub2api_merge_reference_images=None,
     config_path="config.yaml",
     env_path=".env",
 ):
@@ -1520,23 +1713,54 @@ def run_process(
             normalize_image_provider(detail_provider),
         }
         if uses_openai_image:
-            submitted_openai_key = bool(str(openai_image_key or "").strip())
-            if clear_openai_image_key or not (
-                submitted_openai_key or _openai_image_key_is_saved(env_path)
+            selected_profile = str(active_openai_image_profile or "wending")
+            if selected_profile == "sub2api":
+                submitted_selected_key = bool(str(sub2api_image_key or "").strip())
+                clear_selected_key = clear_sub2api_image_key
+                selected_key_saved = _image_key_is_saved(
+                    "SUB2API_IMAGE_API_KEY", env_path
+                )
+            else:
+                submitted_selected_key = bool(str(openai_image_key or "").strip())
+                clear_selected_key = clear_openai_image_key
+                selected_key_saved = _openai_image_key_is_saved(env_path)
+            if clear_selected_key or not (
+                submitted_selected_key or selected_key_saved
             ):
                 raise OpenAIImageAPIError(
                     "missing_key",
-                    "请先填写或保存 GPT Image API 密钥。",
+                    "请先填写或保存当前所选 GPT Image API 的密钥。",
                 )
-        config = persist_openai_image_settings(
-            config,
-            openai_image_base_url,
-            openai_image_model,
-            openai_image_resolution,
-            support_provider,
-            detail_provider,
-            merge_reference_images,
-        )
+        if active_openai_image_profile is None:
+            config = persist_openai_image_settings(
+                config,
+                openai_image_base_url,
+                openai_image_model,
+                openai_image_resolution,
+                support_provider,
+                detail_provider,
+                merge_reference_images,
+            )
+        else:
+            config = persist_openai_image_profile_settings(
+                config,
+                active_openai_image_profile,
+                {
+                    "base_url": openai_image_base_url,
+                    "model": openai_image_model,
+                    "resolution": openai_image_resolution,
+                    "merge_reference_images": merge_reference_images,
+                },
+                {
+                    "base_url": sub2api_image_base_url,
+                    "model": sub2api_image_model,
+                    "resolution": sub2api_image_resolution,
+                    "merge_reference_images": sub2api_merge_reference_images,
+                },
+            )
+            config = persist_image_routing_settings(
+                config, support_provider, detail_provider
+            )
         if "lovart" not in config:
             config["lovart"] = {}
         config["lovart"]["image_model"] = lovart_image_model
@@ -1550,6 +1774,8 @@ def run_process(
             lovart_secret,
             openai_image_key=openai_image_key,
             clear_openai_image_key=clear_openai_image_key,
+            sub2api_image_key=sub2api_image_key,
+            clear_sub2api_image_key=clear_sub2api_image_key,
             config_path=config_path,
             env_path=env_path,
             snapshots=transaction_snapshots,
@@ -2339,6 +2565,71 @@ def save_api_settings_from_ui(
     return status, openai_image_key_status(env_path), clear_update
 
 
+def save_api_profile_settings_from_ui(
+    gemini_key,
+    nvidia_key,
+    lovart_access,
+    lovart_secret,
+    wending_key,
+    sub2api_key,
+    gemini_base_url,
+    gemini_model,
+    nvidia_base_url,
+    nvidia_model,
+    active_profile,
+    wending_base_url,
+    wending_model,
+    wending_resolution,
+    wending_merge,
+    clear_wending_key,
+    sub2api_base_url,
+    sub2api_model,
+    sub2api_resolution,
+    sub2api_merge,
+    clear_sub2api_key,
+    support_provider,
+    detail_provider,
+    *,
+    config_path="config.yaml",
+    env_path=".env",
+):
+    status = save_api_settings(
+        gemini_key,
+        nvidia_key,
+        lovart_access,
+        lovart_secret,
+        wending_key,
+        gemini_base_url,
+        gemini_model,
+        nvidia_base_url,
+        nvidia_model,
+        wending_base_url,
+        wending_model,
+        wending_resolution,
+        support_provider,
+        detail_provider,
+        clear_openai_image_key=clear_wending_key,
+        merge_reference_images=wending_merge,
+        active_openai_image_profile=active_profile,
+        sub2api_image_key=sub2api_key,
+        sub2api_image_base_url=sub2api_base_url,
+        sub2api_image_model=sub2api_model,
+        sub2api_image_resolution=sub2api_resolution,
+        clear_sub2api_image_key=clear_sub2api_key,
+        sub2api_merge_reference_images=sub2api_merge,
+        config_path=config_path,
+        env_path=env_path,
+    )
+    clear_update = False if status == API_SETTINGS_SAVE_SUCCESS else gr.skip()
+    return (
+        status,
+        openai_image_key_status(env_path),
+        sub2api_image_key_status(env_path),
+        clear_update,
+        clear_update,
+    )
+
+
 def run_process_from_ui(
     excel_file,
     custom_output_dir,
@@ -2397,6 +2688,84 @@ def run_process_from_ui(
             yield dashboard, gr.skip(), gr.skip()
 
 
+def run_process_profiles_from_ui(
+    excel_file,
+    custom_output_dir,
+    prompt_source,
+    prompt_model,
+    lovart_mode,
+    lovart_image_model,
+    gemini_base_url,
+    nvidia_base_url,
+    gemini_key,
+    nvidia_key,
+    lovart_access,
+    lovart_secret,
+    wending_key,
+    sub2api_key,
+    active_profile,
+    wending_base_url,
+    wending_model,
+    wending_resolution,
+    wending_merge,
+    clear_wending_key,
+    sub2api_base_url,
+    sub2api_model,
+    sub2api_resolution,
+    sub2api_merge,
+    clear_sub2api_key,
+    support_provider,
+    detail_provider,
+    *,
+    config_path="config.yaml",
+    env_path=".env",
+):
+    process_updates = run_process(
+        excel_file,
+        custom_output_dir,
+        prompt_source,
+        prompt_model,
+        lovart_mode,
+        lovart_image_model,
+        gemini_base_url,
+        nvidia_base_url,
+        gemini_key,
+        nvidia_key,
+        lovart_access,
+        lovart_secret,
+        wending_key,
+        wending_base_url,
+        wending_model,
+        wending_resolution,
+        support_provider,
+        detail_provider,
+        clear_wending_key,
+        wending_merge,
+        active_openai_image_profile=active_profile,
+        sub2api_image_key=sub2api_key,
+        sub2api_image_base_url=sub2api_base_url,
+        sub2api_image_model=sub2api_model,
+        sub2api_image_resolution=sub2api_resolution,
+        clear_sub2api_image_key=clear_sub2api_key,
+        sub2api_merge_reference_images=sub2api_merge,
+        config_path=config_path,
+        env_path=env_path,
+    )
+    synchronized = False
+    for dashboard in process_updates:
+        if not synchronized and str(dashboard).startswith("Starting"):
+            synchronized = True
+            yield (
+                dashboard,
+                openai_image_key_status(env_path),
+                sub2api_image_key_status(env_path),
+                False,
+                False,
+            )
+        else:
+            yield dashboard, gr.skip(), gr.skip(), gr.skip(), gr.skip()
+
+
 def pick_directory(current_dir):
     import subprocess
     import sys
@@ -2430,10 +2799,15 @@ def build_ui():
     openai_image_config = config.get("openai_image", {}) or {}
     if not isinstance(openai_image_config, dict):
         openai_image_config = {}
-    configured_merge_references = openai_image_config.get("merge_reference_images")
-    merge_reference_images_value = resolve_merge_reference_images(
-        configured_merge_references,
-        openai_image_config.get("base_url", ""),
+    openai_profile_config = openai_image_profile_values(openai_image_config)
+    active_openai_profile_value = openai_profile_config["active_profile"]
+    wending_profile_config = openai_profile_config["wending"]
+    sub2api_profile_config = openai_profile_config["sub2api"]
+    merge_reference_images_value = bool(
+        wending_profile_config["merge_reference_images"]
+    )
+    sub2api_merge_reference_images_value = bool(
+        sub2api_profile_config["merge_reference_images"]
     )
     image_generation_config = config.get("image_generation", {}) or {}
     if not isinstance(image_generation_config, dict):
@@ -2693,11 +3067,17 @@ def build_ui():
                     nvidia_test_btn = gr.Button("测试 NVIDIA 模型")
                     nvidia_status = gr.Markdown("")
 
-                    gr.Markdown("### GPT Image 异步媒体任务 API")
+                    gr.Markdown("### GPT Image：问鼎 API / Sub2API")
                     gr.Markdown(
-                        "兼容网关必须实现创建任务、查询任务状态和返回结果 URL 的异步媒体任务语义。"
+                        "问鼎 API 使用任务 ID 轮询；Sub2API 使用同步 `/v1/images/edits` 响应。"
                         "保存设置不会调用图像 API；只有点击下方的明确付费测试按钮才会发起真实请求。"
                     )
+                    active_openai_image_profile = gr.Radio(
+                        choices=[("问鼎 API（异步轮询）", "wending"), ("Sub2API（同步）", "sub2api")],
+                        value=active_openai_profile_value,
+                        label="GPT Image API 类型",
+                    )
+                    gr.Markdown("#### 问鼎 API 配置")
                     openai_image_key = gr.Textbox(
                         label="GPT Image API 密钥",
                         value="",
@@ -2711,18 +3091,18 @@ def build_ui():
                     )
                     openai_image_base_url = gr.Textbox(
                         label="GPT Image API 地址",
-                        value=openai_image_config.get("base_url", ""),
+                        value=wending_profile_config.get("base_url", ""),
                         placeholder="例如：https://api.lk888.ai 或 https://api.lk888.ai/v1",
                         info="可以带或不带 /v1，请按服务商提供的完整 Base URL 填写",
                     )
                     with gr.Row():
                         openai_image_model = gr.Textbox(
                             label="GPT Image 模型",
-                            value=openai_image_config.get("model", "gpt-image-2"),
+                            value=wending_profile_config.get("model", "gpt-image-2"),
                         )
                         openai_image_resolution = gr.Radio(
                             choices=["1K", "2K", "4K"],
-                            value=openai_image_config.get("resolution", "1K"),
+                            value=wending_profile_config.get("resolution", "1K"),
                             label="GPT Image 分辨率",
                         )
                     merge_reference_images = gr.Checkbox(
@@ -2731,6 +3111,39 @@ def build_ui():
                         info=(
                             "最多可直接上传 14 张参考图；仅在网关限制或体积超限时手动开启合并"
                         ),
+                    )
+                    gr.Markdown("#### Sub2API 配置")
+                    sub2api_image_key = gr.Textbox(
+                        label="Sub2API API 密钥",
+                        value="",
+                        type="password",
+                        placeholder="留空保留已保存密钥",
+                    )
+                    sub2api_image_key_indicator = gr.Markdown(sub2api_image_key_status())
+                    clear_sub2api_image_key = gr.Checkbox(
+                        label="清除已保存 Sub2API 密钥",
+                        value=False,
+                    )
+                    sub2api_image_base_url = gr.Textbox(
+                        label="Sub2API API 地址",
+                        value=sub2api_profile_config.get("base_url", ""),
+                        placeholder="例如：https://codex.surf/v1",
+                        info="请填写服务商提供的 Base URL，可以带或不带 /v1",
+                    )
+                    with gr.Row():
+                        sub2api_image_model = gr.Textbox(
+                            label="Sub2API 模型",
+                            value=sub2api_profile_config.get("model", "gpt-image-2"),
+                        )
+                        sub2api_image_resolution = gr.Radio(
+                            choices=["1K", "2K", "4K"],
+                            value=sub2api_profile_config.get("resolution", "1K"),
+                            label="Sub2API 分辨率",
+                        )
+                    sub2api_merge_reference_images = gr.Checkbox(
+                        label="Sub2API 将多张参考图合并为一张上传",
+                        value=sub2api_merge_reference_images_value,
+                        info="默认直接上传最多 14 张参考图；仅在代理限制时开启合并",
                     )
                     openai_image_test_status = gr.Markdown(
                         "点击下方按钮后，这里会立即显示生成状态和进度。"
@@ -2746,14 +3159,21 @@ def build_ui():
                         api_name=False,
                     )
                     openai_image_test_run = openai_image_test_start.then(
-                        fn=test_openai_image_edit,
+                        fn=test_selected_openai_image_edit,
                         inputs=[
+                            active_openai_image_profile,
                             openai_image_key,
                             openai_image_base_url,
                             openai_image_model,
                             openai_image_resolution,
                             merge_reference_images,
                             clear_openai_image_key,
+                            sub2api_image_key,
+                            sub2api_image_base_url,
+                            sub2api_image_model,
+                            sub2api_image_resolution,
+                            sub2api_merge_reference_images,
+                            clear_sub2api_image_key,
                         ],
                         outputs=openai_image_test_status,
                         api_name="test_openai_image_edit",
@@ -2936,27 +3356,36 @@ def build_ui():
                         lovart_access,
                         lovart_secret,
                         openai_image_key,
+                        sub2api_image_key,
                     ]
                     save_keys_btn.click(
-                        fn=save_api_settings_from_ui,
+                        fn=save_api_profile_settings_from_ui,
                         inputs=[
                             *key_inputs,
                             gemini_base_url,
                             gemini_model,
                             nvidia_base_url,
                             nvidia_model,
+                            active_openai_image_profile,
                             openai_image_base_url,
                             openai_image_model,
                             openai_image_resolution,
+                            merge_reference_images,
+                            clear_openai_image_key,
+                            sub2api_image_base_url,
+                            sub2api_image_model,
+                            sub2api_image_resolution,
+                            sub2api_merge_reference_images,
+                            clear_sub2api_image_key,
                             support_provider,
                             detail_provider,
-                            clear_openai_image_key,
-                            merge_reference_images,
                         ],
                         outputs=[
                             save_status,
                             openai_image_key_indicator,
+                            sub2api_image_key_indicator,
                             clear_openai_image_key,
+                            clear_sub2api_image_key,
                         ],
                         api_name="save_api_settings",
                     )
@@ -3180,20 +3609,25 @@ def build_ui():
             outputs=prompt_model,
         )
         start_btn.click(
-            fn=run_process_from_ui,
+            fn=run_process_profiles_from_ui,
             inputs=[
                 excel_file, custom_output_dir, prompt_source, prompt_model, lovart_mode, lovart_image_model,
                 gemini_base_url, nvidia_base_url,
                 gemini_key, nvidia_key, lovart_access, lovart_secret,
-                openai_image_key, openai_image_base_url, openai_image_model,
-                openai_image_resolution, support_provider, detail_provider,
-                clear_openai_image_key,
+                openai_image_key, sub2api_image_key, active_openai_image_profile,
+                openai_image_base_url, openai_image_model, openai_image_resolution,
                 merge_reference_images,
+                clear_openai_image_key,
+                sub2api_image_base_url, sub2api_image_model, sub2api_image_resolution,
+                sub2api_merge_reference_images, clear_sub2api_image_key,
+                support_provider, detail_provider,
             ],
             outputs=[
                 progress_dashboard,
                 openai_image_key_indicator,
+                sub2api_image_key_indicator,
                 clear_openai_image_key,
+                clear_sub2api_image_key,
             ],
             api_name="run_process",
         )

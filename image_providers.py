@@ -273,6 +273,10 @@ class OpenAIImageProvider:
         """Return only non-secret values that alter an Images edit request."""
         config = getattr(self.api, "config", None)
         return {
+            "profile": str(getattr(config, "profile", "wending") or "wending"),
+            "protocol": str(
+                getattr(config, "protocol", "wending_async") or "wending_async"
+            ),
             "base_url": _protocol_base_url(
                 getattr(config, "base_url", None)
             ),

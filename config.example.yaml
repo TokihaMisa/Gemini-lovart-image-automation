@@ -55,15 +55,24 @@ nvidia_api:
     kimi: "moonshotai/kimi-k2.5"
 
 openai_image:
-  # Keep OPENAI_IMAGE_API_KEY only in local .env. Copy the provider's Base URL as supplied.
-  # Both root endpoints and endpoints ending in /v1 are supported.
-  # Leave this empty to avoid silently selecting a provider.
-  base_url: ""
-  model: "gpt-image-2"
-  # The gateway-supported options are 1K, 2K, and 4K.
-  resolution: "1K"
-  # Enable to combine references into one Data URL before submitting the task.
-  merge_reference_images: false
+  # Select one saved profile. Legacy flat settings migrate to wending automatically.
+  active_profile: wending
+  profiles:
+    wending:
+      protocol: wending_async
+      # Keep OPENAI_IMAGE_API_KEY only in local .env.
+      base_url: ""
+      model: "gpt-image-2"
+      resolution: "1K"
+      merge_reference_images: false
+    sub2api:
+      protocol: sub2api_sync
+      # Keep SUB2API_IMAGE_API_KEY only in local .env.
+      base_url: ""
+      model: "gpt-image-2"
+      resolution: "1K"
+      # Sub2API accepts up to 14 references directly; merge only when needed.
+      merge_reference_images: false
 
 image_generation:
   # Support and final-detail providers are independent; failures never auto-fallback.

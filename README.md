@@ -76,23 +76,24 @@ NVIDIA_API_KEY=your_nvidia_api_key
 LOVART_ACCESS_KEY=your_lovart_access_key
 LOVART_SECRET_KEY=your_lovart_secret_key
 OPENAI_IMAGE_API_KEY=your_openai_image_api_key
+SUB2API_IMAGE_API_KEY=your_sub2api_image_api_key
 ```
 
 You can also input and save these keys directly via the **"⚙️ 系统设置" (System Settings)** tab in the WebUI.
 
 ## GPT Image setup and migration
 
-GPT Image is an optional image-generation provider; it does not replace Gemini/NVIDIA prompt generation. Keep `OPENAI_IMAGE_API_KEY` only in your local `.env` (or save it through System Settings, which writes the local `.env`); never put it in `config.yaml` or commit it.
+GPT Image is an optional image-generation provider; it does not replace Gemini/NVIDIA prompt generation. The settings page provides two independently saved profiles: **Wending API** and **Sub2API**. Keep `OPENAI_IMAGE_API_KEY` (Wending) and `SUB2API_IMAGE_API_KEY` (Sub2API) only in your local `.env`; never put either credential in `config.yaml` or commit it.
 
-Set `openai_image.base_url` to the Base URL supplied by your GPT Image provider; values with and without `/v1` are supported. The application always uses the fixed media-task endpoints `/v1/media/generate` and `/v1/media/status`, removing one trailing `/v1` from the configured Base URL before composing them. The example Base URL is intentionally empty, so no live provider is selected silently; the WebUI may show `https://api.lk888.ai` as a hint. The default model is `gpt-image-2`; choose `1K`, `2K`, or `4K` as supported by the provider. In the WebUI, **白底图和场景图来源** and **最终套图来源** are independent selectors, so either route may use Lovart or `openai_image`.
+Each profile stores its own Base URL, model, resolution, and reference-merge preference. Values with and without `/v1` are supported. Wending uses `/v1/media/generate` plus `/v1/media/status` task polling. Sub2API uses one synchronous JSON request to `/v1/images/edits` and accepts either `data[].b64_json` or a safely downloadable `data[].url`. Example Base URLs remain empty so the application never silently selects a live service. The default model is `gpt-image-2`; choose `1K`, `2K`, or `4K` as supported by the selected provider. Legacy flat `openai_image` settings migrate to the Wending profile automatically.
 
-The media-task request accepts up to 14 direct Data URL references. Enable **将多张参考图合并为一张上传** only when you prefer the optional merge: the application builds one temporary local contact sheet, then submits its Data URL without modifying source images. The saved merge switch defaults to off.
+Both profiles accept up to 14 direct Data URL references. Enable the profile's **将多张参考图合并为一张上传** switch only when a gateway restricts multiple references: the application builds one temporary local contact sheet, then submits its Data URL without modifying source images.
 
-The app will submit once: if the response is ambiguous, it does not submit again because it cannot safely determine whether billing occurred. After a task ID is saved, resume uses that task ID rather than creating another task. Polling waits 5 seconds, then 10 seconds after the initial period, within a 600-second local wait window. The saved detail-page count controls how many final GPT Image screens are requested. That target is snapshotted when a product starts, so changing the setting later does not alter an in-progress or resumed product. Completed detail screens are retained and a resume generates only missing screens. Provider failures stop on the selected provider: there is no automatic switch to the other provider.
+The app submits each paid request once. Wending persists the returned task ID and resumes polling it rather than creating another task. Sub2API has no task ID in its synchronous response; if the POST response is lost or unreadable, the application records `submission_unknown` and stops automatic retries, even when the global failed-task policy is set to infinite. This prevents duplicate charges. The saved detail-page count controls how many final GPT Image screens are requested, and completed screens are retained so a resume generates only missing screens. Changing the selected GPT Image profile changes the run fingerprint, so unfinished checkpoints from the other protocol are not reused.
 
-Old synchronous checkpoints without task IDs are not recoverable: they are migrated once by treating the old incomplete work as needing a new task, then persisting the returned task ID for subsequent resumes. The failed-task compensation policy applies to every routing combination, including an all-GPT-Image run. Retryable GPT Image service errors and transient Gemini page-control failures are retried after the current queue, while completed support/detail images are reused.
+Existing Wending task-ID checkpoints remain resumable after upgrading. A Sub2API request whose response is unknown cannot be recovered from the provider history because the synchronous protocol returns no task ID; that checkpoint is deliberately blocked until the user verifies billing and chooses a manual retry. The failed-task compensation policy still applies to conclusive retryable failures, while completed support/detail images are reused.
 
-The **真实图像编辑测试（可能产生一次图片费用）** button is deliberately billable. It submits one real media task; saving configuration, opening the UI, dry-runs, and automated tests do not call the image API.
+The **真实图像编辑测试（可能产生一次图片费用）** button is deliberately billable and uses the currently selected profile. Saving configuration, switching profiles, opening the UI, dry-runs, and automated tests do not call the image API.
 
 ## Prompt-model and prompt-settings workflow
 

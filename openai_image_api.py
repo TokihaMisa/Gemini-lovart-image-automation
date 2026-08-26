@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import http.client
 import io
@@ -31,6 +31,18 @@ from network_retry import PERMANENT_TLS_GUIDANCE, RetryKind, classify_network_er
 
 
 DEFAULT_OPENAI_IMAGE_BASE_URL: Final = ""
+OPENAI_IMAGE_PROFILE_WENDING: Final = "wending"
+OPENAI_IMAGE_PROFILE_SUB2API: Final = "sub2api"
+OPENAI_IMAGE_PROTOCOL_WENDING: Final = "wending_async"
+OPENAI_IMAGE_PROTOCOL_SUB2API: Final = "sub2api_sync"
+OPENAI_IMAGE_PROFILE_PROTOCOLS: Final = {
+    OPENAI_IMAGE_PROFILE_WENDING: OPENAI_IMAGE_PROTOCOL_WENDING,
+    OPENAI_IMAGE_PROFILE_SUB2API: OPENAI_IMAGE_PROTOCOL_SUB2API,
+}
+OPENAI_IMAGE_PROFILE_KEY_ENV_NAMES: Final = {
+    OPENAI_IMAGE_PROFILE_WENDING: "OPENAI_IMAGE_API_KEY",
+    OPENAI_IMAGE_PROFILE_SUB2API: "SUB2API_IMAGE_API_KEY",
+}
 MAX_REFERENCE_IMAGES: Final = 14
 MAX_REFERENCE_BYTES: Final = 10 * 1024 * 1024
 MAX_REFERENCE_TOTAL_BYTES: Final = 30 * 1024 * 1024
@@ -188,6 +200,8 @@ class _OpenAIImageAPIKeyAccess:
 
 @dataclass(frozen=True, slots=True, init=False)
 class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
+    profile: str = OPENAI_IMAGE_PROFILE_WENDING
+    protocol: str = OPENAI_IMAGE_PROTOCOL_WENDING
     base_url: str = DEFAULT_OPENAI_IMAGE_BASE_URL
     model: str = "gpt-image-2"
     resolution: str = "1K"
@@ -199,6 +213,8 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
     def __init__(
         self,
         api_key: str,
+        profile: str = OPENAI_IMAGE_PROFILE_WENDING,
+        protocol: str = OPENAI_IMAGE_PROTOCOL_WENDING,
         base_url: str = DEFAULT_OPENAI_IMAGE_BASE_URL,
         model: str = "gpt-image-2",
         resolution: str = "1K",
@@ -208,6 +224,8 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
         merge_reference_images: bool = False,
     ) -> None:
         object.__setattr__(self, "_api_key", api_key)
+        object.__setattr__(self, "profile", profile)
+        object.__setattr__(self, "protocol", protocol)
         object.__setattr__(self, "base_url", base_url)
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "resolution", resolution)
@@ -225,7 +243,21 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
         cls, config: Mapping[str, object], api_key: str
     ) -> "OpenAIImageAPIConfig":
         section_value = config.get("openai_image", {}) if isinstance(config, Mapping) else {}
-        section = section_value if isinstance(section_value, Mapping) else {}
+        root_section = section_value if isinstance(section_value, Mapping) else {}
+        profile = active_openai_image_profile(config)
+        profiles_value = root_section.get("profiles")
+        if isinstance(profiles_value, Mapping):
+            selected_value = profiles_value.get(profile, {})
+            section = selected_value if isinstance(selected_value, Mapping) else {}
+        else:
+            section = root_section
+        protocol = OPENAI_IMAGE_PROFILE_PROTOCOLS[profile]
+        configured_protocol = str(section.get("protocol") or protocol).strip()
+        if configured_protocol != protocol:
+            raise OpenAIImageAPIError(
+                "invalid_protocol",
+                "GPT Image 配置档案的协议类型无效。",
+            )
         resolved_key = str(api_key or "").strip()
         if not resolved_key:
             raise OpenAIImageAPIError("missing_key", "请先填写 GPT Image API 密钥。")
@@ -244,11 +276,31 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
         )
         return cls(
             api_key=resolved_key,
+            profile=profile,
+            protocol=protocol,
             base_url=base_url,
             model=model,
             resolution=resolution,
             merge_reference_images=merge_reference_images,
         )
+
+
+def active_openai_image_profile(config: Mapping[str, object] | None) -> str:
+    section_value = config.get("openai_image", {}) if isinstance(config, Mapping) else {}
+    section = section_value if isinstance(section_value, Mapping) else {}
+    profile = str(
+        section.get("active_profile") or OPENAI_IMAGE_PROFILE_WENDING
+    ).strip().lower()
+    if profile not in OPENAI_IMAGE_PROFILE_PROTOCOLS:
+        raise OpenAIImageAPIError(
+            "invalid_profile",
+            "GPT Image API 类型必须选择“问鼎 API”或“Sub2API”。",
+        )
+    return profile
+
+
+def openai_image_key_env_name(config: Mapping[str, object] | None) -> str:
+    return OPENAI_IMAGE_PROFILE_KEY_ENV_NAMES[active_openai_image_profile(config)]
 
 
 def normalize_openai_image_base_url(value: object | None) -> str:
@@ -328,6 +380,10 @@ def _media_endpoint(base_url: str, resource: str, *, task_id: str = "") -> str:
     if resource == "status" and task_id:
         return f"{base}/v1/media/status?{urlencode({'task_id': task_id})}"
     raise ValueError("invalid media endpoint")
+
+
+def _images_edits_endpoint(base_url: str) -> str:
+    return f"{_protocol_base_url(base_url)}/v1/images/edits"
 
 
 def _decode_json_response(raw_response: bytes) -> dict[str, Any]:
@@ -612,6 +668,18 @@ class OpenAIImageAPI:
             image_paths,
             merge=bool(self.config.merge_reference_images),
         )
+        if self.config.protocol == OPENAI_IMAGE_PROTOCOL_SUB2API:
+            return self._generate_sync_edit(
+                prompt=prompt,
+                images=images,
+                output_path=output_path,
+                image_size=image_size,
+                status_callback=status_callback,
+                task_callback=task_callback,
+                resume_task=resume_task,
+                display_callback=display_callback,
+                submission_callback=submission_callback,
+            )
         body = _build_create_body(
             self.config.model,
             append_aspect_instruction(prompt, image_size),
@@ -657,6 +725,85 @@ class OpenAIImageAPI:
             output_path,
             status_callback,
             operational_result_url=operational_result_url,
+        )
+
+    def _generate_sync_edit(
+        self,
+        *,
+        prompt: str,
+        images: Sequence[str],
+        output_path: str | Path,
+        image_size: str,
+        status_callback: Callable[[str], None] | None,
+        task_callback: Callable[[ImageTaskSnapshot], None] | None,
+        resume_task: ImageTaskSnapshot | None,
+        display_callback: Callable[[ImageTaskDisplayStatus], None] | None,
+        submission_callback: Callable[[], None] | None,
+    ) -> GeneratedImage:
+        if resume_task is not None:
+            raise OpenAIImageAPIError(
+                "invalid_resume",
+                "Sub2API 同步请求没有可轮询任务 ID，不能恢复异步任务。",
+            )
+        body = _build_sync_edit_body(
+            self.config.model,
+            append_aspect_instruction(prompt, image_size),
+            _provider_image_size(self.config.resolution, image_size),
+            images,
+        )
+        waiting_message = "⏳ GPT Image 同步请求已提交，正在等待平台返回图片"
+        _notify_status(status_callback, waiting_message)
+        if submission_callback is not None:
+            submission_callback()
+        try:
+            payload = self._request_json(
+                _images_edits_endpoint(self.config.base_url),
+                body,
+                "application/json",
+                max_attempts=1,
+            )
+            result = _sync_image_result(payload)
+        except OpenAIImageAPIError as exc:
+            if exc.code in {"authentication", "invalid_request"}:
+                raise
+            raise OpenAIImageAPIError(
+                "submission_unknown",
+                "GPT Image 同步请求已提交但未收到可验证图片；为避免重复扣费，已停止自动重试。",
+            ) from None
+
+        task = ImageTaskSnapshot(
+            task_id="",
+            state="success",
+            is_final=True,
+            task_created_at=time.time(),
+            progress="100",
+            status="completed",
+            status_group="completed",
+            result_type="image",
+        )
+        _notify_task(task_callback, task)
+        download_message = "✅ GPT Image 生成完成，正在安全保存图片"
+        _notify_status(status_callback, download_message)
+        _notify_display(
+            display_callback,
+            task,
+            phase="downloading",
+            message=download_message,
+        )
+        kind, value = result
+        if kind == "b64":
+            target = Path(output_path)
+            atomic_save_validated_image(value, target)
+            return GeneratedImage(
+                local_path=str(target),
+                model=self.config.model,
+                task=task,
+            )
+        completed_task = replace(task, result_url=str(value))
+        return self._download_task_result(
+            completed_task,
+            output_path,
+            status_callback,
         )
 
     def test_edit(
@@ -1128,6 +1275,49 @@ def _build_create_body(model: str, prompt: str, size: str, images: Sequence[str]
     if len(body) > MAX_CREATE_BODY_BYTES:
         raise OpenAIImageAPIError("create_body_too_large", "Image request body exceeds the size limit.")
     return body
+
+
+def _build_sync_edit_body(
+    model: str,
+    prompt: str,
+    size: str,
+    images: Sequence[str],
+) -> bytes:
+    payload = {
+        "model": str(model),
+        "prompt": str(prompt),
+        "images": [{"image_url": str(image)} for image in images],
+        "size": str(size),
+    }
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(body) > MAX_CREATE_BODY_BYTES:
+        raise OpenAIImageAPIError(
+            "create_body_too_large", "Image request body exceeds the size limit."
+        )
+    return body
+
+
+def _sync_image_result(payload: Mapping[str, Any]) -> tuple[str, bytes | str]:
+    data = payload.get("data")
+    if not isinstance(data, list) or not data or not isinstance(data[0], Mapping):
+        raise OpenAIImageAPIError(
+            "invalid_response", "GPT Image API returned no generated image."
+        )
+    first = data[0]
+    encoded = first.get("b64_json")
+    if isinstance(encoded, str) and encoded.strip():
+        try:
+            return "b64", base64.b64decode(encoded.strip(), validate=True)
+        except (ValueError, TypeError):
+            raise OpenAIImageAPIError(
+                "invalid_response", "GPT Image API returned invalid image data."
+            ) from None
+    result_url = first.get("url")
+    if isinstance(result_url, str) and result_url.strip():
+        return "url", result_url.strip()
+    raise OpenAIImageAPIError(
+        "invalid_response", "GPT Image API returned no generated image."
+    )
 
 
 def validate_remote_image_url(url: str) -> _ResolvedResultURL:

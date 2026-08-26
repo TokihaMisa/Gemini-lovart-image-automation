@@ -27,6 +27,7 @@ from openai_image_api import (
     OpenAIImageAPIError,
     _build_create_body,
     _encode_reference_images,
+    _images_edits_endpoint,
     _media_endpoint,
     _protocol_base_url,
     _uses_active_tun_fake_ip_route,
@@ -327,6 +328,75 @@ def test_config_normalizes_defaults_and_provider_values():
         config.model = "another-model"
 
 
+def test_legacy_config_migrates_to_wending_async_profile():
+    config = OpenAIImageAPIConfig.from_config(
+        {
+            "openai_image": {
+                "base_url": "https://legacy.example/v1",
+                "model": "legacy-model",
+                "resolution": "2K",
+                "merge_reference_images": True,
+            }
+        },
+        api_key="legacy-key",
+    )
+
+    assert config.profile == "wending"
+    assert config.protocol == "wending_async"
+    assert config.base_url == "https://legacy.example/v1"
+    assert config.model == "legacy-model"
+    assert config.resolution == "2K"
+    assert config.merge_reference_images is True
+
+
+def test_dual_profile_config_selects_only_active_sub2api_values():
+    config = OpenAIImageAPIConfig.from_config(
+        {
+            "openai_image": {
+                "active_profile": "sub2api",
+                "profiles": {
+                    "wending": {
+                        "protocol": "wending_async",
+                        "base_url": "https://wending.example/v1",
+                        "model": "wending-model",
+                        "resolution": "1K",
+                    },
+                    "sub2api": {
+                        "protocol": "sub2api_sync",
+                        "base_url": "https://sub2.example/v1",
+                        "model": "sub2-model",
+                        "resolution": "4K",
+                        "merge_reference_images": True,
+                    },
+                },
+            }
+        },
+        api_key="selected-key",
+    )
+
+    assert config.profile == "sub2api"
+    assert config.protocol == "sub2api_sync"
+    assert config.base_url == "https://sub2.example/v1"
+    assert config.model == "sub2-model"
+    assert config.resolution == "4K"
+    assert config.merge_reference_images is True
+
+
+def test_dual_profile_config_rejects_unknown_active_profile():
+    with pytest.raises(OpenAIImageAPIError) as ctx:
+        OpenAIImageAPIConfig.from_config(
+            {
+                "openai_image": {
+                    "active_profile": "mystery",
+                    "profiles": {},
+                }
+            },
+            api_key="selected-key",
+        )
+
+    assert ctx.value.code == "invalid_profile"
+
+
 @pytest.mark.parametrize(
     ("base_url", "create_url", "status_url"),
     [
@@ -339,12 +409,24 @@ def test_media_endpoints_strip_exactly_one_trailing_v1(base_url, create_url, sta
     assert _media_endpoint(base_url, "status", task_id="abc-123") == status_url
 
 
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("https://codex.surf", "https://codex.surf/v1/images/edits"),
+        ("https://codex.surf/v1", "https://codex.surf/v1/images/edits"),
+    ],
+)
+def test_sub2api_images_edits_endpoint_accepts_base_url_with_or_without_v1(
+    base_url, expected
+):
+    assert _images_edits_endpoint(base_url) == expected
+
+
 def test_static_backstop_allows_only_the_legacy_config_migration_boundary():
     """Dead protocol helpers and user-facing fallback notices must not return."""
     source = Path("openai_image_api.py").read_text(encoding="utf-8")
     assert "def _request_" + "hapi" not in source.lower()
     assert "def _is_" + "hapi_image_service" not in source.lower()
-    assert "/images/" + "edits" not in source.lower()
     assert "/images/" + "tasks/" not in source.lower()
     assert "sync fallback" not in source.lower()
 
@@ -366,6 +448,28 @@ def test_build_create_body_uses_documented_json_contract():
             "quality": "auto",
             "n": 1,
         },
+    }
+
+
+def test_sub2api_sync_body_uses_documented_images_array_contract():
+    from openai_image_api import _build_sync_edit_body
+
+    encoded_images = [
+        "data:image/png;base64,Zmlyc3Q=",
+        "data:image/jpeg;base64,c2Vjb25k",
+    ]
+    payload = json.loads(
+        _build_sync_edit_body("gpt-image-2", "keep exact", "1024x1536", encoded_images)
+    )
+
+    assert payload == {
+        "model": "gpt-image-2",
+        "prompt": "keep exact",
+        "images": [
+            {"image_url": encoded_images[0]},
+            {"image_url": encoded_images[1]},
+        ],
+        "size": "1024x1536",
     }
 
 
@@ -599,6 +703,87 @@ def test_generate_edit_posts_json_create_body_and_saves_b64_png(build_opener, tm
     with Image.open(tmp_path / "out.png") as output:
         output.verify()
     assert build_opener.return_value.open.call_args.kwargs == {"timeout": 12.5}
+
+
+def test_sub2api_sync_generate_saves_b64_result_without_polling(tmp_path):
+    source = make_png(tmp_path / "source.png")
+    output = tmp_path / "result.png"
+    statuses = []
+    tasks = []
+    submissions = []
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+    )
+    response = {"data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}]}
+
+    with patch.object(client, "_request_json", return_value=response) as request_json, patch.object(
+        client, "_poll_task"
+    ) as poll_task:
+        result = client.generate_edit(
+            "keep exact",
+            [source],
+            output,
+            image_size="2:3",
+            status_callback=statuses.append,
+            task_callback=tasks.append,
+            submission_callback=lambda: submissions.append(True),
+        )
+
+    endpoint, body, content_type = request_json.call_args.args
+    assert endpoint == "https://codex.surf/v1/images/edits"
+    assert content_type == "application/json"
+    assert request_json.call_args.kwargs == {"max_attempts": 1}
+    assert json.loads(body)["images"] == [
+        {"image_url": _encode_reference_images([source], merge=False)[0]}
+    ]
+    assert submissions == [True]
+    assert len(tasks) == 1
+    assert tasks[0].state == "success"
+    assert tasks[0].is_final is True
+    assert tasks[0].task_id == ""
+    assert result.local_path == str(output)
+    assert output.read_bytes() == base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
+    assert any("同步" in status for status in statuses)
+    poll_task.assert_not_called()
+
+
+def test_sub2api_sync_uncertain_response_never_reposts_and_blocks_auto_retry(tmp_path):
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+        max_attempts=99,
+    )
+    source = make_png(tmp_path / "source.png")
+
+    with patch.object(
+        client,
+        "_request_json",
+        side_effect=OpenAIImageAPIError("timeout", "lost response", retryable=True),
+    ) as request_json:
+        with pytest.raises(OpenAIImageAPIError) as ctx:
+            client.generate_edit("prompt", [source], tmp_path / "out.png")
+
+    assert ctx.value.code == "submission_unknown"
+    assert request_json.call_count == 1
+    assert request_json.call_args.kwargs == {"max_attempts": 1}
+
+
+def test_sub2api_sync_rejects_missing_image_result_as_submission_unknown(tmp_path):
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+    )
+    source = make_png(tmp_path / "source.png")
+
+    with patch.object(client, "_request_json", return_value={"data": []}):
+        with pytest.raises(OpenAIImageAPIError) as ctx:
+            client.generate_edit("prompt", [source], tmp_path / "out.png")
+
+    assert ctx.value.code == "submission_unknown"
 
 
 @pytest.mark.parametrize("create_payload", [{"task_id": " t-1 "}, {"data": {"task_id": 42}}])

@@ -1,5 +1,6 @@
+import base64
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from PIL import Image
@@ -62,6 +63,32 @@ def support_request(tmp_path: Path, **overrides):
     }
     values.update(overrides)
     return SupportImageRequest(**values)
+
+
+def test_sub2api_sync_support_completion_is_checkpointed_without_provider_task_id(tmp_path):
+    from image_providers import OpenAIImageProvider, read_support_task_checkpoint
+    from openai_image_api import OpenAIImageAPI, OpenAIImageAPIConfig
+
+    reference = Path(write_valid_png(tmp_path / "generated.png"))
+    api = OpenAIImageAPI(OpenAIImageAPIConfig(
+        api_key="test-key",
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://sub2.example/v1",
+    ))
+    response = {"data": [{"b64_json": base64.b64encode(reference.read_bytes()).decode()}]}
+    provider = OpenAIImageProvider(api)
+
+    with patch.object(api, "_request_json", return_value=response) as request_json:
+        first = provider.generate_support_image(support_request(tmp_path))
+        second = provider.generate_support_image(support_request(tmp_path))
+
+    checkpoint = read_support_task_checkpoint(tmp_path, "white_bg")
+    assert first.succeeded is True
+    assert second.succeeded is True
+    assert checkpoint["state"] == "done"
+    assert checkpoint.get("task_id", "") == ""
+    assert request_json.call_count == 1
 
 
 def single_detail_request(tmp_path: Path, **overrides):
@@ -1529,12 +1556,36 @@ def test_detail_execution_settings_are_explicit_and_never_include_openai_key():
     settings = OpenAIImageProvider(OpenAIImageAPI(config)).detail_execution_settings()
 
     assert settings == {
+        "profile": "wending",
+        "protocol": "wending_async",
         "base_url": "https://images.example",
         "model": "gpt-image-custom",
         "resolution": "4K",
         "merge_reference_images": False,
     }
     assert "top-secret-key" not in json.dumps(settings)
+
+
+def test_detail_execution_settings_distinguish_sub2api_from_wending_for_fingerprints():
+    from image_providers import OpenAIImageProvider
+    from openai_image_api import OpenAIImageAPI, OpenAIImageAPIConfig
+
+    common = {
+        "api_key": "secret",
+        "base_url": "https://same.example/v1",
+        "model": "gpt-image-2",
+        "resolution": "1K",
+    }
+    wending = OpenAIImageProvider(OpenAIImageAPI(OpenAIImageAPIConfig(**common)))
+    sub2api = OpenAIImageProvider(OpenAIImageAPI(OpenAIImageAPIConfig(
+        **common,
+        profile="sub2api",
+        protocol="sub2api_sync",
+    )))
+
+    assert wending.detail_execution_settings()["protocol"] == "wending_async"
+    assert sub2api.detail_execution_settings()["protocol"] == "sub2api_sync"
+    assert wending.detail_execution_settings() != sub2api.detail_execution_settings()
 
 
 def test_lovart_detail_execution_settings_match_selected_tool_and_mode():

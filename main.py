@@ -72,6 +72,7 @@ from openai_image_api import (
     OpenAIImageAPI,
     OpenAIImageAPIConfig,
     append_aspect_instruction,
+    openai_image_key_env_name,
 )
 from prompt_settings import get_prompt_settings, normalize_prompt_settings
 from utils import (
@@ -823,7 +824,7 @@ def _build_image_provider_registry(config, logger, lovart=None):
         return LovartImageProvider(bot, logger=logger)
 
     def build_openai_provider():
-        api_key = str(os.environ.get("OPENAI_IMAGE_API_KEY") or "").strip()
+        api_key = str(os.environ.get(openai_image_key_env_name(config)) or "").strip()
         api_config = OpenAIImageAPIConfig.from_config(config, api_key=api_key)
         return OpenAIImageProvider(OpenAIImageAPI(api_config, logger=logger), logger=logger)
 

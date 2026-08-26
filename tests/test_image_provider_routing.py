@@ -1340,6 +1340,43 @@ def test_building_all_openai_registry_does_not_construct_lovart():
     lovart_bot.assert_not_called()
 
 
+def test_openai_registry_reads_only_selected_profile_key():
+    from main import _build_image_provider_registry
+
+    config = {
+        "openai_image": {
+            "active_profile": "sub2api",
+            "profiles": {
+                "wending": {
+                    "protocol": "wending_async",
+                    "base_url": "https://wending.example/v1",
+                },
+                "sub2api": {
+                    "protocol": "sub2api_sync",
+                    "base_url": "https://sub2.example/v1",
+                },
+            },
+        }
+    }
+    observed = []
+
+    def read_env(name, default=None):
+        observed.append(name)
+        values = {
+            "OPENAI_IMAGE_API_KEY": "must-not-be-read",
+            "SUB2API_IMAGE_API_KEY": "selected-key",
+        }
+        return values.get(name, default)
+
+    with patch("main.os.environ.get", side_effect=read_env):
+        registry = _build_image_provider_registry(config, Mock())
+        provider = registry.get("openai_image")
+
+    assert provider.api.config.profile == "sub2api"
+    assert provider.api.config.api_key == "selected-key"
+    assert observed == ["SUB2API_IMAGE_API_KEY"]
+
+
 def test_openai_registry_ignores_legacy_yaml_key_and_reports_missing_env_key(capsys):
     from main import _build_image_provider_registry
     from openai_image_api import OpenAIImageAPIError

@@ -128,6 +128,40 @@ def test_paid_test_sanitizes_terminal_error_and_button_can_be_reenabled(api_cls)
     assert enabled["interactive"] is True
 
 
+@patch("webui.OpenAIImageAPI")
+def test_selected_paid_test_uses_sub2api_profile_and_sync_protocol(api_cls):
+    api_cls.return_value.test_edit.return_value = GeneratedImage(
+        local_path="output/.api-tests/sub2api-test.png",
+        model="gpt-image-2",
+        task=_task("", state="success", is_final=True, progress="100%"),
+    )
+
+    updates = list(webui.test_selected_openai_image_edit(
+        "sub2api",
+        "wending-key",
+        "https://wending.example/v1",
+        "wending-model",
+        "1K",
+        False,
+        False,
+        "sub2-key",
+        "https://sub2.example/v1",
+        "sub2-model",
+        "2K",
+        True,
+        False,
+    ))
+
+    selected = api_cls.call_args.args[0]
+    assert selected.profile == "sub2api"
+    assert selected.protocol == "sub2api_sync"
+    assert selected.base_url == "https://sub2.example/v1"
+    assert selected.model == "sub2-model"
+    assert selected.api_key == "sub2-key"
+    assert "测试成功" in updates[-1]
+    assert "异步任务已提交" not in "\n".join(updates)
+
+
 def _run_dashboard_frames(lines, output_dir):
     child = Mock()
     child.stdout = io.StringIO("".join(lines))
