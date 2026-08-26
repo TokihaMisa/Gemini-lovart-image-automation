@@ -1511,6 +1511,37 @@ class WebUIModelSettingsTests(unittest.TestCase):
         popen.assert_not_called()
 
     @patch("webui.subprocess.Popen")
+    def test_run_process_rejects_blank_selected_sub2api_url_before_start(self, popen):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            env_path = Path(tmp) / ".env"
+            config_path.write_text(
+                "gemini_api:\n  model: gemini-model\n"
+                "nvidia_api:\n  model: nvidia-model\n",
+                encoding="utf-8",
+            )
+            env_path.write_text(
+                "SUB2API_IMAGE_API_KEY=sub2-saved\n",
+                encoding="utf-8",
+            )
+
+            output = list(run_process(
+                None, "output", "gemini_api", "gemini-model", "unlimited", "auto",
+                "https://gemini.test/v1beta", "https://nvidia.test/v1",
+                "", "", "", "",
+                "", "https://wending.example/v1", "gpt-image-2", "1K",
+                "openai_image", "openai_image", False, False,
+                active_openai_image_profile="sub2api",
+                sub2api_image_key="",
+                sub2api_image_base_url="",
+                config_path=config_path,
+                env_path=env_path,
+            ))
+
+        self.assertTrue(any("API 地址" in frame for frame in output))
+        popen.assert_not_called()
+
+    @patch("webui.subprocess.Popen")
     @patch("webui.save_config")
     @patch("webui.load_config")
     @patch("webui.save_env")

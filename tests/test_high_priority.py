@@ -101,15 +101,15 @@ class HighPriorityBehaviorTests(unittest.TestCase):
         self.assertIn("5 seconds, then 10 seconds", readme)
         self.assertIn("600-second", readme)
         self.assertIn("only in your local `.env`", readme)
-        self.assertIn("without task IDs", readme)
-        self.assertIn("not recoverable", readme)
-        self.assertIn("migrated once", readme)
+        self.assertIn("submission_unknown", readme)
+        self.assertIn("stops automatic retries", readme)
         self.assertIn("OPENAI_IMAGE_API_KEY=your_openai_image_api_key", env)
+        self.assertIn("SUB2API_IMAGE_API_KEY=your_sub2api_image_api_key", env)
+        self.assertIn("`/v1/images/edits`", readme)
 
         forbidden = (
             "hapi",
             "openai-compatible",
-            "/images/" + "edits",
             "async_" + "edits",
             "sync fallback",
         )
@@ -117,6 +117,7 @@ class HighPriorityBehaviorTests(unittest.TestCase):
         webui_source = Path("webui.py").read_text(encoding="utf-8")
         self.assertIn("`/v1/media/generate`", overview)
         self.assertIn("`/v1/media/status`", overview)
+        self.assertIn("`/v1/images/edits`", overview)
         self.assertIn("任务 ID", overview)
         self.assertIn("GPT Image 媒体任务", webui_source)
         for path, source in (

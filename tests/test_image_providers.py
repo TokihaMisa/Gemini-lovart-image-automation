@@ -91,6 +91,110 @@ def test_sub2api_sync_support_completion_is_checkpointed_without_provider_task_i
     assert request_json.call_count == 1
 
 
+def test_sub2api_invalid_saved_image_blocks_resume_without_second_paid_post(tmp_path):
+    from image_providers import OpenAIImageProvider
+    from openai_image_api import OpenAIImageAPI, OpenAIImageAPIConfig
+
+    api = OpenAIImageAPI(OpenAIImageAPIConfig(
+        api_key="test-key",
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://sub2.example/v1",
+    ))
+    response = {"data": [{"b64_json": base64.b64encode(b"not-an-image").decode()}]}
+    provider = OpenAIImageProvider(api)
+
+    with patch.object(api, "_request_json", return_value=response) as request_json:
+        first = provider.generate_support_image(support_request(tmp_path))
+        second = provider.generate_support_image(support_request(tmp_path))
+
+    assert first.succeeded is False
+    assert first.raw_result == {"error_code": "submission_unknown"}
+    assert second.succeeded is False
+    assert second.raw_result == {"error_code": "submission_unknown"}
+    assert request_json.call_count == 1
+
+
+class CrashAfterSavedSyncAPI:
+    def __init__(self):
+        from types import SimpleNamespace
+        self.config = SimpleNamespace(
+            profile="sub2api",
+            protocol="sub2api_sync",
+            base_url="https://sub2.example/v1",
+            model="gpt-image-2",
+            resolution="1K",
+            merge_reference_images=False,
+            api_key="test-key",
+        )
+
+    def generate_edit(self, **kwargs):
+        kwargs["submission_callback"]()
+        write_valid_png(Path(kwargs["output_path"]))
+        raise KeyboardInterrupt("crash after durable image save")
+
+
+@pytest.mark.parametrize("kind", ["support", "detail"])
+def test_sub2api_resume_recovers_durable_image_left_after_post_crash_without_repost(
+    tmp_path, kind
+):
+    from image_providers import OpenAIImageProvider
+
+    with pytest.raises(KeyboardInterrupt):
+        provider = OpenAIImageProvider(CrashAfterSavedSyncAPI())
+        if kind == "support":
+            provider.generate_support_image(support_request(tmp_path))
+        else:
+            provider.generate_detail_set(single_detail_request(tmp_path))
+
+    replacement = CheckpointingOpenAIAPI(
+        (completed_image_task(),), base_url="https://sub2.example/v1"
+    )
+    resumed = OpenAIImageProvider(replacement)
+    result = (
+        resumed.generate_support_image(support_request(tmp_path))
+        if kind == "support"
+        else resumed.generate_detail_set(single_detail_request(tmp_path))
+    )
+
+    assert result.succeeded is True
+    assert replacement.create_posts == 0
+
+
+class ConclusiveSyncFailureAPI(CrashAfterSavedSyncAPI):
+    def generate_edit(self, **kwargs):
+        from openai_image_api import OpenAIImageAPIError
+
+        kwargs["submission_callback"]()
+        raise OpenAIImageAPIError(
+            "authentication", "GPT Image API authentication failed (HTTP 401).", 401
+        )
+
+
+@pytest.mark.parametrize("kind", ["support", "detail"])
+def test_sub2api_conclusive_auth_failure_can_retry_after_key_correction(tmp_path, kind):
+    from image_providers import OpenAIImageProvider
+
+    failed_provider = OpenAIImageProvider(ConclusiveSyncFailureAPI())
+    failed = (
+        failed_provider.generate_support_image(support_request(tmp_path))
+        if kind == "support"
+        else failed_provider.generate_detail_set(single_detail_request(tmp_path))
+    )
+    assert failed.succeeded is False
+    assert failed.raw_result == {"error_code": "authentication"}
+
+    corrected = CheckpointingOpenAIAPI((completed_image_task(),))
+    retried = OpenAIImageProvider(corrected)
+    result = (
+        retried.generate_support_image(support_request(tmp_path))
+        if kind == "support"
+        else retried.generate_detail_set(single_detail_request(tmp_path))
+    )
+    assert result.succeeded is True
+    assert corrected.create_posts == 1
+
+
 def single_detail_request(tmp_path: Path, **overrides):
     from image_providers import DetailSetRequest
 
@@ -1556,8 +1660,6 @@ def test_detail_execution_settings_are_explicit_and_never_include_openai_key():
     settings = OpenAIImageProvider(OpenAIImageAPI(config)).detail_execution_settings()
 
     assert settings == {
-        "profile": "wending",
-        "protocol": "wending_async",
         "base_url": "https://images.example",
         "model": "gpt-image-custom",
         "resolution": "4K",
@@ -1583,9 +1685,41 @@ def test_detail_execution_settings_distinguish_sub2api_from_wending_for_fingerpr
         protocol="sub2api_sync",
     )))
 
-    assert wending.detail_execution_settings()["protocol"] == "wending_async"
+    assert "protocol" not in wending.detail_execution_settings()
     assert sub2api.detail_execution_settings()["protocol"] == "sub2api_sync"
     assert wending.detail_execution_settings() != sub2api.detail_execution_settings()
+
+
+def test_profiled_wending_preserves_legacy_execution_fingerprint_shape():
+    from image_providers import OpenAIImageProvider
+    from openai_image_api import OpenAIImageAPI, OpenAIImageAPIConfig
+
+    legacy = OpenAIImageAPIConfig.from_config(
+        {"openai_image": {
+            "base_url": "https://wending.example/v1",
+            "model": "gpt-image-2",
+            "resolution": "1K",
+        }},
+        api_key="key",
+    )
+    profiled = OpenAIImageAPIConfig.from_config(
+        {"openai_image": {
+            "active_profile": "wending",
+            "profiles": {"wending": {
+                "protocol": "wending_async",
+                "base_url": "https://wending.example/v1",
+                "model": "gpt-image-2",
+                "resolution": "1K",
+            }},
+        }},
+        api_key="key",
+    )
+
+    legacy_settings = OpenAIImageProvider(OpenAIImageAPI(legacy)).detail_execution_settings()
+    profiled_settings = OpenAIImageProvider(OpenAIImageAPI(profiled)).detail_execution_settings()
+    assert profiled_settings == legacy_settings
+    assert "profile" not in profiled_settings
+    assert "protocol" not in profiled_settings
 
 
 def test_lovart_detail_execution_settings_match_selected_tool_and_mode():

@@ -739,10 +739,7 @@ def test_sub2api_sync_generate_saves_b64_result_without_polling(tmp_path):
         {"image_url": _encode_reference_images([source], merge=False)[0]}
     ]
     assert submissions == [True]
-    assert len(tasks) == 1
-    assert tasks[0].state == "success"
-    assert tasks[0].is_final is True
-    assert tasks[0].task_id == ""
+    assert tasks == []
     assert result.local_path == str(output)
     assert output.read_bytes() == base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
     assert any("同步" in status for status in statuses)
@@ -784,6 +781,29 @@ def test_sub2api_sync_rejects_missing_image_result_as_submission_unknown(tmp_pat
             client.generate_edit("prompt", [source], tmp_path / "out.png")
 
     assert ctx.value.code == "submission_unknown"
+
+
+def test_sub2api_sync_does_not_emit_success_checkpoint_before_atomic_save(tmp_path):
+    source = make_png(tmp_path / "source.png")
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+    )
+    callbacks = []
+    response = {"data": [{"b64_json": base64.b64encode(b"not-an-image").decode()}]}
+
+    with patch.object(client, "_request_json", return_value=response):
+        with pytest.raises(OpenAIImageAPIError) as ctx:
+            client.generate_edit(
+                "prompt",
+                [source],
+                tmp_path / "out.png",
+                task_callback=callbacks.append,
+            )
+
+    assert ctx.value.code == "invalid_image"
+    assert callbacks == []
 
 
 @pytest.mark.parametrize("create_payload", [{"task_id": " t-1 "}, {"data": {"task_id": 42}}])
@@ -1803,7 +1823,7 @@ def test_generate_edit_uses_redirect_rejecting_transport_for_authenticated_post(
 def test_generate_edit_does_not_retry_paid_post_for_429_or_401(build_opener, tmp_path):
     """Fails if an HTTP error can automatically resubmit a paid synchronous edit."""
     source = make_png(tmp_path / "source.png")
-    for status, expected_code in ((429, "submission_unknown"), (401, "submission_unknown")):
+    for status, expected_code in ((429, "submission_unknown"), (401, "authentication")):
         build_opener.return_value.open.reset_mock()
         build_opener.return_value.open.side_effect = HTTPError(
             "https://gateway.test/v1/images/edits",
@@ -1813,12 +1833,18 @@ def test_generate_edit_does_not_retry_paid_post_for_429_or_401(build_opener, tmp
             None,
         )
         with pytest.raises(OpenAIImageAPIError) as ctx:
-            make_client(base_url="https://gateway.test/v1").generate_edit(
+            make_client(
+                profile="sub2api",
+                protocol="sub2api_sync",
+                base_url="https://gateway.test/v1",
+            ).generate_edit(
                 "prompt", [source], tmp_path / f"out-{status}.png"
             )
 
         assert ctx.value.code == expected_code
         assert build_opener.return_value.open.call_count == 1
+        request = build_opener.return_value.open.call_args.args[0]
+        assert request.full_url == "https://gateway.test/v1/images/edits"
 
 
 @pytest.mark.parametrize(

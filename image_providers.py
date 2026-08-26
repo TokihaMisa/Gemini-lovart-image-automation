@@ -272,11 +272,7 @@ class OpenAIImageProvider:
     def detail_execution_settings(self) -> dict[str, object]:
         """Return only non-secret values that alter an Images edit request."""
         config = getattr(self.api, "config", None)
-        return {
-            "profile": str(getattr(config, "profile", "wending") or "wending"),
-            "protocol": str(
-                getattr(config, "protocol", "wending_async") or "wending_async"
-            ),
+        settings = {
             "base_url": _protocol_base_url(
                 getattr(config, "base_url", None)
             ),
@@ -286,21 +282,53 @@ class OpenAIImageProvider:
                 getattr(config, "merge_reference_images", False)
             ),
         }
+        protocol = str(
+            getattr(config, "protocol", "wending_async") or "wending_async"
+        )
+        if protocol != "wending_async":
+            settings = {
+                "profile": str(getattr(config, "profile", "sub2api") or "sub2api"),
+                "protocol": protocol,
+                **settings,
+            }
+        return settings
 
     def generate_support_image(self, request: SupportImageRequest) -> ImageProviderResult:
         output_path = request.product_dir / "gpt_image" / "support" / f"{request.step_name}.png"
         checkpoint = read_support_task_checkpoint(request.product_dir, request.step_name)
+        identity = _support_request_identity(self.api, request)
         if (
             request.resume
             and _is_submission_unknown_checkpoint(checkpoint)
         ):
+            if (
+                _checkpoint_matches_identity(checkpoint, identity)
+                and is_valid_image_file(output_path)
+            ):
+                attempts = max(1, _checkpoint_attempt_value(checkpoint))
+                record_support_task_checkpoint(
+                    request.product_dir,
+                    request.step_name,
+                    {
+                        **identity,
+                        "state": "done",
+                        "local_path": str(output_path),
+                        "error": "",
+                        "attempts": attempts,
+                    },
+                )
+                return ImageProviderResult(
+                    succeeded=True,
+                    local_paths=(str(output_path),),
+                    used_model=str(identity["model"]),
+                    completed_count=1,
+                )
             blocked_code = str(checkpoint.get("error_code") or "submission_unknown")
             return ImageProviderResult(
                 succeeded=False,
                 error=str(checkpoint.get("error") or ""),
                 raw_result={"error_code": blocked_code},
             )
-        identity = _support_request_identity(self.api, request)
         identity_matches = _checkpoint_matches_identity(checkpoint, identity)
         saved_task = (
             _task_snapshot_from_checkpoint(checkpoint)
@@ -406,9 +434,26 @@ class OpenAIImageProvider:
             current_checkpoint = read_support_task_checkpoint(
                 request.product_dir, request.step_name
             )
-            if _is_submission_unknown_checkpoint(current_checkpoint):
+            conclusive_rejection = error_code in {"authentication", "invalid_request"}
+            if (
+                _is_submission_unknown_checkpoint(current_checkpoint)
+                and not conclusive_rejection
+            ):
                 error_code = "submission_unknown"
-            if error_code in {"ambiguous_submission", "submission_unknown"}:
+            if conclusive_rejection:
+                record_support_task_checkpoint(
+                    request.product_dir,
+                    request.step_name,
+                    {
+                        **identity,
+                        "state": "failed",
+                        "local_path": "",
+                        "error": safe_error,
+                        "error_code": error_code,
+                        "attempts": attempts,
+                    },
+                )
+            elif error_code in {"ambiguous_submission", "submission_unknown"}:
                 stored_code = error_code
                 record_support_task_checkpoint(
                     request.product_dir,
@@ -516,10 +561,32 @@ class OpenAIImageProvider:
                 continue
             output_path = request.product_dir / "gpt_image" / "detail" / f"{screen.index:02d}.png"
             checkpoint = _read_detail_checkpoint(request.product_dir, screen.index)
+            identity = {
+                "input_fingerprint": request.input_fingerprint,
+                "prompt_hash": prompt_hashes[screen.index],
+                **request_settings,
+            }
             if (
                 request.resume
                 and _is_submission_unknown_checkpoint(checkpoint)
             ):
+                if (
+                    _checkpoint_matches_identity(checkpoint, identity)
+                    and is_valid_image_file(output_path)
+                ):
+                    attempts = max(1, _checkpoint_attempt_value(checkpoint))
+                    record_detail_checkpoint(
+                        request.product_dir,
+                        screen.index,
+                        "done",
+                        local_path=str(output_path),
+                        attempts=attempts,
+                        input_fingerprint=request.input_fingerprint,
+                        prompt_hash=prompt_hashes[screen.index],
+                        request_settings=request_settings,
+                    )
+                    completed.add(screen.index)
+                    continue
                 failed.append(screen.index)
                 last_error_code = str(
                     checkpoint.get("error_code") or "submission_unknown"
@@ -531,11 +598,6 @@ class OpenAIImageProvider:
                     else f"screen {screen.index}: submission result unknown"
                 )
                 break
-            identity = {
-                "input_fingerprint": request.input_fingerprint,
-                "prompt_hash": prompt_hashes[screen.index],
-                **request_settings,
-            }
             identity_matches = _checkpoint_matches_identity(checkpoint, identity)
             saved_task = (
                 _task_snapshot_from_checkpoint(checkpoint)
@@ -638,9 +700,28 @@ class OpenAIImageProvider:
                 current_checkpoint = _read_detail_checkpoint(
                     request.product_dir, screen.index
                 )
-                if _is_submission_unknown_checkpoint(current_checkpoint):
+                conclusive_rejection = last_error_code in {
+                    "authentication",
+                    "invalid_request",
+                }
+                if (
+                    _is_submission_unknown_checkpoint(current_checkpoint)
+                    and not conclusive_rejection
+                ):
                     last_error_code = "submission_unknown"
-                if last_error_code in {"ambiguous_submission", "submission_unknown"}:
+                if conclusive_rejection:
+                    record_detail_checkpoint(
+                        request.product_dir,
+                        screen.index,
+                        "failed",
+                        error=safe_error,
+                        error_code=last_error_code,
+                        attempts=attempts,
+                        input_fingerprint=request.input_fingerprint,
+                        prompt_hash=prompt_hashes[screen.index],
+                        request_settings=request_settings,
+                    )
+                elif last_error_code in {"ambiguous_submission", "submission_unknown"}:
                     stored_code = last_error_code
                     record_detail_checkpoint(
                         request.product_dir,

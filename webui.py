@@ -1258,6 +1258,16 @@ def openai_image_profile_values(openai_image_config) -> dict[str, object]:
     }
 
 
+def _validate_selected_openai_profile_url(
+    active_profile,
+    wending_base_url,
+    sub2api_base_url,
+) -> None:
+    profile = str(active_profile or "wending").strip().lower()
+    selected = sub2api_base_url if profile == "sub2api" else wending_base_url
+    normalize_openai_image_base_url(selected)
+
+
 def persist_image_routing_settings(config, support_provider, detail_provider):
     updated = deepcopy(config)
     openai_image = updated.get("openai_image")
@@ -1308,6 +1318,16 @@ def save_api_settings(
         updated = persist_provider_settings(
             current, gemini_base_url, gemini_model, nvidia_base_url, nvidia_model
         )
+        uses_openai_image = "openai_image" in {
+            normalize_image_provider(support_provider),
+            normalize_image_provider(detail_provider),
+        }
+        if uses_openai_image and active_openai_image_profile is not None:
+            _validate_selected_openai_profile_url(
+                active_openai_image_profile,
+                openai_image_base_url,
+                sub2api_image_base_url,
+            )
         if active_openai_image_profile is None:
             updated = persist_openai_image_settings(
                 updated,
@@ -1730,6 +1750,12 @@ def run_process(
                 raise OpenAIImageAPIError(
                     "missing_key",
                     "请先填写或保存当前所选 GPT Image API 的密钥。",
+                )
+            if active_openai_image_profile is not None:
+                _validate_selected_openai_profile_url(
+                    active_openai_image_profile,
+                    openai_image_base_url,
+                    sub2api_image_base_url,
                 )
         if active_openai_image_profile is None:
             config = persist_openai_image_settings(

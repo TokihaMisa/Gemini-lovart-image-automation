@@ -781,7 +781,6 @@ class OpenAIImageAPI:
             status_group="completed",
             result_type="image",
         )
-        _notify_task(task_callback, task)
         download_message = "✅ GPT Image 生成完成，正在安全保存图片"
         _notify_status(status_callback, download_message)
         _notify_display(
