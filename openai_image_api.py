@@ -35,6 +35,7 @@ OPENAI_IMAGE_PROFILE_WENDING: Final = "wending"
 OPENAI_IMAGE_PROFILE_SUB2API: Final = "sub2api"
 OPENAI_IMAGE_PROTOCOL_WENDING: Final = "wending_async"
 OPENAI_IMAGE_PROTOCOL_SUB2API: Final = "sub2api_sync"
+OPENAI_IMAGE_USER_AGENT: Final = "Lovart-Image-Automation/1.3"
 OPENAI_IMAGE_PROFILE_PROTOCOLS: Final = {
     OPENAI_IMAGE_PROFILE_WENDING: OPENAI_IMAGE_PROTOCOL_WENDING,
     OPENAI_IMAGE_PROFILE_SUB2API: OPENAI_IMAGE_PROTOCOL_SUB2API,
@@ -850,6 +851,7 @@ class OpenAIImageAPI:
         request.add_header("Accept", "application/json")
         request.add_header("Authorization", f"Bearer {self.config.api_key}")
         request.add_header("Content-Type", content_type)
+        request.add_header("User-Agent", OPENAI_IMAGE_USER_AGENT)
         opener = urllib.request.build_opener(_RejectRedirectHandler())
         raw_response = self._request_bytes(
             request,

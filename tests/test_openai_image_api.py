@@ -705,6 +705,27 @@ def test_generate_edit_posts_json_create_body_and_saves_b64_png(build_opener, tm
     assert build_opener.return_value.open.call_args.kwargs == {"timeout": 12.5}
 
 
+@patch("openai_image_api.urllib.request.build_opener")
+def test_authenticated_image_post_uses_application_user_agent(build_opener, tmp_path):
+    """Fails if urllib's Cloudflare-blocked default browser signature is sent."""
+    build_opener.return_value.open.return_value = FakeResponse(
+        json.dumps({"data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}]}).encode()
+    )
+
+    make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+    ).generate_edit(
+        "prompt",
+        [make_png(tmp_path / "source.png")],
+        tmp_path / "out.png",
+    )
+
+    request = build_opener.return_value.open.call_args.args[0]
+    assert request.get_header("User-agent") == "Lovart-Image-Automation/1.3"
+
+
 def test_sub2api_sync_generate_saves_b64_result_without_polling(tmp_path):
     source = make_png(tmp_path / "source.png")
     output = tmp_path / "result.png"
