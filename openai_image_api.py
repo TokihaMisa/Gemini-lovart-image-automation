@@ -215,6 +215,8 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
     max_attempts: int = 4
     retry_delays: tuple[float, ...] = (3.0, 6.0, 12.0)
     merge_reference_images: bool = False
+    max_parallel_tasks: int = 2
+    task_recheck_interval: float = 10.0
 
     def __init__(
         self,
@@ -228,6 +230,8 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
         max_attempts: int = 4,
         retry_delays: tuple[float, ...] = (3.0, 6.0, 12.0),
         merge_reference_images: bool = False,
+        max_parallel_tasks: int = 2,
+        task_recheck_interval: float = 10.0,
     ) -> None:
         object.__setattr__(self, "_api_key", api_key)
         object.__setattr__(self, "profile", profile)
@@ -242,6 +246,10 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
             self,
             "merge_reference_images",
             bool(merge_reference_images),
+        )
+        object.__setattr__(self, "max_parallel_tasks", int(max_parallel_tasks))
+        object.__setattr__(
+            self, "task_recheck_interval", float(task_recheck_interval)
         )
 
     @classmethod
@@ -280,6 +288,19 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
             section.get("merge_reference_images"),
             default=False,
         )
+        max_parallel_tasks = _config_number(
+            root_section.get("max_parallel_tasks", 2),
+            name="GPT Image 最大并行任务数",
+            minimum=1,
+            maximum=8,
+            integer=True,
+        )
+        task_recheck_interval = _config_number(
+            root_section.get("task_recheck_interval", 10),
+            name="GPT Image 任务复查间隔",
+            minimum=3,
+            maximum=60,
+        )
         return cls(
             api_key=resolved_key,
             profile=profile,
@@ -288,6 +309,8 @@ class OpenAIImageAPIConfig(_OpenAIImageAPIKeyAccess):
             model=model,
             resolution=resolution,
             merge_reference_images=merge_reference_images,
+            max_parallel_tasks=int(max_parallel_tasks),
+            task_recheck_interval=task_recheck_interval,
         )
 
 
@@ -372,6 +395,27 @@ def _config_boolean(value: object, *, default: bool) -> bool:
     if normalized in {"false", "0", "no", "off"}:
         return False
     return bool(default)
+
+
+def _config_number(
+    value: object,
+    *,
+    name: str,
+    minimum: float,
+    maximum: float,
+    integer: bool = False,
+) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise OpenAIImageAPIError("invalid_config", f"{name}必须是数字。") from None
+    if integer and not number.is_integer():
+        raise OpenAIImageAPIError("invalid_config", f"{name}必须是整数。")
+    if not minimum <= number <= maximum:
+        raise OpenAIImageAPIError(
+            "invalid_config", f"{name}必须在 {minimum:g} 到 {maximum:g} 之间。"
+        )
+    return number
 
 
 def _protocol_base_url(base_url: str) -> str:
@@ -681,6 +725,7 @@ class OpenAIImageAPI:
         resume_task: ImageTaskSnapshot | None = None,
         display_callback: Callable[[ImageTaskDisplayStatus], None] | None = None,
         submission_callback: Callable[[], None] | None = None,
+        defer_running: bool = False,
     ) -> GeneratedImage:
         images = _encode_reference_images(
             image_paths,
@@ -697,6 +742,7 @@ class OpenAIImageAPI:
                 resume_task=resume_task,
                 display_callback=display_callback,
                 submission_callback=submission_callback,
+                defer_running=defer_running,
             )
         body = _build_create_body(
             self.config.model,
@@ -757,6 +803,7 @@ class OpenAIImageAPI:
         resume_task: ImageTaskSnapshot | None,
         display_callback: Callable[[ImageTaskDisplayStatus], None] | None,
         submission_callback: Callable[[], None] | None,
+        defer_running: bool,
     ) -> GeneratedImage:
         body = _build_sync_edit_body(
             self.config.model,
@@ -813,6 +860,7 @@ class OpenAIImageAPI:
             task_callback,
             display_callback,
             initial_delay=initial_poll_delay,
+            defer_running=defer_running,
         )
         return self._download_task_result(
             task,
@@ -1208,6 +1256,7 @@ class OpenAIImageAPI:
         display_callback: Callable[[ImageTaskDisplayStatus], None] | None,
         *,
         initial_delay: float = 0.0,
+        defer_running: bool = False,
     ) -> tuple[ImageTaskSnapshot, str]:
         started_at = time.monotonic()
         deadline = started_at + TASK_WAIT_LIMIT_SECONDS
@@ -1267,6 +1316,8 @@ class OpenAIImageAPI:
                 elapsed_seconds=int(elapsed),
                 message=progress_message,
             )
+            if defer_running:
+                raise ImageTaskStillRunning(task)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ImageTaskStillRunning(task)

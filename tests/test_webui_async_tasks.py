@@ -419,6 +419,7 @@ def test_product_card_reads_still_running_snapshot_as_resumable_not_failed(tmp_p
                 "openai_image_still_running": True,
                 "openai_image_active_stage": "detail_screen_4",
                 "openai_image_task_suffix": "12345678",
+                "openai_image_next_poll_at": 105.0,
                 "failed": False,
             },
             ensure_ascii=False,
@@ -426,16 +427,18 @@ def test_product_card_reads_still_running_snapshot_as_resumable_not_failed(tmp_p
         encoding="utf-8",
     )
 
-    frames = _run_dashboard_frames(
-        ['[UI_PRODUCT] {"id":"SKU-1","name":"测试商品","image":""}\n'],
-        tmp_path,
-    )
+    with patch("webui.time.time", return_value=100.0):
+        frames = _run_dashboard_frames(
+            ['[UI_PRODUCT] {"id":"SKU-1","name":"测试商品","image":""}\n'],
+            tmp_path,
+        )
     final_card = next(
-        frame for frame in reversed(frames) if "任务仍在平台运行，下次将继续查询" in frame
+        frame for frame in reversed(frames) if "5 秒后自动复查" in frame
     )
 
     assert "详情图 4" in final_card
     assert "任务 …12345678" in final_card
+    assert "下次将继续查询" not in final_card
     assert "❌" not in final_card
     assert "pulse-glow 2s infinite" not in final_card
 

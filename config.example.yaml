@@ -57,6 +57,10 @@ nvidia_api:
 openai_image:
   # Select one saved profile. Legacy flat settings migrate to wending automatically.
   active_profile: wending
+  # Run at most this many remote image tasks while local work stays single-threaded.
+  max_parallel_tasks: 2
+  # Revisit persisted running task IDs during the same run.
+  task_recheck_interval: 10
   profiles:
     wending:
       protocol: wending_async

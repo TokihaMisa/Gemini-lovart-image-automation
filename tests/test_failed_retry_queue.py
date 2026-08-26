@@ -174,6 +174,156 @@ class FailedRetryQueueTests(unittest.TestCase):
         self.assertEqual(calls, [1, 1])
         self.assertEqual(result, (1, 0, 0, 0))
 
+    def test_sub2api_scheduler_rechecks_live_tasks_and_caps_active_products_at_two(self):
+        """Catches live tasks being abandoned until the next full application run."""
+        products = [_Product("SKU-A"), _Product("SKU-B"), _Product("SKU-C")]
+        remaining = {
+            "SKU-A": [
+                "openai_image_task_still_running",
+                "openai_image_task_still_running",
+                "success",
+            ],
+            "SKU-B": ["openai_image_task_still_running", "success"],
+            "SKU-C": ["success"],
+        }
+        calls = []
+        resume_flags = []
+        clock = {"now": 0.0}
+
+        def process_once(current, _gemini, _lovart, _logger, run_dir, **_kwargs):
+            calls.append([product.id for product in current])
+            resume_flags.append(bool(_kwargs.get("resume")))
+            rows = []
+            for product in current:
+                status = remaining[product.id].pop(0)
+                rows.append({
+                    "product_id": product.id,
+                    "status": status,
+                    "failure_code": (
+                        "task_still_running"
+                        if status == "openai_image_task_still_running"
+                        else ""
+                    ),
+                    "error": "",
+                })
+                if product.id == "SKU-B" and status == "success":
+                    clock["now"] = 25.0
+            write_run_summary(run_dir, rows)
+            return 0, 0, 0, 0
+
+        provider = SimpleNamespace(api=SimpleNamespace(config=SimpleNamespace(
+            profile="sub2api",
+            max_parallel_tasks=2,
+            task_recheck_interval=10,
+        )))
+        registry = SimpleNamespace(get=lambda _name: provider)
+        routing = SimpleNamespace(
+            support_provider="openai_image",
+            detail_provider="openai_image",
+            detail_page_count=4,
+        )
+        policy = FailedRetryPolicy(mode=RETRY_MODE_OFF, rounds=1, delay=0)
+
+        def advance(delay):
+            clock["now"] += delay
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "main._process_products_once", side_effect=process_once
+        ), patch(
+            "main.time.monotonic", side_effect=lambda: clock["now"]
+        ), patch(
+            "main._wait_before_failed_retry", side_effect=advance
+        ):
+            result = main._process_products(
+                products,
+                object(),
+                None,
+                _Logger(),
+                Path(tmp),
+                resume=False,
+                image_registry=registry,
+                routing=routing,
+                failed_retry_policy=policy,
+            )
+            final_rows = main._read_run_summary(Path(tmp))
+
+        self.assertEqual(
+            calls,
+            [["SKU-A"], ["SKU-B"], ["SKU-A"], ["SKU-B"], ["SKU-A"], ["SKU-C"]],
+        )
+        self.assertEqual(resume_flags, [False, False, True, True, True, False])
+        self.assertEqual(result, (3, 0, 0, 0))
+        self.assertEqual([row["status"] for row in final_rows], ["success"] * 3)
+
+    def test_sub2api_scheduler_counts_persisted_live_tasks_before_new_submissions(self):
+        """Catches restart recovery temporarily exceeding the configured remote cap."""
+        products = [
+            _Product("SKU-NEW-A"),
+            _Product("SKU-NEW-B"),
+            _Product("SKU-LIVE-A"),
+            _Product("SKU-LIVE-B"),
+        ]
+        calls = []
+        resume_flags = []
+
+        def process_once(current, _gemini, _lovart, _logger, run_dir, **kwargs):
+            product = current[0]
+            calls.append(product.id)
+            resume_flags.append(bool(kwargs.get("resume")))
+            write_run_summary(run_dir, [{
+                "product_id": product.id,
+                "status": "success",
+                "error": "",
+            }])
+            return 1, 0, 0, 0
+
+        provider = SimpleNamespace(api=SimpleNamespace(config=SimpleNamespace(
+            profile="sub2api",
+            max_parallel_tasks=2,
+            task_recheck_interval=0,
+        )))
+        registry = SimpleNamespace(get=lambda _name: provider)
+        routing = SimpleNamespace(
+            support_provider="openai_image",
+            detail_provider="openai_image",
+            detail_page_count=4,
+        )
+        policy = FailedRetryPolicy(mode=RETRY_MODE_OFF, rounds=1, delay=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "output"
+            for product_id in ("SKU-LIVE-A", "SKU-LIVE-B"):
+                product_dir = output / product_id
+                product_dir.mkdir(parents=True)
+                (product_dir / "status.json").write_text(
+                    '{"openai_image_still_running": true, '
+                    '"support_task_checkpoints": {'
+                    '"white_bg": {"task_id": "live-task", "state": "running"}}}',
+                    encoding="utf-8",
+                )
+            with patch.dict(os.environ, {"LOVART_OUTPUT_DIR": str(output)}), patch(
+                "main._process_products_once", side_effect=process_once
+            ):
+                result = main._process_products(
+                    products,
+                    object(),
+                    None,
+                    _Logger(),
+                    Path(tmp),
+                    resume=False,
+                    image_registry=registry,
+                    routing=routing,
+                    failed_retry_policy=policy,
+                )
+
+        self.assertEqual(
+            calls,
+            ["SKU-LIVE-A", "SKU-LIVE-B", "SKU-NEW-A", "SKU-NEW-B"],
+        )
+        self.assertEqual(resume_flags, [True, True, False, False])
+        self.assertEqual(result, (4, 0, 0, 0))
+
     def test_infinite_policy_has_no_fixed_cap_and_stops_after_success(self):
         product = _Product("SKU-1")
         calls = []

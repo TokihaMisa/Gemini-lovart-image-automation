@@ -251,7 +251,18 @@ def _refresh_openai_image_product_statuses(
         status_parts = [_openai_image_stage_label(stage)]
         if suffix:
             status_parts.append(f"任务 …{suffix}")
-        status_parts.append("任务仍在平台运行，下次将继续查询")
+        try:
+            remaining = max(
+                0,
+                int(float(status.get("openai_image_next_poll_at") or 0) - time.time() + 0.999),
+            )
+        except (TypeError, ValueError):
+            remaining = 0
+        status_parts.append(
+            f"{remaining} 秒后自动复查"
+            if remaining > 0
+            else "正在自动复查"
+        )
         product.update({
             "stage": stage,
             "status": " · ".join(part for part in status_parts if part),
@@ -1195,6 +1206,9 @@ def persist_openai_image_profile_settings(
     active_profile,
     wending_settings,
     sub2api_settings,
+    *,
+    max_parallel_tasks=2,
+    task_recheck_interval=10,
 ):
     """Persist two non-secret GPT Image profiles without mutating input."""
     profile = str(active_profile or "wending").strip().lower()
@@ -1219,12 +1233,38 @@ def persist_openai_image_profile_settings(
     updated = deepcopy(config)
     updated["openai_image"] = {
         "active_profile": profile,
+        "max_parallel_tasks": normalize_openai_image_max_parallel_tasks(
+            max_parallel_tasks
+        ),
+        "task_recheck_interval": normalize_openai_image_task_recheck_interval(
+            task_recheck_interval
+        ),
         "profiles": {
             "wending": normalize_profile("wending", wending_settings),
             "sub2api": normalize_profile("sub2api", sub2api_settings),
         },
     }
     return updated
+
+
+def normalize_openai_image_max_parallel_tasks(value) -> int:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("GPT Image 最大并行任务数必须是整数") from None
+    if not number.is_integer() or not 1 <= number <= 8:
+        raise ValueError("GPT Image 最大并行任务数必须是 1 到 8 的整数")
+    return int(number)
+
+
+def normalize_openai_image_task_recheck_interval(value) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("GPT Image 自动复查间隔必须是数字") from None
+    if not 3 <= seconds <= 60:
+        raise ValueError("GPT Image 自动复查间隔必须在 3 到 60 秒之间")
+    return seconds
 
 
 def openai_image_profile_values(openai_image_config) -> dict[str, object]:
@@ -1253,6 +1293,12 @@ def openai_image_profile_values(openai_image_config) -> dict[str, object]:
 
     return {
         "active_profile": active,
+        "max_parallel_tasks": normalize_openai_image_max_parallel_tasks(
+            root.get("max_parallel_tasks", 2)
+        ),
+        "task_recheck_interval": normalize_openai_image_task_recheck_interval(
+            root.get("task_recheck_interval", 10)
+        ),
         "wending": values(sources["wending"]),
         "sub2api": values(sources["sub2api"]),
     }
@@ -1306,6 +1352,8 @@ def save_api_settings(
     sub2api_image_resolution="1K",
     clear_sub2api_image_key=False,
     sub2api_merge_reference_images=None,
+    openai_image_max_parallel_tasks=2,
+    openai_image_task_recheck_interval=10,
     config_path="config.yaml",
     env_path=".env",
 ):
@@ -1354,6 +1402,8 @@ def save_api_settings(
                     "resolution": sub2api_image_resolution,
                     "merge_reference_images": sub2api_merge_reference_images,
                 },
+                max_parallel_tasks=openai_image_max_parallel_tasks,
+                task_recheck_interval=openai_image_task_recheck_interval,
             )
             updated = persist_image_routing_settings(
                 updated, support_provider, detail_provider
@@ -2613,6 +2663,8 @@ def save_api_profile_settings_from_ui(
     sub2api_resolution,
     sub2api_merge,
     clear_sub2api_key,
+    max_parallel_tasks,
+    task_recheck_interval,
     support_provider,
     detail_provider,
     *,
@@ -2643,6 +2695,8 @@ def save_api_profile_settings_from_ui(
         sub2api_image_resolution=sub2api_resolution,
         clear_sub2api_image_key=clear_sub2api_key,
         sub2api_merge_reference_images=sub2api_merge,
+        openai_image_max_parallel_tasks=max_parallel_tasks,
+        openai_image_task_recheck_interval=task_recheck_interval,
         config_path=config_path,
         env_path=env_path,
     )
@@ -2827,6 +2881,12 @@ def build_ui():
         openai_image_config = {}
     openai_profile_config = openai_image_profile_values(openai_image_config)
     active_openai_profile_value = openai_profile_config["active_profile"]
+    openai_image_max_parallel_tasks_value = openai_profile_config[
+        "max_parallel_tasks"
+    ]
+    openai_image_task_recheck_interval_value = openai_profile_config[
+        "task_recheck_interval"
+    ]
     wending_profile_config = openai_profile_config["wending"]
     sub2api_profile_config = openai_profile_config["sub2api"]
     merge_reference_images_value = bool(
@@ -3172,6 +3232,22 @@ def build_ui():
                         value=sub2api_merge_reference_images_value,
                         info="默认直接上传最多 14 张参考图；仅在代理限制时开启合并",
                     )
+                    with gr.Row():
+                        openai_image_max_parallel_tasks = gr.Number(
+                            value=openai_image_max_parallel_tasks_value,
+                            label="GPT Image 最大并行任务数",
+                            info="平台同时运行的商品任务上限；默认 2",
+                            minimum=1,
+                            maximum=8,
+                            precision=0,
+                        )
+                        openai_image_task_recheck_interval = gr.Number(
+                            value=openai_image_task_recheck_interval_value,
+                            label="运行中任务自动复查间隔（秒）",
+                            info="达到并行上限后优先复查已有任务；默认 10 秒",
+                            minimum=3,
+                            maximum=60,
+                        )
                     openai_image_test_status = gr.Markdown(
                         "点击下方按钮后，这里会立即显示生成状态和进度。"
                     )
@@ -3404,6 +3480,8 @@ def build_ui():
                             sub2api_image_resolution,
                             sub2api_merge_reference_images,
                             clear_sub2api_image_key,
+                            openai_image_max_parallel_tasks,
+                            openai_image_task_recheck_interval,
                             support_provider,
                             detail_provider,
                         ],

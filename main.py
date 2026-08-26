@@ -826,7 +826,11 @@ def _build_image_provider_registry(config, logger, lovart=None):
     def build_openai_provider():
         api_key = str(os.environ.get(openai_image_key_env_name(config)) or "").strip()
         api_config = OpenAIImageAPIConfig.from_config(config, api_key=api_key)
-        return OpenAIImageProvider(OpenAIImageAPI(api_config, logger=logger), logger=logger)
+        return OpenAIImageProvider(
+            OpenAIImageAPI(api_config, logger=logger),
+            logger=logger,
+            defer_running_tasks=api_config.profile == "sub2api",
+        )
 
     return LazyImageProviderRegistry(build_lovart_provider, build_openai_provider)
 
@@ -1162,6 +1166,7 @@ def _process_products_once(
             openai_image_still_running=False,
             openai_image_active_stage="",
             openai_image_task_suffix="",
+            openai_image_next_poll_at=0,
         )
         replace_detail_target = not resume
         saved_detail_target = previous_status.get("detail_page_count_snapshot")
@@ -1996,6 +2001,161 @@ def _wait_before_failed_retry(delay: float) -> bool:
     return False
 
 
+def _openai_task_scheduler_settings(image_registry, routing):
+    if image_registry is None or routing is None:
+        return None
+    providers = {
+        str(getattr(routing, "support_provider", "")),
+        str(getattr(routing, "detail_provider", "")),
+    }
+    if PROVIDER_OPENAI_IMAGE not in providers:
+        return None
+    provider = image_registry.get(PROVIDER_OPENAI_IMAGE)
+    config = getattr(getattr(provider, "api", None), "config", None)
+    if str(getattr(config, "profile", "")) != "sub2api":
+        return None
+    return (
+        max(1, int(getattr(config, "max_parallel_tasks", 2))),
+        max(0.0, float(getattr(config, "task_recheck_interval", 10.0))),
+    )
+
+
+def _status_has_live_openai_image_task(status) -> bool:
+    if not isinstance(status, Mapping):
+        return False
+    saw_checkpoint = False
+    for field in ("support_task_checkpoints", "detail_checkpoints"):
+        checkpoints = status.get(field)
+        if not isinstance(checkpoints, Mapping):
+            continue
+        for checkpoint in checkpoints.values():
+            if not isinstance(checkpoint, Mapping):
+                continue
+            saw_checkpoint = True
+            task_id = str(checkpoint.get("task_id") or "").strip()
+            state = str(checkpoint.get("state") or "").strip().lower()
+            if task_id and state in {
+                "pending",
+                "queued",
+                "submitted",
+                "processing",
+                "running",
+            }:
+                return True
+    return bool(
+        not saw_checkpoint and status.get("openai_image_still_running") is True
+    )
+
+
+def _process_products_with_openai_task_scheduler(
+    products,
+    gemini,
+    lovart,
+    logger,
+    run_dir,
+    *,
+    resume,
+    prompt_settings,
+    image_registry,
+    routing,
+    max_parallel_tasks,
+    recheck_interval,
+):
+    """Round-robin resumable Sub2API tasks without parallel local execution."""
+    product_by_id = {product.id: product for product in products}
+    ordered_ids = list(product_by_id)
+    fresh = []
+    active: dict[str, tuple[object, float]] = {}
+    latest_rows: dict[str, dict] = {}
+    visited: set[str] = set()
+    initial_poll_at = time.monotonic()
+    for product in products:
+        status = read_status(product_output_dir(product.id))
+        if _status_has_live_openai_image_task(status):
+            active[product.id] = (product, initial_poll_at)
+            visited.add(product.id)
+        else:
+            fresh.append(product)
+
+    while (fresh or active) and not _shutdown_requested:
+        now = time.monotonic()
+        due = [
+            (product_id, product, next_poll_at)
+            for product_id, (product, next_poll_at) in active.items()
+            if next_poll_at <= now
+        ]
+        if due:
+            product_id, product, _next_poll_at = min(
+                due, key=lambda item: item[2]
+            )
+            active.pop(product_id, None)
+        elif fresh and len(active) < max_parallel_tasks:
+            product = fresh.pop(0)
+        else:
+            product_id, (product, next_poll_at) = min(
+                active.items(), key=lambda item: item[1][1]
+            )
+            active.pop(product_id, None)
+            delay = max(0.0, next_poll_at - time.monotonic())
+            if delay and not _wait_before_failed_retry(delay):
+                active[product_id] = (product, next_poll_at)
+                break
+
+        product_resume = resume or product.id in visited
+        visited.add(product.id)
+        _process_products_once(
+            [product],
+            gemini,
+            lovart,
+            logger,
+            run_dir,
+            resume=product_resume,
+            prompt_settings=prompt_settings,
+            image_registry=image_registry,
+            routing=routing,
+        )
+        rows = _read_run_summary(run_dir)
+        row = next(
+            (
+                current
+                for current in rows
+                if str(current.get("product_id") or "") == str(product.id)
+            ),
+            {
+                "product_id": product.id,
+                "product_name": getattr(product, "name_cn", ""),
+                "status": "failed",
+                "error": "Product processing returned no summary row.",
+            },
+        )
+        latest_rows[product.id] = row
+        if row.get("status") == "openai_image_task_still_running":
+            next_monotonic = time.monotonic() + recheck_interval
+            active[product.id] = (product, next_monotonic)
+            update_status(
+                product_output_dir(product.id),
+                "openai_image_recheck_scheduled",
+                openai_image_next_poll_at=time.time() + recheck_interval,
+            )
+        else:
+            active.pop(product.id, None)
+
+    final_rows = [
+        latest_rows[product_id]
+        for product_id in ordered_ids
+        if product_id in latest_rows
+    ]
+    write_run_summary(run_dir, final_rows)
+    success = sum(row.get("status") == "success" for row in final_rows)
+    skipped = sum(row.get("status") == "skipped" for row in final_rows)
+    still_running = sum(
+        row.get("status") == "openai_image_task_still_running"
+        for row in final_rows
+    )
+    fail = len(final_rows) - success - skipped - still_running
+    return success, fail, skipped, still_running
+
+
 def _process_products(
     products,
     gemini,
@@ -2011,18 +2171,38 @@ def _process_products(
     policy = failed_retry_policy
     if policy is None:
         policy = getattr(lovart, "failed_retry_policy", FailedRetryPolicy(mode="off"))
-    if not isinstance(policy, FailedRetryPolicy) or not policy.enabled:
+    scheduler_settings = _openai_task_scheduler_settings(image_registry, routing)
+
+    def process_round(current, *, round_resume):
+        if scheduler_settings is not None:
+            max_parallel_tasks, recheck_interval = scheduler_settings
+            return _process_products_with_openai_task_scheduler(
+                current,
+                gemini,
+                lovart,
+                logger,
+                run_dir,
+                resume=round_resume,
+                prompt_settings=prompt_settings,
+                image_registry=image_registry,
+                routing=routing,
+                max_parallel_tasks=max_parallel_tasks,
+                recheck_interval=recheck_interval,
+            )
         return _process_products_once(
-            products,
+            current,
             gemini,
             lovart,
             logger,
             run_dir,
-            resume=resume,
+            resume=round_resume,
             prompt_settings=prompt_settings,
             image_registry=image_registry,
             routing=routing,
         )
+
+    if not isinstance(policy, FailedRetryPolicy) or not policy.enabled:
+        return process_round(products, round_resume=resume)
 
     product_by_id = {product.id: product for product in products}
     ordered_ids = list(product_by_id)
@@ -2031,16 +2211,9 @@ def _process_products(
 
     completed_retry_rounds = 0
     while True:
-        _process_products_once(
+        process_round(
             pending,
-            gemini,
-            lovart,
-            logger,
-            run_dir,
-            resume=resume if completed_retry_rounds == 0 else True,
-            prompt_settings=prompt_settings,
-            image_registry=image_registry,
-            routing=routing,
+            round_resume=resume if completed_retry_rounds == 0 else True,
         )
         round_rows = _read_run_summary(run_dir)
         for row in round_rows:

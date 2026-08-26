@@ -354,6 +354,8 @@ def test_dual_profile_config_selects_only_active_sub2api_values():
         {
             "openai_image": {
                 "active_profile": "sub2api",
+                "max_parallel_tasks": 3,
+                "task_recheck_interval": 7,
                 "profiles": {
                     "wending": {
                         "protocol": "wending_async",
@@ -380,6 +382,8 @@ def test_dual_profile_config_selects_only_active_sub2api_values():
     assert config.model == "sub2-model"
     assert config.resolution == "4K"
     assert config.merge_reference_images is True
+    assert config.max_parallel_tasks == 3
+    assert config.task_recheck_interval == 7.0
 
 
 def test_dual_profile_config_rejects_unknown_active_profile():
@@ -1010,6 +1014,41 @@ def test_sub2api_waits_submit_retry_after_before_first_poll(
         )
 
     assert sleeps[0] == expected_delay
+
+
+def test_sub2api_batch_poll_returns_control_after_one_processing_snapshot(tmp_path):
+    """Catches a batch task monopolizing the scheduler until its remote completion."""
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+    )
+    submitted = {
+        "task_id": "imgtask_deferred-1",
+        "status": "processing",
+        "created_at": 1784092800,
+    }
+    processing = {
+        "task_id": "imgtask_deferred-1",
+        "status": "processing",
+        "progress": "25%",
+        "created_at": 1784092800,
+    }
+
+    with patch.object(client, "_request_json", return_value=submitted), patch.object(
+        client, "_request_json_url", return_value=(processing, 10.0)
+    ) as poll:
+        with pytest.raises(ImageTaskStillRunning) as ctx:
+            client.generate_edit(
+                "keep exact",
+                [make_png(tmp_path / "source.png")],
+                tmp_path / "result.png",
+                defer_running=True,
+            )
+
+    assert ctx.value.task.task_id == "imgtask_deferred-1"
+    assert ctx.value.task.progress == "25%"
+    assert poll.call_count == 1
 
 
 def test_sub2api_async_404_falls_back_to_sync_once_without_double_submission_marker(

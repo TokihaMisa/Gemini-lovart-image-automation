@@ -492,10 +492,14 @@ class WebUIModelSettingsTests(unittest.TestCase):
                 "resolution": "2k",
                 "merge_reference_images": True,
             },
+            max_parallel_tasks=3,
+            task_recheck_interval=7,
         )
 
         self.assertEqual(original, {"other": {"keep": True}})
         self.assertEqual(updated["openai_image"]["active_profile"], "sub2api")
+        self.assertEqual(updated["openai_image"]["max_parallel_tasks"], 3)
+        self.assertEqual(updated["openai_image"]["task_recheck_interval"], 7.0)
         self.assertEqual(updated["openai_image"]["profiles"], {
             "wending": {
                 "protocol": "wending_async",

@@ -265,9 +265,16 @@ def read_completed_detail_indexes(
 
 
 class OpenAIImageProvider:
-    def __init__(self, api: Any, logger: Any | None = None) -> None:
+    def __init__(
+        self,
+        api: Any,
+        logger: Any | None = None,
+        *,
+        defer_running_tasks: bool = False,
+    ) -> None:
         self.api = api
         self.logger = logger
+        self.defer_running_tasks = bool(defer_running_tasks)
 
     def detail_execution_settings(self) -> dict[str, object]:
         """Return only non-secret values that alter an Images edit request."""
@@ -411,6 +418,11 @@ class OpenAIImageProvider:
                 resume_task=saved_task,
                 display_callback=request.task_status_callback,
                 submission_callback=persist_submission_started,
+                **(
+                    {"defer_running": True}
+                    if self.defer_running_tasks
+                    else {}
+                ),
             )
         except ImageTaskStillRunning as exc:
             persist(exc.task)
@@ -675,6 +687,11 @@ class OpenAIImageProvider:
                         )
                         if request.task_status_callback is not None
                         else None
+                    ),
+                    **(
+                        {"defer_running": True}
+                        if self.defer_running_tasks
+                        else {}
                     ),
                 )
             except ImageTaskStillRunning as exc:
