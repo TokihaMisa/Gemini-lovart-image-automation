@@ -1,7 +1,7 @@
 {
-  "version": "1.3.22",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.22/update.zip",
-  "changelog": "修复 GPT Image 异步任务在 Meta/Clash TUN Fake-IP 网络下无法下载结果的问题；已有任务 ID 遇到查询超时会安全续查且不重复付费提交；详情图下载状态现在只显示在对应屏号行，并继续采用单行实时刷新。",
-  "sha256": "5c337c23dc9c637a143ebdf3acfb7d1990079459d9e99afa28357d6b20f4274a",
-  "size": 131990607
+  "version": "1.3.23",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.23/update.zip",
+  "changelog": "新增问鼎与 Sub2API 生图服务切换；Sub2API 改用可恢复异步任务并持久化任务 ID，支持重启续查、防止重复扣费、默认 2 个平台任务并行与每 10 秒自动复查；修正 1K/2K/4K 计费尺寸，并兼容 Cloudflare 代理。",
+  "sha256": "60dedb700609de05b6c7ab9c74d2c97029dac03d28536e12574b9d03820748b9",
+  "size": 132013575
 }
