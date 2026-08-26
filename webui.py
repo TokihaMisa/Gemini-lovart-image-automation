@@ -3095,11 +3095,12 @@ def build_ui():
 
                     gr.Markdown("### GPT Image：问鼎 API / Sub2API")
                     gr.Markdown(
-                        "问鼎 API 使用任务 ID 轮询；Sub2API 使用同步 `/v1/images/edits` 响应。"
+                        "问鼎 API 使用任务 ID 轮询；Sub2API 优先通过 `/v1/images/edits/async` "
+                        "提交任务并使用任务 ID 轮询，避免大型图片响应在同步连接中丢失。"
                         "保存设置不会调用图像 API；只有点击下方的明确付费测试按钮才会发起真实请求。"
                     )
                     active_openai_image_profile = gr.Radio(
-                        choices=[("问鼎 API（异步轮询）", "wending"), ("Sub2API（同步）", "sub2api")],
+                        choices=[("问鼎 API（异步轮询）", "wending"), ("Sub2API（异步轮询）", "sub2api")],
                         value=active_openai_profile_value,
                         label="GPT Image API 类型",
                     )

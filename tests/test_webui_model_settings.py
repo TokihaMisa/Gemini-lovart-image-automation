@@ -174,7 +174,12 @@ class WebUIModelSettingsTests(unittest.TestCase):
         ]
         self.assertTrue(any("GPT Image 密钥状态：" in value for value in markdown_values))
         self.assertTrue(any("问鼎 API / Sub2API" in value for value in markdown_values))
-        self.assertTrue(any("任务 ID 轮询" in value and "/v1/images/edits" in value for value in markdown_values))
+        self.assertTrue(any(
+            "Sub2API" in value
+            and "任务 ID 轮询" in value
+            and "/v1/images/edits/async" in value
+            for value in markdown_values
+        ))
         self.assertIn(
             "最多可直接上传 14 张参考图；仅在网关限制或体积超限时手动开启合并",
             by_label["将多张参考图合并为一张上传"]["props"]["info"],

@@ -65,7 +65,7 @@ def support_request(tmp_path: Path, **overrides):
     return SupportImageRequest(**values)
 
 
-def test_sub2api_sync_support_completion_is_checkpointed_without_provider_task_id(tmp_path):
+def test_sub2api_async_support_completion_is_checkpointed_with_resumable_task_id(tmp_path):
     from image_providers import OpenAIImageProvider, read_support_task_checkpoint
     from openai_image_api import OpenAIImageAPI, OpenAIImageAPIConfig
 
@@ -76,10 +76,26 @@ def test_sub2api_sync_support_completion_is_checkpointed_without_provider_task_i
         protocol="sub2api_sync",
         base_url="https://sub2.example/v1",
     ))
-    response = {"data": [{"b64_json": base64.b64encode(reference.read_bytes()).decode()}]}
+    submitted = {
+        "task_id": "imgtask_provider-1",
+        "status": "processing",
+        "created_at": 1784092800,
+    }
+    completed = {
+        "task_id": "imgtask_provider-1",
+        "status": "completed",
+        "result": {"data": [{"url": "https://cdn.example/result.png"}]},
+        "created_at": 1784092800,
+    }
     provider = OpenAIImageProvider(api)
 
-    with patch.object(api, "_request_json", return_value=response) as request_json:
+    with patch.object(api, "_request_json", return_value=submitted) as request_json, patch.object(
+        api, "_request_json_url", return_value=(completed, 3.0)
+    ) as request_status, patch(
+        "openai_image_api.validate_remote_image_url", return_value=object()
+    ), patch(
+        "openai_image_api._download_resolved_image", return_value=reference.read_bytes()
+    ):
         first = provider.generate_support_image(support_request(tmp_path))
         second = provider.generate_support_image(support_request(tmp_path))
 
@@ -87,8 +103,77 @@ def test_sub2api_sync_support_completion_is_checkpointed_without_provider_task_i
     assert first.succeeded is True
     assert second.succeeded is True
     assert checkpoint["state"] == "done"
-    assert checkpoint.get("task_id", "") == ""
+    assert checkpoint["task_id"] == "imgtask_provider-1"
     assert request_json.call_count == 1
+    assert request_status.call_count == 1
+
+
+@pytest.mark.parametrize("kind", ["support", "detail"])
+@pytest.mark.parametrize(
+    ("error_code", "status_code"),
+    [
+        ("invalid_request", 400),
+        ("authentication", 401),
+        ("authentication", 403),
+        ("invalid_request", 404),
+        ("invalid_request", 422),
+    ],
+)
+def test_sub2api_task_lookup_http_error_preserves_checkpoint_and_never_reposts(
+    tmp_path, kind, error_code, status_code
+):
+    from image_providers import OpenAIImageProvider, read_support_task_checkpoint
+    from openai_image_api import (
+        OpenAIImageAPI,
+        OpenAIImageAPIConfig,
+        OpenAIImageAPIError,
+    )
+    from utils import read_status
+
+    api = OpenAIImageAPI(
+        OpenAIImageAPIConfig(
+            api_key="test-key",
+            profile="sub2api",
+            protocol="sub2api_sync",
+            base_url="https://sub2.example/v1",
+        ),
+        sleep=lambda _delay: None,
+    )
+    submitted = {
+        "task_id": f"imgtask_{kind}-{status_code}",
+        "status": "processing",
+        "created_at": 1784092800,
+    }
+    lookup_error = OpenAIImageAPIError(
+        error_code, "task lookup unavailable", status_code=status_code
+    )
+    provider = OpenAIImageProvider(api)
+    request = support_request(tmp_path) if kind == "support" else single_detail_request(tmp_path)
+
+    with patch.object(api, "_request_json", return_value=submitted) as paid_post, patch.object(
+        api, "_request_json_url", side_effect=lookup_error
+    ):
+        first = (
+            provider.generate_support_image(request)
+            if kind == "support"
+            else provider.generate_detail_set(request)
+        )
+        second = (
+            provider.generate_support_image(request)
+            if kind == "support"
+            else provider.generate_detail_set(request)
+        )
+
+    checkpoint = (
+        read_support_task_checkpoint(tmp_path, "white_bg")
+        if kind == "support"
+        else read_status(tmp_path)["detail_checkpoints"]["1"]
+    )
+    assert first.still_running is True
+    assert second.still_running is True
+    assert checkpoint["state"] == "running"
+    assert checkpoint["task_id"] == f"imgtask_{kind}-{status_code}"
+    assert paid_post.call_count == 1
 
 
 def test_sub2api_invalid_saved_image_blocks_resume_without_second_paid_post(tmp_path):

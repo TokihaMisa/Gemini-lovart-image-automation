@@ -427,7 +427,6 @@ def test_static_backstop_allows_only_the_legacy_config_migration_boundary():
     source = Path("openai_image_api.py").read_text(encoding="utf-8")
     assert "def _request_" + "hapi" not in source.lower()
     assert "def _is_" + "hapi_image_service" not in source.lower()
-    assert "/images/" + "tasks/" not in source.lower()
     assert "sync fallback" not in source.lower()
 
 
@@ -715,9 +714,19 @@ def test_generate_edit_posts_json_create_body_and_saves_b64_png(build_opener, tm
 @patch("openai_image_api.urllib.request.build_opener")
 def test_authenticated_image_post_uses_application_user_agent(build_opener, tmp_path):
     """Fails if urllib's Cloudflare-blocked default browser signature is sent."""
-    build_opener.return_value.open.return_value = FakeResponse(
-        json.dumps({"data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}]}).encode()
-    )
+    build_opener.return_value.open.side_effect = [
+        FakeResponse(json.dumps({
+            "task_id": "imgtask_ua-1",
+            "status": "processing",
+            "created_at": 1784092800,
+        }).encode()),
+        FakeResponse(json.dumps({
+            "task_id": "imgtask_ua-1",
+            "status": "completed",
+            "result": {"data": [{"url": "https://cdn.example/result.png"}]},
+            "created_at": 1784092800,
+        }).encode()),
+    ]
 
     make_client(
         profile="sub2api",
@@ -733,7 +742,7 @@ def test_authenticated_image_post_uses_application_user_agent(build_opener, tmp_
     assert request.get_header("User-agent") == "Lovart-Image-Automation/1.3"
 
 
-def test_sub2api_sync_generate_saves_b64_result_without_polling(tmp_path):
+def test_sub2api_legacy_fallback_saves_b64_result_without_polling(tmp_path):
     source = make_png(tmp_path / "source.png")
     output = tmp_path / "result.png"
     statuses = []
@@ -744,9 +753,12 @@ def test_sub2api_sync_generate_saves_b64_result_without_polling(tmp_path):
         protocol="sub2api_sync",
         base_url="https://codex.surf/v1",
     )
-    response = {"data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}]}
+    responses = [
+        OpenAIImageAPIError("invalid_request", "async disabled", status_code=404),
+        {"data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}]},
+    ]
 
-    with patch.object(client, "_request_json", return_value=response) as request_json, patch.object(
+    with patch.object(client, "_request_json", side_effect=responses) as request_json, patch.object(
         client, "_poll_task"
     ) as poll_task:
         result = client.generate_edit(
@@ -759,8 +771,11 @@ def test_sub2api_sync_generate_saves_b64_result_without_polling(tmp_path):
             submission_callback=lambda: submissions.append(True),
         )
 
-    endpoint, body, content_type = request_json.call_args.args
-    assert endpoint == "https://codex.surf/v1/images/edits"
+    endpoint, body, content_type = request_json.call_args_list[-1].args
+    assert [call.args[0] for call in request_json.call_args_list] == [
+        "https://codex.surf/v1/images/edits/async",
+        "https://codex.surf/v1/images/edits",
+    ]
     assert content_type == "application/json"
     assert request_json.call_args.kwargs == {"max_attempts": 1}
     assert json.loads(body)["images"] == [
@@ -770,7 +785,7 @@ def test_sub2api_sync_generate_saves_b64_result_without_polling(tmp_path):
     assert tasks == []
     assert result.local_path == str(output)
     assert output.read_bytes() == base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
-    assert any("同步" in status for status in statuses)
+    assert any("同步兼容" in status for status in statuses)
     poll_task.assert_not_called()
 
 
@@ -788,9 +803,21 @@ def test_sub2api_sync_maps_resolution_to_billing_quality_tier(
         base_url="https://codex.surf/v1",
         resolution=resolution,
     )
-    response = {"data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}]}
+    submitted = {
+        "task_id": f"imgtask_quality-{resolution}",
+        "status": "processing",
+        "created_at": 1784092800,
+    }
+    completed = {
+        "task_id": f"imgtask_quality-{resolution}",
+        "status": "completed",
+        "result": {"data": [{"url": "https://cdn.example/result.png"}]},
+        "created_at": 1784092800,
+    }
 
-    with patch.object(client, "_request_json", return_value=response) as request_json:
+    with patch.object(client, "_request_json", return_value=submitted) as request_json, patch.object(
+        client, "_request_json_url", return_value=(completed, 3.0)
+    ):
         client.generate_edit(
             "prompt",
             [make_png(tmp_path / f"source-{resolution}.png")],
@@ -799,6 +826,228 @@ def test_sub2api_sync_maps_resolution_to_billing_quality_tier(
 
     body = json.loads(request_json.call_args.args[1])
     assert body["quality"] == expected_quality
+
+
+def test_sub2api_prefers_async_task_and_polls_compact_result_url(tmp_path):
+    """Fails if Sub2API waits for a multi-megabyte synchronous response again."""
+    source = make_png(tmp_path / "source.png")
+    output = tmp_path / "result.png"
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+    )
+    submitted = {
+        "id": "imgtask_async-1",
+        "task_id": "imgtask_async-1",
+        "object": "image.generation.task",
+        "status": "processing",
+        "created_at": 1784092800,
+        "expires_at": 1784179200,
+        "poll_url": "/v1/images/tasks/imgtask_async-1",
+    }
+    completed = {
+        "id": "imgtask_async-1",
+        "task_id": "imgtask_async-1",
+        "object": "image.generation.task",
+        "status": "completed",
+        "http_status": 200,
+        "image_url": "https://cdn.example/result.png",
+        "result": {
+            "created": 1784092923,
+            "data": [{"url": "https://cdn.example/result.png"}],
+        },
+        "created_at": 1784092800,
+        "completed_at": 1784092923,
+        "expires_at": 1784179323,
+    }
+    checkpoints = []
+
+    with patch.object(client, "_request_json", return_value=submitted) as submit, patch.object(
+        client, "_request_json_url", return_value=(completed, 3.0)
+    ) as poll:
+        result = client.generate_edit(
+            "keep exact",
+            [source],
+            output,
+            task_callback=checkpoints.append,
+        )
+
+    assert submit.call_args.args[0] == "https://codex.surf/v1/images/edits/async"
+    assert poll.call_args.args[0] == "https://codex.surf/v1/images/tasks/imgtask_async-1"
+    assert checkpoints[0].task_id == "imgtask_async-1"
+    assert checkpoints[0].state == "running"
+    assert checkpoints[-1].state == "success"
+    assert result.task.task_id == "imgtask_async-1"
+    assert output.read_bytes() == base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
+
+
+def test_sub2api_resumes_saved_async_task_without_reposting_paid_request(tmp_path):
+    """Fails if restart recovery creates a second billed image task."""
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+    )
+    saved = ImageTaskSnapshot(
+        task_id="imgtask_resume-1",
+        state="running",
+        is_final=False,
+        task_created_at=1784092800,
+        status="processing",
+    )
+    completed = {
+        "task_id": "imgtask_resume-1",
+        "status": "completed",
+        "http_status": 200,
+        "result": {"data": [{"url": "https://cdn.example/result.png"}]},
+        "created_at": 1784092800,
+        "completed_at": 1784092923,
+    }
+
+    with patch.object(
+        client,
+        "_request_json",
+        side_effect=AssertionError("resume must not submit another paid request"),
+    ), patch.object(client, "_request_json_url", return_value=(completed, 3.0)) as poll:
+        result = client.generate_edit(
+            "keep exact",
+            [make_png(tmp_path / "source.png")],
+            tmp_path / "result.png",
+            resume_task=saved,
+        )
+
+    assert poll.call_args.args[0] == "https://codex.surf/v1/images/tasks/imgtask_resume-1"
+    assert result.task.task_id == "imgtask_resume-1"
+
+
+@pytest.mark.parametrize(
+    ("error_code", "status_code"),
+    [
+        ("invalid_request", 400),
+        ("authentication", 401),
+        ("authentication", 403),
+        ("invalid_request", 404),
+        ("invalid_request", 422),
+    ],
+)
+def test_sub2api_status_http_error_keeps_paid_task_resumable(
+    tmp_path, error_code, status_code
+):
+    """Fails if an ambiguous task lookup authorizes a new paid POST later."""
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+    )
+    submitted = {
+        "task_id": "imgtask_missing-1",
+        "status": "processing",
+        "created_at": 1784092800,
+    }
+    checkpoints = []
+
+    with patch.object(client, "_request_json", return_value=submitted), patch.object(
+        client,
+        "_request_json_url",
+        side_effect=OpenAIImageAPIError(
+            error_code, "task lookup unavailable", status_code=status_code
+        ),
+    ):
+        with pytest.raises(ImageTaskStillRunning) as ctx:
+            client.generate_edit(
+                "keep exact",
+                [make_png(tmp_path / "source.png")],
+                tmp_path / "result.png",
+                task_callback=checkpoints.append,
+            )
+
+    assert ctx.value.task.task_id == "imgtask_missing-1"
+    assert checkpoints[-1].task_id == "imgtask_missing-1"
+    assert checkpoints[-1].state == "running"
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected_delay"),
+    [("7", 7.0), (None, 3.0)],
+)
+def test_sub2api_waits_submit_retry_after_before_first_poll(
+    tmp_path, retry_after, expected_delay
+):
+    """Fails if the client immediately polls a task the provider just accepted."""
+    sleeps = []
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+        sleep=sleeps.append,
+    )
+    submitted = {
+        "task_id": "imgtask_delay-1",
+        "status": "processing",
+        "created_at": 1784092800,
+    }
+    completed = {
+        "task_id": "imgtask_delay-1",
+        "status": "completed",
+        "result": {"data": [{"url": "https://cdn.example/result.png"}]},
+        "created_at": 1784092800,
+    }
+
+    def submit(_endpoint, _body, _content_type, **kwargs):
+        headers = kwargs.get("response_headers")
+        if retry_after is not None and headers is not None:
+            headers["Retry-After"] = retry_after
+        return submitted
+
+    with patch.object(client, "_request_json", side_effect=submit), patch.object(
+        client, "_request_json_url", return_value=(completed, None)
+    ):
+        client.generate_edit(
+            "keep exact",
+            [make_png(tmp_path / "source.png")],
+            tmp_path / "result.png",
+        )
+
+    assert sleeps[0] == expected_delay
+
+
+def test_sub2api_async_404_falls_back_to_sync_once_without_double_submission_marker(
+    tmp_path,
+):
+    """Fails if an explicitly disabled async route either stops or double-submits."""
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://gateway.test/v1",
+    )
+    calls = []
+
+    def request(endpoint, *_args, **_kwargs):
+        calls.append(endpoint)
+        if endpoint.endswith("/images/edits/async"):
+            raise OpenAIImageAPIError(
+                "invalid_request",
+                "async images disabled",
+                status_code=404,
+            )
+        return {"data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}]}
+
+    submissions = []
+    with patch.object(client, "_request_json", side_effect=request):
+        result = client.generate_edit(
+            "keep exact",
+            [make_png(tmp_path / "source.png")],
+            tmp_path / "result.png",
+            submission_callback=lambda: submissions.append(True),
+        )
+
+    assert calls == [
+        "https://gateway.test/v1/images/edits/async",
+        "https://gateway.test/v1/images/edits",
+    ]
+    assert submissions == [True]
+    assert result.task.state == "success"
 
 
 def test_sub2api_sync_uncertain_response_never_reposts_and_blocks_auto_retry(tmp_path):
@@ -820,7 +1069,10 @@ def test_sub2api_sync_uncertain_response_never_reposts_and_blocks_auto_retry(tmp
 
     assert ctx.value.code == "submission_unknown"
     assert request_json.call_count == 1
-    assert request_json.call_args.kwargs == {"max_attempts": 1}
+    assert request_json.call_args.kwargs == {
+        "max_attempts": 1,
+        "response_headers": {},
+    }
 
 
 def test_sub2api_sync_rejects_missing_image_result_as_submission_unknown(tmp_path):
@@ -838,7 +1090,7 @@ def test_sub2api_sync_rejects_missing_image_result_as_submission_unknown(tmp_pat
     assert ctx.value.code == "submission_unknown"
 
 
-def test_sub2api_sync_does_not_emit_success_checkpoint_before_atomic_save(tmp_path):
+def test_sub2api_async_keeps_completed_checkpoint_when_local_atomic_save_fails(tmp_path):
     source = make_png(tmp_path / "source.png")
     client = make_client(
         profile="sub2api",
@@ -846,9 +1098,21 @@ def test_sub2api_sync_does_not_emit_success_checkpoint_before_atomic_save(tmp_pa
         base_url="https://codex.surf/v1",
     )
     callbacks = []
-    response = {"data": [{"b64_json": base64.b64encode(b"not-an-image").decode()}]}
+    submitted = {
+        "task_id": "imgtask_corrupt-1",
+        "status": "processing",
+        "created_at": 1784092800,
+    }
+    completed = {
+        "task_id": "imgtask_corrupt-1",
+        "status": "completed",
+        "result": {"data": [{"url": "https://cdn.example/corrupt.png"}]},
+        "created_at": 1784092800,
+    }
 
-    with patch.object(client, "_request_json", return_value=response):
+    with patch.object(client, "_request_json", return_value=submitted), patch.object(
+        client, "_request_json_url", return_value=(completed, 3.0)
+    ):
         with pytest.raises(OpenAIImageAPIError) as ctx:
             client.generate_edit(
                 "prompt",
@@ -858,7 +1122,9 @@ def test_sub2api_sync_does_not_emit_success_checkpoint_before_atomic_save(tmp_pa
             )
 
     assert ctx.value.code == "invalid_image"
-    assert callbacks == []
+    assert callbacks[-1].state == "success"
+    assert callbacks[-1].result_url == "https://cdn.example/corrupt.png"
+    assert not (tmp_path / "out.png").exists()
 
 
 @pytest.mark.parametrize("create_payload", [{"task_id": " t-1 "}, {"data": {"task_id": 42}}])
@@ -1876,12 +2142,12 @@ def test_generate_edit_uses_redirect_rejecting_transport_for_authenticated_post(
 
 @patch("openai_image_api.urllib.request.build_opener")
 def test_generate_edit_does_not_retry_paid_post_for_429_or_401(build_opener, tmp_path):
-    """Fails if an HTTP error can automatically resubmit a paid synchronous edit."""
+    """Fails if an HTTP error can automatically resubmit a paid image task."""
     source = make_png(tmp_path / "source.png")
     for status, expected_code in ((429, "submission_unknown"), (401, "authentication")):
         build_opener.return_value.open.reset_mock()
         build_opener.return_value.open.side_effect = HTTPError(
-            "https://gateway.test/v1/images/edits",
+            "https://gateway.test/v1/images/edits/async",
             status,
             "injected error",
             {},
@@ -1899,7 +2165,7 @@ def test_generate_edit_does_not_retry_paid_post_for_429_or_401(build_opener, tmp
         assert ctx.value.code == expected_code
         assert build_opener.return_value.open.call_count == 1
         request = build_opener.return_value.open.call_args.args[0]
-        assert request.full_url == "https://gateway.test/v1/images/edits"
+        assert request.full_url == "https://gateway.test/v1/images/edits/async"
 
 
 @pytest.mark.parametrize(

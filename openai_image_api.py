@@ -22,7 +22,7 @@ import threading
 import time
 from typing import Any, Callable, Final, Sequence, cast
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit, urlunsplit
 import urllib.request
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -392,6 +392,18 @@ def _images_edits_endpoint(base_url: str) -> str:
     return f"{_protocol_base_url(base_url)}/v1/images/edits"
 
 
+def _images_edits_async_endpoint(base_url: str) -> str:
+    return f"{_images_edits_endpoint(base_url)}/async"
+
+
+def _images_task_endpoint(base_url: str, task_id: str) -> str:
+    normalized_task_id = _normalize_task_id(task_id)
+    return (
+        f"{_protocol_base_url(base_url)}/v1/images/tasks/"
+        f"{quote(normalized_task_id, safe='')}"
+    )
+
+
 def _decode_json_response(raw_response: bytes) -> dict[str, Any]:
     try:
         decoded = json.loads(raw_response.decode("utf-8"))
@@ -675,7 +687,7 @@ class OpenAIImageAPI:
             merge=bool(self.config.merge_reference_images),
         )
         if self.config.protocol == OPENAI_IMAGE_PROTOCOL_SUB2API:
-            return self._generate_sync_edit(
+            return self._generate_sub2api_edit(
                 prompt=prompt,
                 images=images,
                 output_path=output_path,
@@ -733,7 +745,7 @@ class OpenAIImageAPI:
             operational_result_url=operational_result_url,
         )
 
-    def _generate_sync_edit(
+    def _generate_sub2api_edit(
         self,
         *,
         prompt: str,
@@ -746,11 +758,6 @@ class OpenAIImageAPI:
         display_callback: Callable[[ImageTaskDisplayStatus], None] | None,
         submission_callback: Callable[[], None] | None,
     ) -> GeneratedImage:
-        if resume_task is not None:
-            raise OpenAIImageAPIError(
-                "invalid_resume",
-                "Sub2API 同步请求没有可轮询任务 ID，不能恢复异步任务。",
-            )
         body = _build_sync_edit_body(
             self.config.model,
             append_aspect_instruction(prompt, image_size),
@@ -758,6 +765,85 @@ class OpenAIImageAPI:
             images,
             quality=_SUB2API_QUALITY_BY_RESOLUTION[self.config.resolution],
         )
+        if resume_task is None:
+            if submission_callback is not None:
+                submission_callback()
+            try:
+                task, initial_poll_delay = self._submit_sub2api_task_once(body)
+            except OpenAIImageAPIError as exc:
+                if exc.code == "invalid_request" and exc.status_code == 404:
+                    _notify_status(
+                        status_callback,
+                        "ℹ️ Sub2API 异步接口未启用，改用同步兼容模式",
+                    )
+                    return self._generate_sync_edit(
+                        body=body,
+                        output_path=output_path,
+                        status_callback=status_callback,
+                        display_callback=display_callback,
+                        submission_callback=None,
+                    )
+                if exc.code in {"authentication", "invalid_request"}:
+                    raise
+                raise OpenAIImageAPIError(
+                    "submission_unknown",
+                    "GPT Image 异步任务提交后未收到可验证任务 ID；为避免重复扣费，已停止自动重试。",
+                ) from None
+        else:
+            task = _validate_resume_task(resume_task, self.config.api_key)
+            initial_poll_delay = 0.0
+
+        _notify_task(task_callback, task)
+        submitted_message = "📨 GPT Image 异步任务已提交，正在等待平台处理"
+        _notify_status(status_callback, submitted_message)
+        _notify_display(
+            display_callback,
+            task,
+            phase="submitted",
+            message=submitted_message,
+        )
+        if task.state == "failed":
+            raise _task_failed_error(task, self.config.api_key)
+        if task.is_final and task.state == "success":
+            return self._download_task_result(task, output_path, status_callback)
+
+        task, operational_result_url = self._poll_sub2api_task(
+            task,
+            status_callback,
+            task_callback,
+            display_callback,
+            initial_delay=initial_poll_delay,
+        )
+        return self._download_task_result(
+            task,
+            output_path,
+            status_callback,
+            operational_result_url=operational_result_url,
+        )
+
+    def _submit_sub2api_task_once(
+        self, body: bytes
+    ) -> tuple[ImageTaskSnapshot, float]:
+        response_headers: dict[str, str] = {}
+        payload = self._request_json(
+            _images_edits_async_endpoint(self.config.base_url),
+            body,
+            "application/json",
+            max_attempts=1,
+            response_headers=response_headers,
+        )
+        task, _operational_result_url = self._parse_sub2api_task(payload, None)
+        return task, _retry_after_seconds(response_headers) or 3.0
+
+    def _generate_sync_edit(
+        self,
+        *,
+        body: bytes,
+        output_path: str | Path,
+        status_callback: Callable[[str], None] | None,
+        display_callback: Callable[[ImageTaskDisplayStatus], None] | None,
+        submission_callback: Callable[[], None] | None,
+    ) -> GeneratedImage:
         waiting_message = "⏳ GPT Image 同步请求已提交，正在等待平台返回图片"
         _notify_status(status_callback, waiting_message)
         if submission_callback is not None:
@@ -852,6 +938,7 @@ class OpenAIImageAPI:
         *,
         max_attempts: int | None = None,
         status_callback: Callable[[str], None] | None = None,
+        response_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         request = urllib.request.Request(endpoint, data=body, method="POST")
         request.add_header("Accept", "application/json")
@@ -865,6 +952,7 @@ class OpenAIImageAPI:
             "json",
             max_attempts=max_attempts,
             status_callback=status_callback,
+            response_headers=response_headers,
         )
         return _decode_json_response(raw_response)
 
@@ -878,6 +966,7 @@ class OpenAIImageAPI:
         request = urllib.request.Request(url, method="GET")
         request.add_header("Accept", "application/json")
         request.add_header("Authorization", f"Bearer {self.config.api_key}")
+        request.add_header("User-Agent", OPENAI_IMAGE_USER_AGENT)
         active_connection: list[http.client.HTTPSConnection | None] = [None]
 
         def remember_connection(connection: http.client.HTTPSConnection) -> None:
@@ -1033,6 +1122,156 @@ class OpenAIImageAPI:
             _validate_task_state(_sanitize_task_snapshot(task, self.config.api_key)),
             operational_result_url,
         )
+
+    def _parse_sub2api_task(
+        self,
+        payload: Mapping[str, Any],
+        previous: ImageTaskSnapshot | None,
+    ) -> tuple[ImageTaskSnapshot, str]:
+        values = _task_payload(payload)
+        task_id = _normalize_task_id(values.get("task_id") or values.get("id"))
+        if previous is not None and task_id != previous.task_id:
+            raise OpenAIImageAPIError(
+                "invalid_response", "GPT Image API returned a mismatched task ID."
+            )
+
+        raw_status = values.get("status")
+        if not isinstance(raw_status, str) or not raw_status.strip():
+            raise OpenAIImageAPIError(
+                "invalid_response", "GPT Image API returned no task state."
+            )
+        status = raw_status.strip().lower()
+        state_by_status = {
+            "pending": ("pending", False),
+            "queued": ("pending", False),
+            "processing": ("running", False),
+            "running": ("running", False),
+            "completed": ("success", True),
+            "success": ("success", True),
+            "failed": ("failed", True),
+        }
+        mapped = state_by_status.get(status)
+        if mapped is None:
+            raise OpenAIImageAPIError(
+                "invalid_response", "GPT Image API returned an invalid task state."
+            )
+        state, is_final = mapped
+
+        operational_result_url = ""
+        if state == "success":
+            result = values.get("result")
+            if isinstance(result, Mapping):
+                try:
+                    kind, value = _sync_image_result(result)
+                except OpenAIImageAPIError:
+                    kind, value = "", ""
+                if kind == "url" and isinstance(value, str):
+                    operational_result_url = value
+            if not operational_result_url:
+                image_url = values.get("image_url")
+                if isinstance(image_url, str):
+                    operational_result_url = image_url.strip()
+            if not operational_result_url:
+                raise OpenAIImageAPIError(
+                    "invalid_response", "GPT Image API returned no generated image."
+                )
+
+        error_value = values.get("error")
+        if isinstance(error_value, Mapping):
+            error_value = error_value.get("message") or error_value.get("type")
+        created_at = previous.task_created_at if previous is not None else values.get("created_at")
+        if not _is_valid_timestamp(created_at):
+            created_at = time.time()
+        task = ImageTaskSnapshot(
+            task_id=task_id,
+            state=state,
+            is_final=is_final,
+            task_created_at=float(created_at),
+            progress=_task_text(values.get("progress"), limit=80),
+            status=_task_text(raw_status, limit=160),
+            status_group=_task_text(values.get("status_group"), limit=160),
+            result_url=_task_text(operational_result_url, limit=4096),
+            result_type="image" if state == "success" else "",
+            error=_task_text(error_value),
+            cost=values.get("cost"),
+        )
+        return (
+            _validate_task_state(_sanitize_task_snapshot(task, self.config.api_key)),
+            operational_result_url,
+        )
+
+    def _poll_sub2api_task(
+        self,
+        task: ImageTaskSnapshot,
+        status_callback: Callable[[str], None] | None,
+        task_callback: Callable[[ImageTaskSnapshot], None] | None,
+        display_callback: Callable[[ImageTaskDisplayStatus], None] | None,
+        *,
+        initial_delay: float = 0.0,
+    ) -> tuple[ImageTaskSnapshot, str]:
+        started_at = time.monotonic()
+        deadline = started_at + TASK_WAIT_LIMIT_SECONDS
+        status_url = _images_task_endpoint(self.config.base_url, task.task_id)
+        if initial_delay > 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ImageTaskStillRunning(task)
+            self._sleep(min(initial_delay, remaining))
+        while True:
+            if time.monotonic() >= deadline:
+                raise ImageTaskStillRunning(task)
+            try:
+                payload, retry_after = self._request_json_url(
+                    status_url,
+                    status_callback=status_callback,
+                    deadline=deadline,
+                )
+            except _InvocationDeadlineExceeded:
+                raise ImageTaskStillRunning(task) from None
+            except OpenAIImageAPIError:
+                # Once the paid submission returned a task ID, any lookup failure
+                # is ambiguous. Keep the checkpoint resumable; only a successfully
+                # parsed terminal ``failed`` task may authorize a fresh submission.
+                raise ImageTaskStillRunning(task) from None
+            if time.monotonic() >= deadline:
+                raise ImageTaskStillRunning(task)
+            task, operational_result_url = self._parse_sub2api_task(payload, task)
+            _notify_task(task_callback, task)
+            elapsed = max(0.0, time.monotonic() - started_at)
+            if task.state == "failed":
+                raise _task_failed_error(task, self.config.api_key)
+            if task.is_final:
+                download_message = "✅ GPT Image 生成完成，正在安全下载图片"
+                _notify_status(status_callback, download_message)
+                _notify_display(
+                    display_callback,
+                    task,
+                    phase="downloading",
+                    elapsed_seconds=int(elapsed),
+                    message=download_message,
+                )
+                return task, operational_result_url
+
+            display = task.status or task.state
+            progress = f" · {task.progress}" if task.progress else ""
+            suffix = safe_task_display_token(task.task_id)
+            progress_message = (
+                f"⏳ GPT Image {display}{progress} · 已等待 {int(elapsed)} 秒 · "
+                f"任务 …{suffix}"
+            )
+            _notify_status(status_callback, progress_message)
+            _notify_display(
+                display_callback,
+                task,
+                phase="polling",
+                elapsed_seconds=int(elapsed),
+                message=progress_message,
+            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ImageTaskStillRunning(task)
+            delay = retry_after if retry_after is not None else 3.0
+            self._sleep(min(delay, remaining))
 
     def _poll_task(
         self,
