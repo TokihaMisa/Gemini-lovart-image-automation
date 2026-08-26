@@ -52,6 +52,11 @@ TASK_WAIT_LIMIT_SECONDS: Final = 600.0
 STATUS_WORKER_CLEANUP_GRACE_SECONDS: Final = 0.05
 MAX_TASK_ID_LENGTH: Final = 128
 _VALID_RESOLUTIONS: Final = {"1K", "2K", "4K"}
+_SUB2API_QUALITY_BY_RESOLUTION: Final = {
+    "1K": "low",
+    "2K": "medium",
+    "4K": "high",
+}
 _PIXEL_SIZES_BY_RESOLUTION: Final = {
     "1K": (
         (1 / 2, "960x1920"),
@@ -751,6 +756,7 @@ class OpenAIImageAPI:
             append_aspect_instruction(prompt, image_size),
             _provider_image_size(self.config.resolution, image_size),
             images,
+            quality=_SUB2API_QUALITY_BY_RESOLUTION[self.config.resolution],
         )
         waiting_message = "⏳ GPT Image 同步请求已提交，正在等待平台返回图片"
         _notify_status(status_callback, waiting_message)
@@ -1283,12 +1289,15 @@ def _build_sync_edit_body(
     prompt: str,
     size: str,
     images: Sequence[str],
+    *,
+    quality: str,
 ) -> bytes:
     payload = {
         "model": str(model),
         "prompt": str(prompt),
         "images": [{"image_url": str(image)} for image in images],
         "size": str(size),
+        "quality": str(quality),
     }
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if len(body) > MAX_CREATE_BODY_BYTES:

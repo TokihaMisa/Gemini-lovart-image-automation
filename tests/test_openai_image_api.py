@@ -459,7 +459,13 @@ def test_sub2api_sync_body_uses_documented_images_array_contract():
         "data:image/jpeg;base64,c2Vjb25k",
     ]
     payload = json.loads(
-        _build_sync_edit_body("gpt-image-2", "keep exact", "1024x1536", encoded_images)
+        _build_sync_edit_body(
+            "gpt-image-2",
+            "keep exact",
+            "1024x1536",
+            encoded_images,
+            quality="low",
+        )
     )
 
     assert payload == {
@@ -470,6 +476,7 @@ def test_sub2api_sync_body_uses_documented_images_array_contract():
             {"image_url": encoded_images[1]},
         ],
         "size": "1024x1536",
+        "quality": "low",
     }
 
 
@@ -765,6 +772,33 @@ def test_sub2api_sync_generate_saves_b64_result_without_polling(tmp_path):
     assert output.read_bytes() == base64.b64decode(VALID_ONE_PIXEL_PNG_BASE64)
     assert any("同步" in status for status in statuses)
     poll_task.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("resolution", "expected_quality"),
+    [("1K", "low"), ("2K", "medium"), ("4K", "high")],
+)
+def test_sub2api_sync_maps_resolution_to_billing_quality_tier(
+    tmp_path, resolution, expected_quality
+):
+    """Fails if Sub2API silently bills a selected resolution at its default 2K tier."""
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+        resolution=resolution,
+    )
+    response = {"data": [{"b64_json": VALID_ONE_PIXEL_PNG_BASE64}]}
+
+    with patch.object(client, "_request_json", return_value=response) as request_json:
+        client.generate_edit(
+            "prompt",
+            [make_png(tmp_path / f"source-{resolution}.png")],
+            tmp_path / f"out-{resolution}.png",
+        )
+
+    body = json.loads(request_json.call_args.args[1])
+    assert body["quality"] == expected_quality
 
 
 def test_sub2api_sync_uncertain_response_never_reposts_and_blocks_auto_retry(tmp_path):
