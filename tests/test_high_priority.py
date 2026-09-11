@@ -25,8 +25,8 @@ from utils import (
 
 
 class HighPriorityBehaviorTests(unittest.TestCase):
-    def test_v1_3_23_release_metadata_and_ui_are_consistent(self):
-        expected_version = "1.3.23"
+    def test_v1_3_24_release_metadata_and_ui_are_consistent(self):
+        expected_version = "1.3.24"
         version_source = Path("version.py").read_text(encoding="utf-8")
         version_info = json.loads(Path("version.json").read_text(encoding="utf-8"))
         webui_source = Path("webui.py").read_text(encoding="utf-8")

@@ -1,7 +1,7 @@
 {
-  "version": "1.3.23",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.23/update.zip",
-  "changelog": "新增问鼎与 Sub2API 生图服务切换；Sub2API 改用可恢复异步任务并持久化任务 ID，支持重启续查、防止重复扣费、默认 2 个平台任务并行与每 10 秒自动复查；修正 1K/2K/4K 计费尺寸，并兼容 Cloudflare 代理。",
-  "sha256": "60dedb700609de05b6c7ab9c74d2c97029dac03d28536e12574b9d03820748b9",
-  "size": 132013575
+  "version": "1.3.24",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.24/update.zip",
+  "changelog": "修复大批量任务导致的 WebUI 内存溢出：原图改为按需小缩略图，面板固定显示当前及最近 50 个任务，每个商品限制 20 条界面日志，并批量处理任务目录；页面断开后停止日志读取，界面输出管道断开时后台任务继续运行。",
+  "sha256": "a53f1ac0787bf054091b6e893c01505ed9ee8282377227670d8820defb76f91b",
+  "size": 130283018
 }
