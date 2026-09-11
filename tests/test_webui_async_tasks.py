@@ -1,6 +1,10 @@
 import io
 import json
+import os
+import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -264,6 +268,126 @@ def test_product_logs_are_bounded_to_latest_entries():
         webui._append_product_log(product, f"log-{index}")
 
     assert product["logs"] == [f"log-{index}" for index in range(80, 100)]
+
+
+def test_source_mode_launches_through_resilient_app_wrapper(tmp_path):
+    child = Mock()
+    child.stdout = io.StringIO("")
+    child.poll.return_value = 0
+    with (
+        patch("webui.subprocess.Popen", return_value=child) as popen,
+        patch("webui.load_config", return_value={
+            "gemini_api": {"model": "gemini-model"},
+            "nvidia_api": {"model": "nvidia-model"},
+        }),
+        patch("webui._save_config_and_env_transaction"),
+        patch.object(sys, "frozen", False, create=True),
+    ):
+        list(
+            webui.run_process(
+                None,
+                str(tmp_path),
+                "gemini_api",
+                "gemini-model",
+                "unlimited",
+                "auto",
+                "https://gemini.test/v1beta",
+                "https://nvidia.test/v1",
+                "gemini-key",
+                "nvidia-key",
+                "",
+                "",
+            )
+        )
+
+    argv = popen.call_args.args[0]
+    assert Path(argv[1]).name == "app.py"
+    assert argv[2] == "--run-main"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows pipe cancellation regression")
+def test_dashboard_disconnect_stops_output_reader_and_closes_pipe(tmp_path):
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        with (
+            patch("webui.subprocess.Popen", return_value=child),
+            patch("webui.load_config", return_value={
+                "gemini_api": {"model": "gemini-model"},
+                "nvidia_api": {"model": "nvidia-model"},
+            }),
+            patch("webui._save_config_and_env_transaction"),
+        ):
+            dashboard = webui.run_process(
+                None,
+                str(tmp_path),
+                "gemini_api",
+                "gemini-model",
+                "unlimited",
+                "auto",
+                "https://gemini.test/v1beta",
+                "https://nvidia.test/v1",
+                "gemini-key",
+                "nvidia-key",
+                "",
+                "",
+            )
+            next(dashboard)
+            next(dashboard)
+            next(dashboard)
+            dashboard.close()
+            deadline = time.monotonic() + 1.0
+            while not child.stdout.closed and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert child.stdout.closed
+            assert child.poll() is None
+    finally:
+        if child.poll() is None:
+            child.terminate()
+        child.wait(timeout=5)
+        if child in webui.active_processes:
+            webui.active_processes.remove(child)
+
+
+def test_thumbnail_rotates_only_after_source_is_reduced(tmp_path):
+    image_path = tmp_path / "large.jpg"
+    Image.new("RGB", (1200, 900), "#5a7d9a").save(image_path)
+    transpose_sizes = []
+
+    def record_transpose_size(image):
+        transpose_sizes.append(image.size)
+        return image
+
+    with patch("PIL.ImageOps.exif_transpose", side_effect=record_transpose_size):
+        uri = webui._dashboard_thumbnail_data_uri(str(image_path))
+
+    assert uri.startswith("data:image/jpeg;base64,")
+    assert transpose_sizes
+    assert max(transpose_sizes[0]) <= max(webui._DASHBOARD_THUMBNAIL_SIZE)
+
+
+def test_dashboard_status_counts_include_background_running_and_skipped():
+    counts = webui._dashboard_status_counts(
+        {
+            "RUNNING": {"stage": "support_scene", "still_running": True},
+            "SKIPPED": {"stage": "skipped", "status": "已跳过"},
+            "WAITING": {"status": "等待处理"},
+        },
+        current_pid="WAITING",
+    )
+
+    assert counts == {
+        "total": 3,
+        "waiting": 0,
+        "running": 2,
+        "success": 0,
+        "failed": 0,
+        "skipped": 1,
+    }
 
 
 @pytest.mark.parametrize(

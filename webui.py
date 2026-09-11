@@ -8,6 +8,7 @@ import atexit
 from collections import deque
 from copy import deepcopy
 from dataclasses import asdict
+from functools import wraps
 from pathlib import Path
 
 import gradio as gr
@@ -86,6 +87,73 @@ API_SETTINGS_SAVE_SUCCESS = "✅ 密钥、API 地址和模型已保存"
 _DASHBOARD_THUMBNAIL_SIZE = (96, 96)
 _DASHBOARD_CARD_LIMIT = 50
 _DASHBOARD_PRODUCT_LOG_LIMIT = 20
+_DASHBOARD_OUTPUT_QUEUE_LIMIT = 128
+
+
+def _cancel_windows_synchronous_io(thread: threading.Thread) -> None:
+    """Wake a Windows thread blocked in a synchronous pipe read."""
+
+    if os.name != "nt" or not thread.is_alive() or thread.native_id is None:
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenThread.argtypes = [
+            ctypes.c_ulong,
+            ctypes.c_int,
+            ctypes.c_ulong,
+        ]
+        kernel32.OpenThread.restype = ctypes.c_void_p
+        kernel32.CancelSynchronousIo.argtypes = [ctypes.c_void_p]
+        kernel32.CancelSynchronousIo.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        thread_handle = kernel32.OpenThread(0x0001, False, thread.native_id)
+        if thread_handle:
+            try:
+                kernel32.CancelSynchronousIo(thread_handle)
+            finally:
+                kernel32.CloseHandle(thread_handle)
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+class _OutputReaderCancellation:
+    def __init__(self):
+        self._event = threading.Event()
+        self._thread = None
+
+    def bind(self, thread: threading.Thread) -> None:
+        self._thread = thread
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    def cancel(self) -> None:
+        self._event.set()
+        thread = self._thread
+        if thread is None or thread is threading.current_thread():
+            return
+        _cancel_windows_synchronous_io(thread)
+        thread.join(timeout=1.0)
+
+
+def _cancel_output_reader_on_disconnect(func):
+    """Stop a run's output pump when Gradio closes its response generator."""
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        cancellation = _OutputReaderCancellation()
+        kwargs["_output_cancellation"] = cancellation
+        inner = func(*args, **kwargs)
+        try:
+            yield from inner
+        finally:
+            cancellation.cancel()
+            inner.close()
+
+    return wrapper
 
 
 def _dashboard_thumbnail_data_uri(image_path: str) -> str:
@@ -103,8 +171,13 @@ def _dashboard_thumbnail_data_uri(image_path: str) -> str:
         if not path.is_file():
             return ""
         with Image.open(path) as source:
+            source.draft("RGB", _DASHBOARD_THUMBNAIL_SIZE)
+            source.thumbnail(
+                _DASHBOARD_THUMBNAIL_SIZE,
+                Image.Resampling.LANCZOS,
+                reducing_gap=2.0,
+            )
             preview = ImageOps.exif_transpose(source)
-            preview.thumbnail(_DASHBOARD_THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
             if preview.mode in {"RGBA", "LA"} or (
                 preview.mode == "P" and "transparency" in preview.info
             ):
@@ -173,7 +246,14 @@ def _append_product_log(product: dict, message: str) -> int:
 
 
 def _dashboard_status_counts(products: dict, current_pid: str | None) -> dict[str, int]:
-    counts = {"total": len(products), "waiting": 0, "running": 0, "success": 0, "failed": 0}
+    counts = {
+        "total": len(products),
+        "waiting": 0,
+        "running": 0,
+        "success": 0,
+        "failed": 0,
+        "skipped": 0,
+    }
     for product_id, product in products.items():
         stage = str(product.get("stage") or "")
         status = str(product.get("status") or "")
@@ -181,6 +261,10 @@ def _dashboard_status_counts(products: dict, current_pid: str | None) -> dict[st
             counts["success"] += 1
         elif stage in {"failed", "manual"} or status.startswith(("❌", "⚠️")):
             counts["failed"] += 1
+        elif stage == "skipped" or "已跳过" in status:
+            counts["skipped"] += 1
+        elif product.get("still_running") is True:
+            counts["running"] += 1
         elif product_id == current_pid and stage not in {"complete", "failed", "manual"}:
             counts["running"] += 1
         else:
@@ -1827,6 +1911,7 @@ def sub2api_image_key_status(env_path: str | Path = ".env") -> str:
     )
 
 
+@_cancel_output_reader_on_disconnect
 def run_process(
     excel_file,
     custom_output_dir,
@@ -1858,6 +1943,7 @@ def run_process(
     sub2api_merge_reference_images=None,
     config_path="config.yaml",
     env_path=".env",
+    _output_cancellation=None,
 ):
     guard_message = guard_gemini_browser_task(prompt_source, config_path=config_path)
     if guard_message:
@@ -2003,7 +2089,7 @@ def run_process(
     if getattr(sys, 'frozen', False):
         cmd = [sys.executable, "--run-main"] + cmd_args
     else:
-        cmd = [sys.executable, "main.py"] + cmd_args
+        cmd = [sys.executable, str(Path(__file__).resolve().with_name("app.py")), "--run-main"] + cmd_args
     
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
@@ -2139,7 +2225,7 @@ def run_process(
             </div>
 
             <div style="color: #94a3b8; font-size: 0.85em; margin-bottom: 12px;">
-                总数 {counts['total']} · 等待 {counts['waiting']} · 执行中 {counts['running']} · 成功 {counts['success']} · 失败 {counts['failed']} · 显示 {len(visible_ids)} / {counts['total']}
+                总数 {counts['total']} · 等待 {counts['waiting']} · 执行中 {counts['running']} · 成功 {counts['success']} · 失败 {counts['failed']} · 跳过 {counts['skipped']} · 显示 {len(visible_ids)} / {counts['total']}
             </div>
 
             {cards_html}
@@ -2152,18 +2238,32 @@ def run_process(
     
     last_yield_time = time.time()
     
-    q = queue.Queue()
-    def _read_output(out, q):
+    q = queue.Queue(maxsize=_DASHBOARD_OUTPUT_QUEUE_LIMIT)
+    output_cancellation = _output_cancellation or _OutputReaderCancellation()
+
+    def _read_output(out, q, cancellation):
         try:
             for line in iter(out.readline, ''):
-                q.put(line)
+                if cancellation.is_set():
+                    break
+                while not cancellation.is_set():
+                    try:
+                        q.put(line, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
         except Exception:
             pass
         finally:
             out.close()
             
-    t = threading.Thread(target=_read_output, args=(process.stdout, q), daemon=True)
+    t = threading.Thread(
+        target=_read_output,
+        args=(process.stdout, q, output_cancellation),
+        daemon=True,
+    )
     t.start()
+    output_cancellation.bind(t)
     
     while True:
         try:
@@ -2385,6 +2485,8 @@ def run_process(
         elif clean_line.startswith("SKIP"):
             for pid in products_dict:
                 if pid in clean_line:
+                    _end_product_live_status(products_dict[pid])
+                    products_dict[pid]["stage"] = "skipped"
                     products_dict[pid]["status"] = "⏭️ 已跳过"
                     products_dict[pid]["color"] = "#64748b"
                     mark_recent_product(pid)
