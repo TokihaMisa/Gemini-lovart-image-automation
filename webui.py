@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 import atexit
+from collections import deque
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
@@ -82,6 +83,109 @@ PROMPT_FORM_FIELDS = (
 
 active_processes = []
 API_SETTINGS_SAVE_SUCCESS = "✅ 密钥、API 地址和模型已保存"
+_DASHBOARD_THUMBNAIL_SIZE = (96, 96)
+_DASHBOARD_CARD_LIMIT = 50
+_DASHBOARD_PRODUCT_LOG_LIMIT = 20
+
+
+def _dashboard_thumbnail_data_uri(image_path: str) -> str:
+    """Return a small preview so dashboard refreshes never resend full images."""
+
+    if not image_path:
+        return ""
+    try:
+        import base64
+        import io
+
+        from PIL import Image, ImageOps
+
+        path = Path(image_path)
+        if not path.is_file():
+            return ""
+        with Image.open(path) as source:
+            preview = ImageOps.exif_transpose(source)
+            preview.thumbnail(_DASHBOARD_THUMBNAIL_SIZE, Image.Resampling.LANCZOS)
+            if preview.mode in {"RGBA", "LA"} or (
+                preview.mode == "P" and "transparency" in preview.info
+            ):
+                rgba = preview.convert("RGBA")
+                background = Image.new("RGB", rgba.size, "white")
+                background.paste(rgba, mask=rgba.getchannel("A"))
+                preview = background
+            else:
+                preview = preview.convert("RGB")
+            buffer = io.BytesIO()
+            preview.save(buffer, format="JPEG", quality=72, optimize=True)
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{encoded}"
+    except Exception:
+        return ""
+
+
+def _dashboard_visible_product_ids(
+    products: dict,
+    *,
+    current_pid: str | None,
+    recent_product_ids,
+    limit: int = _DASHBOARD_CARD_LIMIT,
+) -> list[str]:
+    """Select a bounded card window while keeping active and recent work visible."""
+
+    selected = []
+    selected_set = set()
+
+    def add(product_id) -> None:
+        if (
+            len(selected) < limit
+            and product_id in products
+            and product_id not in selected_set
+        ):
+            selected.append(product_id)
+            selected_set.add(product_id)
+
+    add(current_pid)
+    for product_id in reversed(tuple(recent_product_ids)):
+        add(product_id)
+    for product_id in products:
+        add(product_id)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _append_product_log(product: dict, message: str) -> int:
+    """Append a card log while keeping its in-memory history bounded."""
+
+    product_logs = product.setdefault("logs", [])
+    product_logs.append(message)
+    overflow = len(product_logs) - _DASHBOARD_PRODUCT_LOG_LIMIT
+    if overflow > 0:
+        del product_logs[:overflow]
+        live_indexes = product.get("_live_task_log_indexes")
+        if isinstance(live_indexes, dict):
+            for stage, index in tuple(live_indexes.items()):
+                adjusted = index - overflow if isinstance(index, int) else -1
+                if adjusted < 0:
+                    live_indexes.pop(stage, None)
+                else:
+                    live_indexes[stage] = adjusted
+    return len(product_logs) - 1
+
+
+def _dashboard_status_counts(products: dict, current_pid: str | None) -> dict[str, int]:
+    counts = {"total": len(products), "waiting": 0, "running": 0, "success": 0, "failed": 0}
+    for product_id, product in products.items():
+        stage = str(product.get("stage") or "")
+        status = str(product.get("status") or "")
+        if stage == "complete" or "成功生成" in status:
+            counts["success"] += 1
+        elif stage in {"failed", "manual"} or status.startswith(("❌", "⚠️")):
+            counts["failed"] += 1
+        elif product_id == current_pid and stage not in {"complete", "failed", "manual"}:
+            counts["running"] += 1
+        else:
+            counts["waiting"] += 1
+    return counts
 
 
 def _live_product_status(product: dict, *, now: float | None = None) -> str:
@@ -184,7 +288,7 @@ def _record_product_status_log(
     if not live_task or not _is_live_image_stage(stage):
         stage_log = f"▶ {escaped_message}"
         if not product_logs or product_logs[-1] != stage_log:
-            product_logs.append(stage_log)
+            _append_product_log(product, stage_log)
         return
 
     stage_log = (
@@ -200,8 +304,7 @@ def _record_product_status_log(
     ):
         product_logs[live_index] = stage_log
         return
-    product_logs.append(stage_log)
-    live_indexes[stage] = len(product_logs) - 1
+    live_indexes[stage] = _append_product_log(product, stage_log)
 
 
 def _end_product_live_status(product: dict) -> None:
@@ -1926,32 +2029,45 @@ def run_process(
     current_status = "准备启动环境"
     current_model = lovart_image_model if lovart_image_model else "auto"
     status_color = "#64748b" # slate
+    current_pid = None
     
     products_dict = {}
+    recent_product_ids = deque(maxlen=_DASHBOARD_CARD_LIMIT)
+
+    def mark_recent_product(product_id: str) -> None:
+        try:
+            recent_product_ids.remove(product_id)
+        except ValueError:
+            pass
+        recent_product_ids.append(product_id)
     
     status_output_dir = custom_output_dir.strip() if custom_output_dir and custom_output_dir.strip() else "output"
     def render_board():
         _refresh_openai_image_product_statuses(products_dict, status_output_dir)
+        visible_ids = _dashboard_visible_product_ids(
+            products_dict,
+            current_pid=current_pid,
+            recent_product_ids=recent_product_ids,
+        )
+        visible_set = set(visible_ids)
+        for product_id, product_data in products_dict.items():
+            if product_id not in visible_set:
+                product_data.pop("thumbnail_uri", None)
+        counts = _dashboard_status_counts(products_dict, current_pid)
         cards_html = ""
-        if products_dict:
+        if visible_ids:
             cards_html += "<div style='display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 15px; margin-top: 20px;'>"
-            for pid, pdata in products_dict.items():
+            for pid in visible_ids:
+                pdata = products_dict[pid]
                 live_status = html.escape(_live_product_status(pdata))
                 img_tag = ""
-                if pdata.get("image"):
-                    try:
-                        import base64
-                        import os
-                        img_path = pdata["image"]
-                        if os.path.exists(img_path):
-                            with open(img_path, "rb") as f:
-                                encoded = base64.b64encode(f.read()).decode('utf-8')
-                            ext = os.path.splitext(img_path)[1].lower().replace('.', '')
-                            if ext == 'jpg': ext = 'jpeg'
-                            b64_src = f"data:image/{ext};base64,{encoded}"
-                            img_tag = f"<img src='{b64_src}' style='width: 60px; height: 60px; object-fit: cover; border-radius: 8px; flex-shrink: 0; box-shadow: 0 2px 5px rgba(0,0,0,0.1);'>"
-                    except Exception:
-                        pass
+                if "thumbnail_uri" not in pdata:
+                    pdata["thumbnail_uri"] = _dashboard_thumbnail_data_uri(
+                        pdata.get("image", "")
+                    )
+                thumbnail_uri = pdata["thumbnail_uri"]
+                if thumbnail_uri:
+                    img_tag = f"<img src='{thumbnail_uri}' style='width: 60px; height: 60px; object-fit: cover; border-radius: 8px; flex-shrink: 0; box-shadow: 0 2px 5px rgba(0,0,0,0.1);'>"
                 
                 link_tag = ""
                 if pdata.get("url"):
@@ -2022,14 +2138,16 @@ def run_process(
                 </div>
             </div>
 
+            <div style="color: #94a3b8; font-size: 0.85em; margin-bottom: 12px;">
+                总数 {counts['total']} · 等待 {counts['waiting']} · 执行中 {counts['running']} · 成功 {counts['success']} · 失败 {counts['failed']} · 显示 {len(visible_ids)} / {counts['total']}
+            </div>
+
             {cards_html}
 
         </div>
         """
         
     yield render_board()
-    
-    current_pid = None
     import time, json, threading, queue
     
     last_yield_time = time.time()
@@ -2093,7 +2211,7 @@ def run_process(
                 # Strip timestamps or common prefixes to make it cleaner on the card
                 clean_msg = clean_line.split("]")[-1].strip() if "]" in clean_line else clean_line
                 if "INFO" not in clean_line: # ignore basic INFO lines to save space
-                    products_dict[current_pid].setdefault("logs", []).append(f"▶ {clean_msg}")
+                    _append_product_log(products_dict[current_pid], f"▶ {clean_msg}")
         
         render_immediately = False
         if is_uistatus:
@@ -2119,6 +2237,7 @@ def run_process(
                     products_dict[pid]["stage"] = stage
                     products_dict[pid]["status"] = message
                     products_dict[pid]["color"] = status_color
+                    mark_recent_product(pid)
                     _record_product_status_log(
                         products_dict[pid],
                         stage,
@@ -2152,7 +2271,7 @@ def run_process(
                     models_att = products_dict[current_pid].setdefault("models_attempted", [])
                     if model_name not in models_att:
                         models_att.append(model_name)
-                    products_dict[current_pid].setdefault("logs", []).append(f"<span style='color: #d946ef;'>🔄 正在尝试模型: {model_name}</span>")
+                    _append_product_log(products_dict[current_pid], f"<span style='color: #d946ef;'>🔄 正在尝试模型: {model_name}</span>")
             except:
                 pass
         elif is_uiproduct:
@@ -2161,8 +2280,8 @@ def run_process(
                 pid = data["id"]
                 if pid not in products_dict:
                     products_dict[pid] = {"name": data["name"], "status": "⏳ 等待处理", "color": "#94a3b8", "logs": []}
-                products_dict[pid]["image"] = data.get("image", "")
-                render_immediately = True
+                image_path = data.get("image", "")
+                products_dict[pid]["image"] = image_path
             except:
                 pass
         elif is_uisuccess:
@@ -2175,12 +2294,13 @@ def run_process(
                     products_dict[pid]["stage"] = "complete"
                     products_dict[pid]["status"] = "🎉 成功生成"
                     products_dict[pid]["color"] = "#10b981"
+                    mark_recent_product(pid)
                     current_status = f"🎉 {pid} 已完成"
                     status_color = "#10b981"
                     model = data.get("used_model", "")
                     if model and model != "unknown":
                         products_dict[pid]["used_model"] = model
-                        products_dict[pid].setdefault("logs", []).append(f"<span style='color: #a855f7;'>✨ 最终使用大模型: <b>{model}</b></span>")
+                        _append_product_log(products_dict[pid], f"<span style='color: #a855f7;'>✨ 最终使用大模型: <b>{model}</b></span>")
             except:
                 pass
         elif is_uifail:
@@ -2195,8 +2315,9 @@ def run_process(
                     products_dict[pid]["stage"] = "manual" if is_manual else "failed"
                     products_dict[pid]["status"] = f"{'⚠️' if is_manual else '❌'} {reason}"
                     products_dict[pid]["color"] = status_color
+                    mark_recent_product(pid)
                     current_status = f"❌ {pid} 失败" if not is_manual else f"⚠️ {pid} 待确认"
-                    products_dict[pid].setdefault("logs", []).append(f"<span style='color: {'#fbbf24' if is_manual else '#f87171'}'>[报错] {reason}</span>")
+                    _append_product_log(products_dict[pid], f"<span style='color: {'#fbbf24' if is_manual else '#f87171'}'>[报错] {reason}</span>")
             except:
                 pass
         elif "| size=" in clean_line and "lang=" in clean_line and clean_line.startswith("["):
@@ -2215,26 +2336,27 @@ def run_process(
             pid = clean_line.split()[-1].strip()
             if pid in products_dict:
                 current_pid = pid
+                mark_recent_product(pid)
                 current_product = f"{pid} - {products_dict[pid]['name']}"
                 current_status = "🔄 提取卖点 & 构思画面"
                 status_color = "#8b5cf6"
                 products_dict[pid]["status"] = current_status
                 products_dict[pid]["color"] = status_color
-                products_dict[pid].setdefault("logs", []).append("▶ 提取卖点 & 构思画面...")
+                _append_product_log(products_dict[pid], "▶ 提取卖点 & 构思画面...")
         elif "Gemini done" in clean_line:
             current_status = "✅ 提示词生成完毕"
             status_color = "#06b6d4"
             if current_pid and current_pid in products_dict:
                 products_dict[current_pid]["status"] = current_status
                 products_dict[current_pid]["color"] = status_color
-                products_dict[current_pid].setdefault("logs", []).append("▶ Gemini 提示词生成完毕")
+                _append_product_log(products_dict[current_pid], "▶ Gemini 提示词生成完毕")
         elif "Lovart API: sent" in clean_line or "Lovart API: Sent" in clean_line:
             current_status = "🎨 提交生成任务"
             status_color = "#f59e0b"
             if current_pid and current_pid in products_dict:
                 products_dict[current_pid]["status"] = current_status
                 products_dict[current_pid]["color"] = status_color
-                products_dict[current_pid].setdefault("logs", []).append("▶ 正在向 Lovart 提交 API 生成请求...")
+                _append_product_log(products_dict[current_pid], "▶ 正在向 Lovart 提交 API 生成请求...")
         elif is_progress:
             parts = clean_line.split("|")
             if len(parts) >= 2:
@@ -2250,7 +2372,7 @@ def run_process(
                     if product_logs and "data-live-progress='true'" in product_logs[-1]:
                         product_logs[-1] = progress_line
                     else:
-                        product_logs.append(progress_line)
+                        _append_product_log(products_dict[current_pid], progress_line)
         elif clean_line.startswith("OK") or "completed" in clean_line.lower() or "SUCCESS" in clean_line:
             current_status = "🎉 单个商品全部完成"
             status_color = "#10b981"
@@ -2258,13 +2380,15 @@ def run_process(
                 if pid in clean_line:
                     products_dict[pid]["status"] = "🎉 成功生成"
                     products_dict[pid]["color"] = status_color
-                    products_dict[pid].setdefault("logs", []).append("<span style='color: #4ade80;'>✅ 任务执行成功</span>")
+                    mark_recent_product(pid)
+                    _append_product_log(products_dict[pid], "<span style='color: #4ade80;'>✅ 任务执行成功</span>")
         elif clean_line.startswith("SKIP"):
             for pid in products_dict:
                 if pid in clean_line:
                     products_dict[pid]["status"] = "⏭️ 已跳过"
                     products_dict[pid]["color"] = "#64748b"
-                    products_dict[pid].setdefault("logs", []).append("⏭️ 命中缓存，任务已跳过")
+                    mark_recent_product(pid)
+                    _append_product_log(products_dict[pid], "⏭️ 命中缓存，任务已跳过")
             
         # Throttling rendering to avoid freezing UI
         if render_immediately or time.time() - last_yield_time > 0.5:

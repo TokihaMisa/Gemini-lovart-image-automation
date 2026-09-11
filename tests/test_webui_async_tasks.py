@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+from PIL import Image
 
 import webui
 from openai_image_api import GeneratedImage, ImageTaskSnapshot, OpenAIImageAPI
@@ -190,6 +191,79 @@ def _run_dashboard_frames(lines, output_dir):
                 "",
             )
         )
+
+
+def test_dashboard_uses_bounded_thumbnail_payload_for_large_product_image(tmp_path):
+    image_path = tmp_path / "large-product.bmp"
+    Image.new("RGB", (1400, 1000), "#5a7d9a").save(image_path)
+    assert image_path.stat().st_size > 4_000_000
+
+    frames = _run_dashboard_frames(
+        [
+            "[UI_PRODUCT] "
+            + json.dumps(
+                {"id": "SKU-1", "name": "测试商品", "image": str(image_path)},
+                ensure_ascii=False,
+            )
+            + "\n",
+            '[UI_STATUS] {"id":"SKU-1","stage":"product","message":"处理中"}\n',
+            '[UI_STATUS] {"id":"SKU-1","stage":"prompt","message":"生成提示词"}\n',
+        ],
+        tmp_path,
+    )
+
+    image_frames = [frame for frame in frames if "data:image/" in frame]
+    assert image_frames
+    assert max(len(frame.encode("utf-8")) for frame in image_frames) < 250_000
+
+
+def test_dashboard_visible_set_is_bounded_and_keeps_current_product_first():
+    products = {
+        f"SKU-{index:04d}": {"status": "等待处理"}
+        for index in range(1_000)
+    }
+
+    visible = webui._dashboard_visible_product_ids(
+        products,
+        current_pid="SKU-0999",
+        recent_product_ids=[f"SKU-{index:04d}" for index in range(900, 999)],
+    )
+
+    assert len(visible) == 50
+    assert visible[0] == "SKU-0999"
+    assert len(set(visible)) == 50
+
+
+def test_dashboard_batches_catalog_events_and_renders_only_card_limit(tmp_path):
+    lines = [
+        "[UI_PRODUCT] "
+        + json.dumps(
+            {"id": f"SKU-{index:03d}", "name": f"商品 {index}", "image": ""},
+            ensure_ascii=False,
+        )
+        + "\n"
+        for index in range(1_000)
+    ]
+    lines.append(
+        '[UI_STATUS] {"id":"SKU-999","stage":"product","message":"处理中"}\n'
+    )
+
+    frames = _run_dashboard_frames(lines, tmp_path)
+    final_frame = frames[-1]
+
+    assert final_frame.count("class='status-card'") == 50
+    assert "ID: SKU-999" in final_frame
+    assert "显示 50 / 1000" in final_frame
+    assert len(frames) <= 6
+
+
+def test_product_logs_are_bounded_to_latest_entries():
+    product = {}
+
+    for index in range(100):
+        webui._append_product_log(product, f"log-{index}")
+
+    assert product["logs"] == [f"log-{index}" for index in range(80, 100)]
 
 
 @pytest.mark.parametrize(

@@ -11,6 +11,41 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
+
+class ResilientOutputStream:
+    """Keep background work alive after its WebUI output pipe disconnects."""
+
+    _DISCONNECTED_ERRNOS = {22, 32}
+    _DISCONNECTED_WINERRORS = {6, 109, 232}
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def _is_disconnected(self, exc: OSError) -> bool:
+        return exc.errno in self._DISCONNECTED_ERRNOS or getattr(
+            exc, "winerror", None
+        ) in self._DISCONNECTED_WINERRORS
+
+    def write(self, text):
+        try:
+            return self._stream.write(text)
+        except OSError as exc:
+            if self._is_disconnected(exc):
+                return len(text)
+            raise
+
+    def flush(self):
+        try:
+            return self._stream.flush()
+        except OSError as exc:
+            if not self._is_disconnected(exc):
+                raise
+            return None
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     if "--gemini-health-check" in sys.argv:
@@ -41,6 +76,8 @@ if __name__ == "__main__":
         raise SystemExit(run_login_helper(config_path))
     if "--run-main" in sys.argv:
         sys.argv.remove("--run-main")
+        sys.stdout = ResilientOutputStream(sys.stdout)
+        sys.stderr = ResilientOutputStream(sys.stderr)
         try:
             from main import main as run_main
             run_main()
