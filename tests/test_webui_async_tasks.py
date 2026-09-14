@@ -197,6 +197,19 @@ def _run_dashboard_frames(lines, output_dir):
         )
 
 
+def test_structured_product_event_repairs_name_from_plain_console_line(tmp_path):
+    frames = _run_dashboard_frames(
+        [
+            "  [1] SKU-1 | �������� | size=1:1 | lang=zh | 1 image(s)\n",
+            '[UI_PRODUCT] {"id":"SKU-1","name":"正确商品名","image":""}\n',
+        ],
+        tmp_path,
+    )
+
+    assert 'title="正确商品名">正确商品名</div>' in frames[-1]
+    assert 'title="��������">��������</div>' not in frames[-1]
+
+
 def test_dashboard_uses_bounded_thumbnail_payload_for_large_product_image(tmp_path):
     image_path = tmp_path / "large-product.bmp"
     Image.new("RGB", (1400, 1000), "#5a7d9a").save(image_path)

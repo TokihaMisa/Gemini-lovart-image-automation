@@ -2380,6 +2380,8 @@ def run_process(
                 pid = data["id"]
                 if pid not in products_dict:
                     products_dict[pid] = {"name": data["name"], "status": "⏳ 等待处理", "color": "#94a3b8", "logs": []}
+                else:
+                    products_dict[pid]["name"] = data["name"]
                 image_path = data.get("image", "")
                 products_dict[pid]["image"] = image_path
             except:

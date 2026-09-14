@@ -85,9 +85,12 @@ from utils import (
     build_lovart_image_note,
     create_run_dir,
     env_or_config,
+    get_output_dir,
     is_product_completed,
     load_config,
     merge_reference_images,
+    OutputDirectoryInUseError,
+    output_run_lock,
     product_output_dir,
     read_status,
     setup_logging,
@@ -2460,12 +2463,7 @@ def _generate_excel_template():
     sys.exit(0)
 
 
-def main(argv=None):
-    args = parse_args(argv)
-    
-    if args.generate_template:
-        _generate_excel_template()
-
+def _run_main(args):
     config = load_config(args.config, load_environment=not args.dry_run)
     prompt_settings = get_prompt_settings(config)
     routing = routing_from_config(config, prompt_settings)
@@ -2605,6 +2603,19 @@ def main(argv=None):
     
     from utils import organize_output_folders
     organize_output_folders()
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    if args.generate_template:
+        _generate_excel_template()
+
+    try:
+        with output_run_lock(get_output_dir()):
+            return _run_main(args)
+    except OutputDirectoryInUseError as exc:
+        print(f"[ERROR] {exc}")
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

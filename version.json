@@ -1,7 +1,7 @@
 {
-  "version": "1.3.24",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.24/update.zip",
-  "changelog": "修复大批量任务导致的 WebUI 内存溢出：原图改为按需小缩略图，面板固定显示当前及最近 50 个任务，每个商品限制 20 条界面日志，并批量处理任务目录；页面断开后停止日志读取，界面输出管道断开时后台任务继续运行。",
-  "sha256": "a53f1ac0787bf054091b6e893c01505ed9ee8282377227670d8820defb76f91b",
-  "size": 130283018
+  "version": "1.3.25",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.25/update.zip",
+  "changelog": "修复 Windows 状态文件偶发拒绝访问：状态写入改用唯一临时文件并自动重试瞬时占用；同一输出目录禁止重复后台执行并自动回收失效运行锁；结构化商品信息会纠正 WebUI 商品卡片乱码。",
+  "sha256": "cf9fda66e7512436577f1baa636b5dca009316f1ca6f1370b97419ddf4012876",
+  "size": 133143482
 }

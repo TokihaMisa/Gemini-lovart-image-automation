@@ -1,16 +1,39 @@
 import csv
+import errno
 import json
 import logging
 import math
 import os
 import re
 import sys
+import tempfile
+import threading
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 
 from prompt_settings import locked_rules_text, normalize_prompt_settings
+
+
+_STATUS_WRITE_LOCK = threading.RLock()
+_STATUS_REPLACE_ATTEMPTS = 8
+_OUTPUT_RUN_LOCK_NAME = ".automation-run.lock"
+_INCOMPLETE_OUTPUT_LOCK_GRACE_SECONDS = 30.0
+
+
+@dataclass(frozen=True)
+class OutputRunOwner:
+    pid: int
+    token: str
+    created_at: float
+
+
+class OutputDirectoryInUseError(RuntimeError):
+    pass
 
 
 def get_resource_path(filename: str) -> Path:
@@ -133,27 +156,231 @@ def read_status(product_dir: str | Path) -> dict:
         return {}
 
 
+def _is_transient_status_replace_error(exc: OSError) -> bool:
+    return getattr(exc, "winerror", None) in {5, 32, 33} or exc.errno in {
+        errno.EACCES,
+        errno.EBUSY,
+        errno.EPERM,
+    }
+
+
+def _replace_status_file(source: Path, target: Path) -> None:
+    for attempt in range(_STATUS_REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, target)
+            return
+        except OSError as exc:
+            if (
+                not _is_transient_status_replace_error(exc)
+                or attempt == _STATUS_REPLACE_ATTEMPTS - 1
+            ):
+                raise
+            time.sleep(min(0.05 * (2 ** attempt), 0.5))
+
+
 def update_status(product_dir: str | Path, stage: str, **fields) -> dict:
     """Merge a stage flag and fields into output/<product_id>/status.json."""
     path = Path(product_dir)
     path.mkdir(parents=True, exist_ok=True)
-    status = read_status(path)
-    status[stage] = True
-    status.update(fields)
-    status["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    target_path = path / "status.json"
-    temp_path = path / "status.json.tmp"
-    try:
-        temp_path.write_text(
-            json.dumps(status, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+    with _STATUS_WRITE_LOCK:
+        status = read_status(path)
+        status[stage] = True
+        status.update(fields)
+        status["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        target_path = path / "status.json"
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=".status.",
+            suffix=".json.tmp",
+            dir=path,
         )
-        temp_path.replace(target_path)
-    except Exception:
-        if temp_path.exists():
-            temp_path.unlink()
-        raise
-    return status
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(status, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+            _replace_status_file(temp_path, target_path)
+        finally:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+        return status
+
+
+def _output_process_is_alive(pid: int | None) -> bool:
+    if not pid or pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return ctypes.get_last_error() == 5
+            try:
+                exit_code = wintypes.DWORD()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return True
+                return exit_code.value == 259
+            finally:
+                kernel32.CloseHandle(handle)
+        except OSError:
+            return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _output_process_started_at(pid: int | None) -> float | None:
+    if os.name != "nt" or not pid or pid <= 0:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            creation = wintypes.FILETIME()
+            exit_time = wintypes.FILETIME()
+            kernel_time = wintypes.FILETIME()
+            user_time = wintypes.FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel_time),
+                ctypes.byref(user_time),
+            ):
+                return None
+            ticks = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+            return ticks / 10_000_000 - 11_644_473_600
+        finally:
+            kernel32.CloseHandle(handle)
+    except OSError:
+        return None
+
+
+def _output_process_matches(pid: int | None, recorded_at: float | None) -> bool:
+    if not _output_process_is_alive(pid):
+        return False
+    started_at = _output_process_started_at(pid)
+    if recorded_at is None or started_at is None:
+        return True
+    return started_at <= recorded_at + 1.0
+
+
+def _read_output_run_owner(lock_path: Path) -> OutputRunOwner | None:
+    try:
+        value = json.loads(lock_path.read_text(encoding="utf-8"))
+        owner = OutputRunOwner(
+            pid=int(value["pid"]),
+            token=str(value["token"]),
+            created_at=float(value["created_at"]),
+        )
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    return owner if owner.pid > 0 and owner.token else None
+
+
+def _output_directory_busy_message(owner: OutputRunOwner | None) -> str:
+    owner_text = f"（PID {owner.pid}）" if owner is not None else ""
+    return (
+        f"该输出目录已有自动化任务正在运行{owner_text}。请等待当前任务完成；"
+        "若软件已经关闭，请在任务管理器结束残留的 Lovart_Auto.exe 后重试。"
+    )
+
+
+def acquire_output_run_owner(output_dir: str | Path) -> OutputRunOwner:
+    root = Path(output_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / _OUTPUT_RUN_LOCK_NAME
+    for _attempt in range(3):
+        owner = OutputRunOwner(
+            pid=os.getpid(),
+            token=os.urandom(16).hex(),
+            created_at=time.time(),
+        )
+        try:
+            descriptor = os.open(
+                lock_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            existing = _read_output_run_owner(lock_path)
+            if existing is not None:
+                if _output_process_matches(existing.pid, existing.created_at):
+                    raise OutputDirectoryInUseError(
+                        _output_directory_busy_message(existing)
+                    )
+                if _read_output_run_owner(lock_path) != existing:
+                    continue
+            else:
+                try:
+                    age = time.time() - lock_path.stat().st_mtime
+                except FileNotFoundError:
+                    continue
+                if age < _INCOMPLETE_OUTPUT_LOCK_GRACE_SECONDS:
+                    raise OutputDirectoryInUseError(
+                        _output_directory_busy_message(None)
+                    )
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise OutputDirectoryInUseError(
+                    _output_directory_busy_message(existing)
+                ) from exc
+            continue
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "pid": owner.pid,
+                    "token": owner.token,
+                    "created_at": owner.created_at,
+                },
+                handle,
+                ensure_ascii=False,
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        return owner
+    raise OutputDirectoryInUseError(_output_directory_busy_message(None))
+
+
+def release_output_run_owner(output_dir: str | Path, owner: OutputRunOwner) -> None:
+    lock_path = Path(output_dir).resolve() / _OUTPUT_RUN_LOCK_NAME
+    if _read_output_run_owner(lock_path) != owner:
+        return
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+@contextmanager
+def output_run_lock(output_dir: str | Path):
+    owner = acquire_output_run_owner(output_dir)
+    try:
+        yield owner
+    finally:
+        release_output_run_owner(output_dir, owner)
 
 
 def is_product_completed(product_dir: str | Path) -> bool:
