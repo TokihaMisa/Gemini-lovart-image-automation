@@ -105,6 +105,7 @@ _PERMANENT_FAILURE_CODES = frozenset(
         "ambiguous_submission",
         "submission_unknown",
         "task_still_running",
+        "task_not_found",
         "authentication",
         "missing_key",
         "invalid_base_url",

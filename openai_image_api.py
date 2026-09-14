@@ -49,6 +49,7 @@ MAX_REFERENCE_BYTES: Final = 10 * 1024 * 1024
 MAX_REFERENCE_TOTAL_BYTES: Final = 30 * 1024 * 1024
 MAX_CREATE_BODY_BYTES: Final = 50 * 1024 * 1024
 TASK_WAIT_LIMIT_SECONDS: Final = 600.0
+TASK_NOT_FOUND_GRACE_SECONDS: Final = 600.0
 STATUS_WORKER_CLEANUP_GRACE_SECONDS: Final = 0.05
 MAX_TASK_ID_LENGTH: Final = 128
 _VALID_RESOLUTIONS: Final = {"1K", "2K", "4K"}
@@ -1277,7 +1278,18 @@ class OpenAIImageAPI:
                 )
             except _InvocationDeadlineExceeded:
                 raise ImageTaskStillRunning(task) from None
-            except OpenAIImageAPIError:
+            except OpenAIImageAPIError as exc:
+                if exc.status_code == 404:
+                    task_age = max(0.0, time.time() - task.task_created_at)
+                    if task_age < TASK_NOT_FOUND_GRACE_SECONDS:
+                        raise ImageTaskStillRunning(task) from None
+                    missing = OpenAIImageAPIError(
+                        "task_not_found",
+                        "GPT Image provider no longer has the saved task (HTTP 404).",
+                        status_code=404,
+                    )
+                    missing.task = task
+                    raise missing from None
                 # Once the paid submission returned a task ID, any lookup failure
                 # is ambiguous. Keep the checkpoint resumable; only a successfully
                 # parsed terminal ``failed`` task may authorize a fresh submission.

@@ -451,7 +451,12 @@ class FailedRetryQueueTests(unittest.TestCase):
         }), "other")
 
     def test_stable_paid_create_and_live_task_codes_never_retry(self):
-        for code in ("ambiguous_submission", "submission_unknown", "task_still_running"):
+        for code in (
+            "ambiguous_submission",
+            "submission_unknown",
+            "task_still_running",
+            "task_not_found",
+        ):
             self.assertIsNone(classify_retry_failure({
                 "status": "failed",
                 "failure_code": code,

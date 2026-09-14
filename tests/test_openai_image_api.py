@@ -925,13 +925,91 @@ def test_sub2api_resumes_saved_async_task_without_reposting_paid_request(tmp_pat
     assert result.task.task_id == "imgtask_resume-1"
 
 
+def test_sub2api_resume_404_reports_missing_task_without_paid_repost(tmp_path):
+    """Fails if a deleted remote task is mistaken for a live task forever."""
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+    )
+    saved = ImageTaskSnapshot(
+        task_id="imgtask_deleted-1",
+        state="running",
+        is_final=False,
+        task_created_at=1784092800,
+        status="processing",
+    )
+    lookup_error = OpenAIImageAPIError(
+        "invalid_request",
+        "task lookup unavailable",
+        status_code=404,
+    )
+
+    with patch.object(
+        client,
+        "_request_json",
+        side_effect=AssertionError("resume lookup must not submit a paid request"),
+    ) as paid_post, patch.object(
+        client,
+        "_request_json_url",
+        side_effect=lookup_error,
+    ):
+        with pytest.raises(OpenAIImageAPIError) as ctx:
+            client.generate_edit(
+                "keep exact",
+                [make_png(tmp_path / "source.png")],
+                tmp_path / "result.png",
+                resume_task=saved,
+            )
+
+    assert ctx.value.code == "task_not_found"
+    assert ctx.value.status_code == 404
+    assert ctx.value.task == saved
+    assert paid_post.call_count == 0
+
+
+def test_sub2api_recent_task_404_stays_resumable_during_provider_sync_grace(tmp_path):
+    """Fails if a newly submitted task's transient 404 can authorize a duplicate POST."""
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+    )
+    saved = ImageTaskSnapshot(
+        task_id="imgtask_recent-1",
+        state="running",
+        is_final=False,
+        task_created_at=1_000.0,
+        status="processing",
+    )
+    lookup_error = OpenAIImageAPIError(
+        "invalid_request",
+        "task lookup unavailable",
+        status_code=404,
+    )
+
+    with patch("openai_image_api.time.time", return_value=1_599.0), patch.object(
+        client,
+        "_request_json_url",
+        side_effect=lookup_error,
+    ):
+        with pytest.raises(ImageTaskStillRunning) as ctx:
+            client.generate_edit(
+                "keep exact",
+                [make_png(tmp_path / "source.png")],
+                tmp_path / "result.png",
+                resume_task=saved,
+            )
+
+    assert ctx.value.task == saved
+
+
 @pytest.mark.parametrize(
     ("error_code", "status_code"),
     [
         ("invalid_request", 400),
         ("authentication", 401),
         ("authentication", 403),
-        ("invalid_request", 404),
         ("invalid_request", 422),
     ],
 )

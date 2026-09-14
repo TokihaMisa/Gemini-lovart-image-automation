@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 from pathlib import Path
@@ -407,46 +407,79 @@ class OpenAIImageProvider:
                 },
             )
 
-        try:
-            generated = self.api.generate_edit(
-                prompt=request.prompt,
-                image_paths=list(request.image_paths),
-                output_path=output_path,
-                image_size=request.image_size,
-                status_callback=request.status_callback,
-                task_callback=persist,
-                resume_task=saved_task,
-                display_callback=request.task_status_callback,
-                submission_callback=persist_submission_started,
-                **(
-                    {"defer_running": True}
-                    if self.defer_running_tasks
-                    else {}
-                ),
-            )
-        except ImageTaskStillRunning as exc:
-            persist(exc.task)
-            return ImageProviderResult(
-                succeeded=False,
-                still_running=True,
-                task_id_suffix=safe_task_display_token(exc.task.task_id),
-                raw_result={"error_code": exc.code},
-            )
-        except Exception as exc:
-            exception_task = getattr(exc, "task", None)
+        failure: Exception | None = None
+        while True:
+            try:
+                generated = self.api.generate_edit(
+                    prompt=request.prompt,
+                    image_paths=list(request.image_paths),
+                    output_path=output_path,
+                    image_size=request.image_size,
+                    status_callback=request.status_callback,
+                    task_callback=persist,
+                    resume_task=saved_task,
+                    display_callback=request.task_status_callback,
+                    submission_callback=persist_submission_started,
+                    **(
+                        {"defer_running": True}
+                        if self.defer_running_tasks
+                        else {}
+                    ),
+                )
+                break
+            except ImageTaskStillRunning as exc:
+                persist(exc.task)
+                return ImageProviderResult(
+                    succeeded=False,
+                    still_running=True,
+                    task_id_suffix=safe_task_display_token(exc.task.task_id),
+                    raw_result={"error_code": exc.code},
+                )
+            except Exception as exc:
+                error_code = _stable_provider_error_code(exc)
+                if (
+                    error_code == "task_not_found"
+                    and saved_task is not None
+                    and attempts <= 1
+                ):
+                    attempts += 1
+                    saved_task = None
+                    last_task = None
+                    callback_local_path = ""
+                    _remove_file(output_path)
+                    record_support_task_checkpoint(
+                        request.product_dir,
+                        request.step_name,
+                        {
+                            **identity,
+                            "state": "running",
+                            "local_path": "",
+                            "error": "",
+                            "error_code": "task_not_found",
+                            "attempts": attempts,
+                        },
+                    )
+                    continue
+                failure = exc
+                break
+        if failure is not None:
+            exception_task = getattr(failure, "task", None)
             task = (
                 exception_task
                 if isinstance(exception_task, ImageTaskSnapshot)
                 else last_task
             )
-            safe_error = _sanitized_provider_error(self.api, exc)
+            safe_error = _sanitized_provider_error(self.api, failure)
             if isinstance(task, ImageTaskSnapshot):
                 safe_error = str(sanitize_external_value(safe_error, task.task_id))
-            error_code = _stable_provider_error_code(exc)
             current_checkpoint = read_support_task_checkpoint(
                 request.product_dir, request.step_name
             )
-            conclusive_rejection = error_code in {"authentication", "invalid_request"}
+            conclusive_rejection = error_code in {
+                "authentication",
+                "invalid_request",
+                "task_not_found",
+            }
             if (
                 _is_submission_unknown_checkpoint(current_checkpoint)
                 and not conclusive_rejection
@@ -670,116 +703,144 @@ class OpenAIImageProvider:
                     request_settings=request_settings,
                 )
 
-            try:
-                generated = self.api.generate_edit(
-                    prompt=screen.prompt,
-                    image_paths=list(request.image_paths),
-                    output_path=output_path,
-                    image_size=request.image_size,
-                    status_callback=request.status_callback,
-                    task_callback=persist,
-                    resume_task=saved_task,
-                    submission_callback=persist_submission_started,
-                    display_callback=(
-                        (
-                            lambda display_status, detail_index=screen.index:
-                            request.task_status_callback(detail_index, display_status)
+            screen_failed = False
+            while True:
+                try:
+                    generated = self.api.generate_edit(
+                        prompt=screen.prompt,
+                        image_paths=list(request.image_paths),
+                        output_path=output_path,
+                        image_size=request.image_size,
+                        status_callback=request.status_callback,
+                        task_callback=persist,
+                        resume_task=saved_task,
+                        submission_callback=persist_submission_started,
+                        display_callback=(
+                            (
+                                lambda display_status, detail_index=screen.index:
+                                request.task_status_callback(detail_index, display_status)
+                            )
+                            if request.task_status_callback is not None
+                            else None
+                        ),
+                        **(
+                            {"defer_running": True}
+                            if self.defer_running_tasks
+                            else {}
+                        ),
+                    )
+                    break
+                except ImageTaskStillRunning as exc:
+                    persist(exc.task)
+                    still_running = True
+                    active_index = screen.index
+                    last_error_code = exc.code
+                    last_task_suffix = safe_task_display_token(exc.task.task_id)
+                    break
+                except Exception as exc:
+                    last_error_code = _stable_provider_error_code(exc)
+                    if (
+                        last_error_code == "task_not_found"
+                        and saved_task is not None
+                        and attempts <= 1
+                    ):
+                        attempts += 1
+                        saved_task = None
+                        last_task = None
+                        callback_local_path = ""
+                        _remove_file(output_path)
+                        record_detail_checkpoint(
+                            request.product_dir,
+                            screen.index,
+                            "running",
+                            error_code="task_not_found",
+                            attempts=attempts,
+                            input_fingerprint=request.input_fingerprint,
+                            prompt_hash=prompt_hashes[screen.index],
+                            request_settings=request_settings,
                         )
-                        if request.task_status_callback is not None
-                        else None
-                    ),
-                    **(
-                        {"defer_running": True}
-                        if self.defer_running_tasks
-                        else {}
-                    ),
-                )
-            except ImageTaskStillRunning as exc:
-                persist(exc.task)
-                still_running = True
-                active_index = screen.index
-                last_error_code = exc.code
-                last_task_suffix = safe_task_display_token(exc.task.task_id)
-                break
-            except Exception as exc:
-                failed.append(screen.index)
-                last_error_code = _stable_provider_error_code(exc)
-                safe_error = _sanitized_provider_error(self.api, exc)
-                exception_task = getattr(exc, "task", None)
-                task = (
-                    exception_task
-                    if isinstance(exception_task, ImageTaskSnapshot)
-                    else last_task
-                )
-                if isinstance(task, ImageTaskSnapshot):
-                    safe_error = str(sanitize_external_value(safe_error, task.task_id))
-                errors.append(f"screen {screen.index}: {safe_error}")
-                current_checkpoint = _read_detail_checkpoint(
-                    request.product_dir, screen.index
-                )
-                conclusive_rejection = last_error_code in {
-                    "authentication",
-                    "invalid_request",
-                }
-                if (
-                    _is_submission_unknown_checkpoint(current_checkpoint)
-                    and not conclusive_rejection
-                ):
-                    last_error_code = "submission_unknown"
-                if conclusive_rejection:
-                    record_detail_checkpoint(
-                        request.product_dir,
-                        screen.index,
-                        "failed",
-                        error=safe_error,
-                        error_code=last_error_code,
-                        attempts=attempts,
-                        input_fingerprint=request.input_fingerprint,
-                        prompt_hash=prompt_hashes[screen.index],
-                        request_settings=request_settings,
+                        continue
+                    failed.append(screen.index)
+                    screen_failed = True
+                    safe_error = _sanitized_provider_error(self.api, exc)
+                    exception_task = getattr(exc, "task", None)
+                    task = (
+                        exception_task
+                        if isinstance(exception_task, ImageTaskSnapshot)
+                        else last_task
                     )
-                elif last_error_code in {"ambiguous_submission", "submission_unknown"}:
-                    stored_code = last_error_code
-                    record_detail_checkpoint(
-                        request.product_dir,
-                        screen.index,
-                        stored_code,
-                        error=safe_error,
-                        error_code=stored_code,
-                        attempts=attempts,
-                        input_fingerprint=request.input_fingerprint,
-                        prompt_hash=prompt_hashes[screen.index],
-                        request_settings=request_settings,
+                    if isinstance(task, ImageTaskSnapshot):
+                        safe_error = str(sanitize_external_value(safe_error, task.task_id))
+                    errors.append(f"screen {screen.index}: {safe_error}")
+                    current_checkpoint = _read_detail_checkpoint(
+                        request.product_dir, screen.index
                     )
-                elif (
-                    isinstance(task, ImageTaskSnapshot)
-                    and task.is_final
-                    and task.state == "failed"
-                ):
-                    task_fields = _checkpoint_fields_for_persistence(self.api, task)
-                    task_fields.pop("state", None)
-                    task_fields.pop("error", None)
-                    last_task_suffix = safe_task_display_token(task.task_id)
-                    record_detail_checkpoint(
-                        request.product_dir,
-                        screen.index,
-                        "failed",
-                        error=_sanitized_task_text(self.api, task.error, task.task_id) or safe_error,
-                        attempts=attempts,
-                        input_fingerprint=request.input_fingerprint,
-                        prompt_hash=prompt_hashes[screen.index],
-                        request_settings=request_settings,
-                        **task_fields,
-                    )
-                elif isinstance(task, ImageTaskSnapshot):
-                    last_task_suffix = safe_task_display_token(task.task_id)
-                if request.progress_callback:
-                    request.progress_callback(
-                        screen.index,
-                        request.target_count,
-                        len(completed),
-                        tuple(failed),
-                    )
+                    conclusive_rejection = last_error_code in {
+                        "authentication",
+                        "invalid_request",
+                        "task_not_found",
+                    }
+                    if (
+                        _is_submission_unknown_checkpoint(current_checkpoint)
+                        and not conclusive_rejection
+                    ):
+                        last_error_code = "submission_unknown"
+                    if conclusive_rejection:
+                        record_detail_checkpoint(
+                            request.product_dir,
+                            screen.index,
+                            "failed",
+                            error=safe_error,
+                            error_code=last_error_code,
+                            attempts=attempts,
+                            input_fingerprint=request.input_fingerprint,
+                            prompt_hash=prompt_hashes[screen.index],
+                            request_settings=request_settings,
+                        )
+                    elif last_error_code in {"ambiguous_submission", "submission_unknown"}:
+                        stored_code = last_error_code
+                        record_detail_checkpoint(
+                            request.product_dir,
+                            screen.index,
+                            stored_code,
+                            error=safe_error,
+                            error_code=stored_code,
+                            attempts=attempts,
+                            input_fingerprint=request.input_fingerprint,
+                            prompt_hash=prompt_hashes[screen.index],
+                            request_settings=request_settings,
+                        )
+                    elif (
+                        isinstance(task, ImageTaskSnapshot)
+                        and task.is_final
+                        and task.state == "failed"
+                    ):
+                        task_fields = _checkpoint_fields_for_persistence(self.api, task)
+                        task_fields.pop("state", None)
+                        task_fields.pop("error", None)
+                        last_task_suffix = safe_task_display_token(task.task_id)
+                        record_detail_checkpoint(
+                            request.product_dir,
+                            screen.index,
+                            "failed",
+                            error=_sanitized_task_text(self.api, task.error, task.task_id) or safe_error,
+                            attempts=attempts,
+                            input_fingerprint=request.input_fingerprint,
+                            prompt_hash=prompt_hashes[screen.index],
+                            request_settings=request_settings,
+                            **task_fields,
+                        )
+                    elif isinstance(task, ImageTaskSnapshot):
+                        last_task_suffix = safe_task_display_token(task.task_id)
+                    if request.progress_callback:
+                        request.progress_callback(
+                            screen.index,
+                            request.target_count,
+                            len(completed),
+                            tuple(failed),
+                        )
+                    break
+            if still_running or screen_failed:
                 break
             task = _generated_task(generated)
             task_fields = _checkpoint_fields_for_persistence(self.api, task)
@@ -815,7 +876,45 @@ class OpenAIImageProvider:
             request.input_fingerprint,
             prompt_hashes,
         )
-        completed_count = len(completed)
+        completed_count = len(local_paths)
+        regeneration_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "input_fingerprint": request.input_fingerprint,
+                    "prompt_hashes": prompt_hashes,
+                    "target_count": request.target_count,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        status = read_status(request.product_dir)
+        already_regenerated = (
+            status.get("detail_full_regeneration_fingerprint")
+            == regeneration_fingerprint
+        )
+        can_regenerate = (
+            not still_running
+            and completed_count != request.target_count
+            and (not failed or last_error_code == "task_not_found")
+            and last_error_code not in {"ambiguous_submission", "submission_unknown"}
+            and not already_regenerated
+        )
+        if can_regenerate:
+            update_status(
+                request.product_dir,
+                "detail_full_regeneration_started",
+                detail_full_regeneration_attempted=True,
+                detail_full_regeneration_fingerprint=regeneration_fingerprint,
+                detail_full_regeneration_expected_count=request.target_count,
+                detail_full_regeneration_actual_count=completed_count,
+            )
+            if request.status_callback is not None:
+                request.status_callback(
+                    "GPT Image 详情图数量校验未通过，正在整套重新生成一次。"
+                )
+            return self.generate_detail_set(replace(request, resume=False))
         return ImageProviderResult(
             succeeded=not still_running and completed_count == request.target_count,
             local_paths=local_paths,

@@ -1,7 +1,7 @@
 {
-  "version": "1.3.25",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.25/update.zip",
-  "changelog": "修复 Windows 状态文件偶发拒绝访问：状态写入改用唯一临时文件并自动重试瞬时占用；同一输出目录禁止重复后台执行并自动回收失效运行锁；结构化商品信息会纠正 WebUI 商品卡片乱码。",
-  "sha256": "cf9fda66e7512436577f1baa636b5dca009316f1ca6f1370b97419ddf4012876",
-  "size": 133143482
+  "version": "1.3.26",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.26/update.zip",
+  "changelog": "修复 GPT Image 过期任务反复轮询：保留已完成图片并只补做缺失页；最终文件数量不一致时仅自动整套重做一次；新任务保留 10 分钟同步宽限，防止短暂 404 导致重复扣费。",
+  "sha256": "68430a02bede2829f05f63854fd122c03351966d42c5c1cade9be66a35b9d64a",
+  "size": 133142396
 }

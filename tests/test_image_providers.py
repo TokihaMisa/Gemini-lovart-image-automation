@@ -115,7 +115,6 @@ def test_sub2api_async_support_completion_is_checkpointed_with_resumable_task_id
         ("invalid_request", 400),
         ("authentication", 401),
         ("authentication", 403),
-        ("invalid_request", 404),
         ("invalid_request", 422),
     ],
 )
@@ -174,6 +173,378 @@ def test_sub2api_task_lookup_http_error_preserves_checkpoint_and_never_reposts(
     assert checkpoint["state"] == "running"
     assert checkpoint["task_id"] == f"imgtask_{kind}-{status_code}"
     assert paid_post.call_count == 1
+
+
+def test_support_resume_replaces_one_remote_404_task(tmp_path):
+    """Fails if a deleted support task blocks the product instead of replacing itself once."""
+    from image_providers import (
+        OpenAIImageProvider,
+        _support_request_identity,
+        read_support_task_checkpoint,
+        record_support_task_checkpoint,
+    )
+    from openai_image_api import OpenAIImageAPI, OpenAIImageAPIConfig, OpenAIImageAPIError
+
+    api = OpenAIImageAPI(
+        OpenAIImageAPIConfig(
+            api_key="test-key",
+            profile="sub2api",
+            protocol="sub2api_sync",
+            base_url="https://sub2.example/v1",
+        ),
+        sleep=lambda _delay: None,
+    )
+    request = support_request(tmp_path)
+    identity = _support_request_identity(api, request)
+    record_support_task_checkpoint(
+        tmp_path,
+        "white_bg",
+        {
+            **identity,
+            "state": "running",
+            "local_path": "",
+            "error": "",
+            "attempts": 1,
+            "task_id": "imgtask_deleted-support",
+            "task_created_at": 1784092800,
+            "is_final": False,
+            "status": "processing",
+        },
+    )
+    submitted = {
+        "task_id": "imgtask_replacement-support",
+        "status": "processing",
+        "created_at": 1784092900,
+    }
+    completed = {
+        "task_id": "imgtask_replacement-support",
+        "status": "completed",
+        "result": {"data": [{"url": "https://cdn.example/replacement.png"}]},
+        "created_at": 1784092900,
+    }
+    lookup_missing = OpenAIImageAPIError(
+        "invalid_request",
+        "task lookup unavailable",
+        status_code=404,
+    )
+    replacement_image = Path(write_valid_png(tmp_path / "replacement.png")).read_bytes()
+
+    with patch.object(api, "_request_json", return_value=submitted) as paid_post, patch.object(
+        api,
+        "_request_json_url",
+        side_effect=[lookup_missing, (completed, None)],
+    ) as task_lookup, patch(
+        "openai_image_api.validate_remote_image_url", return_value=object()
+    ), patch(
+        "openai_image_api._download_resolved_image", return_value=replacement_image
+    ):
+        result = OpenAIImageProvider(api).generate_support_image(request)
+
+    checkpoint = read_support_task_checkpoint(tmp_path, "white_bg")
+    assert result.succeeded is True
+    assert paid_post.call_count == 1
+    assert task_lookup.call_count == 2
+    assert checkpoint["state"] == "done"
+    assert checkpoint["task_id"] == "imgtask_replacement-support"
+    assert checkpoint["attempts"] == 2
+
+
+def test_detail_resume_replaces_only_one_remote_404_task(tmp_path):
+    """Fails if one deleted detail task either loops forever or restarts completed pages."""
+    from types import SimpleNamespace
+
+    from image_providers import (
+        OpenAIImageProvider,
+        detail_screen_prompt_hash,
+        record_detail_checkpoint,
+    )
+    from openai_image_api import OpenAIImageAPIError
+    from utils import read_status
+
+    screens = (DetailScreen(1, "hero"), DetailScreen(2, "features"))
+    request = single_detail_request(
+        tmp_path,
+        screens=screens,
+        target_count=2,
+    )
+    first_path = tmp_path / "gpt_image" / "detail" / "01.png"
+    write_valid_png(first_path)
+    request_settings = {
+        "model": "gpt-image-2",
+        "size": "1024x1024",
+        "base_url": "https://sub2.example",
+        "merge_reference_images": False,
+    }
+    record_detail_checkpoint(
+        tmp_path,
+        1,
+        "done",
+        local_path=str(first_path),
+        attempts=1,
+        input_fingerprint="inputs-v1",
+        prompt_hash=detail_screen_prompt_hash(screens[0], 2, "1:1"),
+        task_id="imgtask_completed-1",
+        task_created_at=1784092700,
+        is_final=True,
+        status="completed",
+        result_url="https://cdn.example/completed-1.png",
+        result_type="image",
+        request_settings=request_settings,
+    )
+    old_task = task_snapshot("imgtask_deleted-2")
+    record_detail_checkpoint(
+        tmp_path,
+        2,
+        "running",
+        attempts=1,
+        input_fingerprint="inputs-v1",
+        prompt_hash=detail_screen_prompt_hash(screens[1], 2, "1:1"),
+        task_id=old_task.task_id,
+        task_created_at=old_task.task_created_at,
+        is_final=False,
+        status="processing",
+        request_settings=request_settings,
+    )
+
+    class MissingThenCompletedAPI:
+        def __init__(self):
+            self.config = SimpleNamespace(
+                profile="sub2api",
+                protocol="sub2api_sync",
+                base_url="https://sub2.example/v1",
+                model="gpt-image-2",
+                resolution="1K",
+                merge_reference_images=False,
+                api_key="test-key",
+            )
+            self.resume_ids = []
+            self.create_posts = 0
+
+        def generate_edit(self, **kwargs):
+            resume_task = kwargs.get("resume_task")
+            self.resume_ids.append(
+                resume_task.task_id if isinstance(resume_task, ImageTaskSnapshot) else None
+            )
+            if isinstance(resume_task, ImageTaskSnapshot):
+                error = OpenAIImageAPIError(
+                    "task_not_found",
+                    "saved task no longer exists",
+                    status_code=404,
+                )
+                error.task = resume_task
+                raise error
+            kwargs["submission_callback"]()
+            self.create_posts += 1
+            replacement = task_snapshot(
+                "imgtask_replacement-2",
+                state="success",
+                is_final=True,
+                result_url="https://cdn.example/replacement-2.png",
+            )
+            kwargs["task_callback"](replacement)
+            local_path = write_valid_png(Path(kwargs["output_path"]))
+            return GeneratedImage(local_path, self.config.model, replacement)
+
+    api = MissingThenCompletedAPI()
+    result = OpenAIImageProvider(api).generate_detail_set(request)
+
+    checkpoint = read_status(tmp_path)["detail_checkpoints"]["2"]
+    assert result.succeeded is True
+    assert result.completed_count == 2
+    assert api.resume_ids == ["imgtask_deleted-2", None]
+    assert api.create_posts == 1
+    assert first_path.exists()
+    assert checkpoint["state"] == "done"
+    assert checkpoint["task_id"] == "imgtask_replacement-2"
+    assert checkpoint["attempts"] == 2
+
+
+def test_detail_count_mismatch_regenerates_entire_set_once(tmp_path):
+    """Fails if a missing final artifact is accepted or causes endless full retries."""
+    from types import SimpleNamespace
+
+    from image_providers import OpenAIImageProvider, record_detail_checkpoint
+    from openai_image_api import OpenAIImageAPIError
+    from tests.image_test_helpers import RecordingOpenAIAPI
+    from utils import read_status
+
+    screens = (DetailScreen(1, "hero"), DetailScreen(2, "features"))
+    request = single_detail_request(
+        tmp_path,
+        screens=screens,
+        target_count=2,
+    )
+    initial = OpenAIImageProvider(RecordingOpenAIAPI()).generate_detail_set(request)
+    assert initial.succeeded is True
+
+    status = read_status(tmp_path)
+    previous = status["detail_checkpoints"]["2"]
+    Path(previous["local_path"]).unlink()
+    old_task = task_snapshot("imgtask_deleted-2")
+    record_detail_checkpoint(
+        tmp_path,
+        2,
+        "running",
+        attempts=1,
+        input_fingerprint=previous["input_fingerprint"],
+        prompt_hash=previous["prompt_hash"],
+        task_id=old_task.task_id,
+        task_created_at=old_task.task_created_at,
+        is_final=False,
+        status="processing",
+        request_settings={
+            "model": previous["model"],
+            "size": previous["size"],
+            "base_url": previous["base_url"],
+            "merge_reference_images": previous["merge_reference_images"],
+        },
+    )
+
+    class MissingArtifactThenHealthyAPI:
+        def __init__(self):
+            self.config = SimpleNamespace(
+                profile="sub2api",
+                protocol="sub2api_sync",
+                base_url="https://images.example/v1",
+                model="gpt-image-2",
+                resolution="1K",
+                merge_reference_images=False,
+                api_key="test-key",
+            )
+            self.calls = []
+            self.new_submissions = 0
+
+        def generate_edit(self, **kwargs):
+            index = int(Path(kwargs["output_path"]).stem)
+            resume_task = kwargs.get("resume_task")
+            self.calls.append(
+                (index, resume_task.task_id if isinstance(resume_task, ImageTaskSnapshot) else None)
+            )
+            if isinstance(resume_task, ImageTaskSnapshot):
+                error = OpenAIImageAPIError(
+                    "task_not_found",
+                    "saved task no longer exists",
+                    status_code=404,
+                )
+                error.task = resume_task
+                raise error
+
+            kwargs["submission_callback"]()
+            self.new_submissions += 1
+            task = task_snapshot(
+                f"imgtask_new-{self.new_submissions}",
+                state="success",
+                is_final=True,
+                result_url=f"https://cdn.example/new-{self.new_submissions}.png",
+            )
+            kwargs["task_callback"](task)
+            output_path = Path(kwargs["output_path"])
+            if self.new_submissions > 1:
+                write_valid_png(output_path)
+            return GeneratedImage(str(output_path), self.config.model, task)
+
+    api = MissingArtifactThenHealthyAPI()
+    result = OpenAIImageProvider(api).generate_detail_set(request)
+
+    assert result.succeeded is True
+    assert result.completed_count == 2
+    assert len(result.local_paths) == 2
+    assert api.calls == [
+        (2, "imgtask_deleted-2"),
+        (2, None),
+        (1, None),
+        (2, None),
+    ]
+    assert api.new_submissions == 3
+    assert read_status(tmp_path)["detail_full_regeneration_attempted"] is True
+
+
+def test_second_missing_detail_task_uses_one_full_regeneration_fallback(tmp_path):
+    """Fails if a missing replacement task never reaches the one full-set fallback."""
+    from types import SimpleNamespace
+
+    from image_providers import (
+        OpenAIImageProvider,
+        detail_screen_prompt_hash,
+        record_detail_checkpoint,
+    )
+    from openai_image_api import OpenAIImageAPIError
+    from utils import read_status
+
+    screen = DetailScreen(1, "hero")
+    request = single_detail_request(tmp_path, screens=(screen,), target_count=1)
+    old_task = task_snapshot("imgtask_deleted-original")
+    record_detail_checkpoint(
+        tmp_path,
+        1,
+        "running",
+        attempts=1,
+        input_fingerprint="inputs-v1",
+        prompt_hash=detail_screen_prompt_hash(screen, 1, "1:1"),
+        task_id=old_task.task_id,
+        task_created_at=old_task.task_created_at,
+        is_final=False,
+        status="processing",
+        request_settings={
+            "model": "gpt-image-2",
+            "size": "1024x1024",
+            "base_url": "https://sub2.example",
+            "merge_reference_images": False,
+        },
+    )
+
+    class MissingReplacementThenHealthyAPI:
+        def __init__(self):
+            self.config = SimpleNamespace(
+                profile="sub2api",
+                protocol="sub2api_sync",
+                base_url="https://sub2.example/v1",
+                model="gpt-image-2",
+                resolution="1K",
+                merge_reference_images=False,
+                api_key="test-key",
+            )
+            self.calls = []
+            self.new_submissions = 0
+
+        def generate_edit(self, **kwargs):
+            resume_task = kwargs.get("resume_task")
+            self.calls.append(
+                resume_task.task_id if isinstance(resume_task, ImageTaskSnapshot) else None
+            )
+            if isinstance(resume_task, ImageTaskSnapshot):
+                missing_task = resume_task
+            else:
+                kwargs["submission_callback"]()
+                self.new_submissions += 1
+                missing_task = task_snapshot(f"imgtask_new-{self.new_submissions}")
+                kwargs["task_callback"](missing_task)
+                if self.new_submissions > 1:
+                    local_path = write_valid_png(Path(kwargs["output_path"]))
+                    completed = task_snapshot(
+                        "imgtask_full-regeneration",
+                        state="success",
+                        is_final=True,
+                        result_url="https://cdn.example/full-regeneration.png",
+                    )
+                    kwargs["task_callback"](completed)
+                    return GeneratedImage(local_path, self.config.model, completed)
+            error = OpenAIImageAPIError(
+                "task_not_found",
+                "saved task no longer exists",
+                status_code=404,
+            )
+            error.task = missing_task
+            raise error
+
+    api = MissingReplacementThenHealthyAPI()
+    result = OpenAIImageProvider(api).generate_detail_set(request)
+
+    assert result.succeeded is True
+    assert result.completed_count == 1
+    assert api.calls == ["imgtask_deleted-original", None, None]
+    assert api.new_submissions == 2
+    assert read_status(tmp_path)["detail_full_regeneration_attempted"] is True
 
 
 def test_sub2api_invalid_saved_image_blocks_resume_without_second_paid_post(tmp_path):
@@ -1549,9 +1920,12 @@ def test_openai_detail_set_resumes_only_matching_running_task_with_canonical_out
         prompt_hash=detail_screen_prompt_hash(wrong_screen, 1, "1:1"),
     )
     wrong_api = Mock()
-    wrong_api.generate_edit.return_value = GeneratedImage(
-        other_canonical, "gpt-image-2", completed_image_task()
-    )
+
+    def save_other_product(*, output_path, **_kwargs):
+        local_path = write_valid_png(Path(output_path))
+        return GeneratedImage(local_path, "gpt-image-2", completed_image_task())
+
+    wrong_api.generate_edit.side_effect = save_other_product
     wrong_request = DetailSetRequest(
         product_id="P2",
         product_dir=other_product,
@@ -1654,9 +2028,12 @@ def test_openai_detail_set_regenerates_legacy_done_checkpoint_without_prompt_has
         input_fingerprint="inputs-v1",
     )
     api = Mock()
-    api.generate_edit.return_value = GeneratedImage(
-        canonical, "gpt-image-2", completed_image_task()
-    )
+
+    def replace_legacy_image(*, output_path, **_kwargs):
+        local_path = write_valid_png(Path(output_path))
+        return GeneratedImage(local_path, "gpt-image-2", completed_image_task())
+
+    api.generate_edit.side_effect = replace_legacy_image
     request = DetailSetRequest(
         product_id="P1",
         product_dir=tmp_path,
@@ -1710,9 +2087,12 @@ def test_openai_detail_set_reuses_only_identical_final_screen_prompt(tmp_path: P
     assert identical.succeeded is True
 
     changed_api = Mock()
-    changed_api.generate_edit.return_value = GeneratedImage(
-        canonical, "gpt-image-2", completed_image_task()
-    )
+
+    def replace_changed_prompt(*, output_path, **_kwargs):
+        local_path = write_valid_png(Path(output_path))
+        return GeneratedImage(local_path, "gpt-image-2", completed_image_task())
+
+    changed_api.generate_edit.side_effect = replace_changed_prompt
     changed_request = DetailSetRequest(
         product_id="P1",
         product_dir=tmp_path,
