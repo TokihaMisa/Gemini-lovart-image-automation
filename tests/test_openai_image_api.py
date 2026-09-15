@@ -925,6 +925,77 @@ def test_sub2api_resumes_saved_async_task_without_reposting_paid_request(tmp_pat
     assert result.task.task_id == "imgtask_resume-1"
 
 
+def test_sub2api_resumed_task_says_polling_instead_of_submitted(tmp_path):
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+    )
+    saved = ImageTaskSnapshot(
+        task_id="imgtask_resume-1",
+        state="running",
+        is_final=False,
+        task_created_at=1784092800,
+        status="processing",
+    )
+    messages = []
+    displays = []
+
+    with patch.object(
+        client, "_request_json", side_effect=AssertionError("resume must not POST")
+    ), patch.object(
+        client, "_poll_sub2api_task", side_effect=ImageTaskStillRunning(saved)
+    ):
+        with pytest.raises(ImageTaskStillRunning):
+            client.generate_edit(
+                "keep exact",
+                [make_png(tmp_path / "source.png")],
+                tmp_path / "result.png",
+                resume_task=saved,
+                status_callback=messages.append,
+                display_callback=displays.append,
+            )
+
+    assert any("正在查询已提交任务" in message for message in messages)
+    assert not any("任务已提交" in message for message in messages)
+    assert displays[0].phase == "polling"
+    assert displays[0].elapsed_seconds >= 75
+
+
+def test_sub2api_poll_elapsed_continues_from_saved_task_creation():
+    client = make_client(
+        profile="sub2api",
+        protocol="sub2api_sync",
+        base_url="https://codex.surf/v1",
+    )
+    saved = ImageTaskSnapshot(
+        task_id="imgtask_resume-1",
+        state="running",
+        is_final=False,
+        task_created_at=time.time() - 75,
+        status="processing",
+    )
+    messages = []
+    displays = []
+
+    with patch.object(
+        client,
+        "_request_json_url",
+        return_value=({"task_id": saved.task_id, "status": "processing"}, None),
+    ):
+        with pytest.raises(ImageTaskStillRunning):
+            client._poll_sub2api_task(
+                saved,
+                messages.append,
+                None,
+                displays.append,
+                defer_running=True,
+            )
+
+    assert displays[-1].elapsed_seconds >= 75
+    assert any("已等待 75" in message for message in messages)
+
+
 def test_sub2api_resume_404_reports_missing_task_without_paid_repost(tmp_path):
     """Fails if a deleted remote task is mistaken for a live task forever."""
     client = make_client(

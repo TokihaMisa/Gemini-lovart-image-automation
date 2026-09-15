@@ -122,6 +122,7 @@ def _run_scripted_openai_pipeline(tmp_path, api, *, detail_count=2, resume=True)
     provider = OpenAIImageProvider(api, logger=Mock())
     registry = RecordingRegistry(RecordingImageProvider("lovart"), provider)
     append_result = Mock()
+    logger = Mock()
     run_dir = Path(tmp_path) / "run"
     with (
         patch("main.product_output_dir", return_value=product_dir),
@@ -133,7 +134,7 @@ def _run_scripted_openai_pipeline(tmp_path, api, *, detail_count=2, resume=True)
             [product],
             gemini,
             None,
-            Mock(),
+            logger,
             run_dir,
             resume=resume,
             image_registry=registry,
@@ -145,6 +146,7 @@ def _run_scripted_openai_pipeline(tmp_path, api, *, detail_count=2, resume=True)
         run_dir=run_dir,
         gemini=gemini,
         append_result=append_result,
+        logger=logger,
     )
 
 
@@ -1942,6 +1944,58 @@ def test_white_live_task_stops_product_without_failure_and_resumes_same_task(
     assert final_status["openai_image_still_running"] is False
     assert final_status["openai_image_active_stage"] == ""
     assert final_status["openai_image_task_suffix"] == ""
+
+
+@pytest.mark.parametrize(
+    "first_actions,second_actions,active_stage",
+    [
+        (
+            {"white_bg": [("still_running", "white-task-live-1234")]},
+            {"white_bg": [("still_running", "white-task-live-1234")]},
+            "support_white",
+        ),
+        (
+            {
+                "white_bg": [("success", "white-task-done-1234")],
+                "scene": [("still_running", "scene-task-live-1234")],
+            },
+            {"scene": [("still_running", "scene-task-live-1234")]},
+            "support_scene",
+        ),
+    ],
+)
+def test_live_support_recheck_updates_task_without_restarting_stage_logs(
+    tmp_path, capsys, first_actions, second_actions, active_stage
+):
+    first_api = _ScriptedTaskAPI(first_actions)
+    with patch.dict(os.environ, {"UI_MODE": "1"}):
+        first = _run_scripted_openai_pipeline(tmp_path, first_api, detail_count=1)
+    capsys.readouterr()
+
+    second_api = _ScriptedTaskAPI(second_actions)
+    with patch.dict(os.environ, {"UI_MODE": "1"}):
+        second = _run_scripted_openai_pipeline(tmp_path, second_api, detail_count=1)
+    output = capsys.readouterr().out
+    events = [
+        json.loads(line.split("]", 1)[1].strip())
+        for line in output.splitlines()
+        if line.startswith("[UI_STATUS]")
+    ]
+
+    assert first.counters == second.counters == (0, 0, 0, 1)
+    assert second_api.create_posts == 0
+    assert "正在处理商品" not in output
+    assert "正在生成白底图" not in output
+    assert "正在生成场景图" not in output
+    assert "Processing [1/1]" not in output
+    assert not any(
+        "STILL RUNNING" in str(call.args[0])
+        for call in second.logger.warning.call_args_list
+    )
+    assert any(
+        event["stage"] == active_stage and event.get("live_task") is True
+        for event in events
+    )
 
 
 def test_live_first_product_does_not_block_second_product(tmp_path):

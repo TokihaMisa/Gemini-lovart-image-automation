@@ -934,7 +934,32 @@ def _generate_support_images(
                 needs_manual_action=False,
                 reason="",
             )
-        _emit_ui_status(product.id, stage, f"🎨 正在生成{label}")
+        checkpoints = status.get("support_task_checkpoints")
+        checkpoint = (
+            checkpoints.get(step_name)
+            if isinstance(checkpoints, Mapping)
+            else None
+        )
+        resumed_stage = bool(
+            provider_name == PROVIDER_OPENAI_IMAGE
+            and resume
+            and not force_regenerate
+            and isinstance(checkpoint, Mapping)
+            and checkpoint.get("input_fingerprint") == input_fingerprint
+            and (
+                (
+                    checkpoint.get("task_id")
+                    and str(checkpoint.get("state") or "").lower()
+                    in {"pending", "queued", "submitted", "processing", "running", "success"}
+                )
+                or (
+                    checkpoint.get("state") == "done"
+                    and is_valid_image_file(checkpoint.get("local_path"))
+                )
+            )
+        )
+        if not resumed_stage:
+            _emit_ui_status(product.id, stage, f"🎨 正在生成{label}")
         result = provider.generate_support_image(
             SupportImageRequest(
                 product_id=product.id,
@@ -1158,6 +1183,15 @@ def _process_products_once(
             previous_status,
             current_image_size,
         )
+        resuming_live_task = bool(
+            resume
+            and not regenerate_support_for_size
+            and PROVIDER_OPENAI_IMAGE in {
+                effective_routing.support_provider,
+                effective_routing.detail_provider,
+            }
+            and _status_has_live_openai_image_task(previous_status)
+        )
         update_status(
             product_dir,
             "parsed",
@@ -1233,17 +1267,18 @@ def _process_products_once(
                 validate_completed_support(product, product_dir, status)
                 status = read_status(product_dir)
 
-        logger.info(f"[{idx}/{len(products)}] {product.id} - {product.name_cn}")
-        _emit_ui_status(
-            product.id,
-            "product",
-            f"🔄 正在处理商品（{idx}/{len(products)}）",
-        )
-        console.print(Panel(
-            f"[bold cyan]Product ID:[/bold cyan] {product.id}\n[bold cyan]Name:[/bold cyan] {product.name_cn}",
-            title=f"[bold green]Processing [{idx}/{len(products)}][/bold green]",
-            border_style="blue",
-        ))
+        if not resuming_live_task:
+            logger.info(f"[{idx}/{len(products)}] {product.id} - {product.name_cn}")
+            _emit_ui_status(
+                product.id,
+                "product",
+                f"🔄 正在处理商品（{idx}/{len(products)}）",
+            )
+            console.print(Panel(
+                f"[bold cyan]Product ID:[/bold cyan] {product.id}\n[bold cyan]Name:[/bold cyan] {product.name_cn}",
+                title=f"[bold green]Processing [{idx}/{len(products)}][/bold green]",
+                border_style="blue",
+            ))
 
         try:
             image_roles = split_image_roles(product.image_paths)
@@ -1297,10 +1332,11 @@ def _process_products_once(
                 )
                 if support_error.result.still_running:
                     reason = f"GPT Image {label} task is still running"
-                    logger.warning(
-                        f"STILL RUNNING [{idx}/{len(products)}] "
-                        f"{product.id} {support_error.step_name}"
-                    )
+                    if not resuming_live_task:
+                        logger.warning(
+                            f"STILL RUNNING [{idx}/{len(products)}] "
+                            f"{product.id} {support_error.step_name}"
+                        )
                     still_running += 1
                     outcome = "openai_image_task_still_running"
                     failure_code = failure_code or "task_still_running"
@@ -1643,11 +1679,15 @@ def _process_products_once(
                 ),
                 openai_image_task_suffix="",
             )
-            _emit_ui_status(
-                product.id,
-                "detail",
-                f"🖼️ 正在生成详情图（目标 {target_count} 张）",
-            )
+            if not (
+                resuming_live_task
+                and _status_has_live_openai_image_task(status_before_detail)
+            ):
+                _emit_ui_status(
+                    product.id,
+                    "detail",
+                    f"🖼️ 正在生成详情图（目标 {target_count} 张）",
+                )
             detail_result = detail_provider.generate_detail_set(
                 DetailSetRequest(
                     product_id=product.id,
@@ -1789,7 +1829,8 @@ def _process_products_once(
                     "used_model": used_model or "unknown",
                 })
             elif detail_result.still_running:
-                logger.warning(f"STILL RUNNING [{idx}/{len(products)}] {product.id}")
+                if not resuming_live_task:
+                    logger.warning(f"STILL RUNNING [{idx}/{len(products)}] {product.id}")
                 still_running += 1
                 active_index = int(detail_result.active_index or 0)
                 if not 1 <= active_index <= target_count:

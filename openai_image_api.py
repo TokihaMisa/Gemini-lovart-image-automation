@@ -758,11 +758,19 @@ class OpenAIImageAPI:
         else:
             task = _validate_resume_task(resume_task, self.config.api_key)
         _notify_task(task_callback, task)
-        submitted_message = "📨 GPT Image 异步任务已提交，正在等待平台处理"
+        submitted_message = (
+            "📨 GPT Image 异步任务已提交，正在等待平台处理"
+            if resume_task is None
+            else "⏳ GPT Image 正在查询已提交任务"
+        )
         _notify_display(
             display_callback,
             task,
-            phase="submitted",
+            phase="submitted" if resume_task is None else "polling",
+            elapsed_seconds=(
+                0 if resume_task is None
+                else max(0, int(time.time() - task.task_created_at))
+            ),
             message=submitted_message,
         )
 
@@ -842,12 +850,20 @@ class OpenAIImageAPI:
             initial_poll_delay = 0.0
 
         _notify_task(task_callback, task)
-        submitted_message = "📨 GPT Image 异步任务已提交，正在等待平台处理"
+        submitted_message = (
+            "📨 GPT Image 异步任务已提交，正在等待平台处理"
+            if resume_task is None
+            else "⏳ GPT Image 正在查询已提交任务"
+        )
         _notify_status(status_callback, submitted_message)
         _notify_display(
             display_callback,
             task,
-            phase="submitted",
+            phase="submitted" if resume_task is None else "polling",
+            elapsed_seconds=(
+                0 if resume_task is None
+                else max(0, int(time.time() - task.task_created_at))
+            ),
             message=submitted_message,
         )
         if task.state == "failed":
@@ -1298,7 +1314,7 @@ class OpenAIImageAPI:
                 raise ImageTaskStillRunning(task)
             task, operational_result_url = self._parse_sub2api_task(payload, task)
             _notify_task(task_callback, task)
-            elapsed = max(0.0, time.monotonic() - started_at)
+            elapsed = max(0.0, time.time() - task.task_created_at)
             if task.state == "failed":
                 raise _task_failed_error(task, self.config.api_key)
             if task.is_final:
