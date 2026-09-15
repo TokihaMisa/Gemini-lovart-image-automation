@@ -126,6 +126,11 @@ _FAILURE_CODE_CATEGORIES = {
     "task_failed": "other",
 }
 
+_OVERLOADED_TASK_MARKERS = (
+    "overloaded",
+    "服务器过载",
+)
+
 
 def normalize_retry_mode(value) -> str:
     mode = str(value or RETRY_MODE_FINITE).strip().lower()
@@ -198,6 +203,10 @@ def classify_retry_failure(row: dict) -> str | None:
     if failure_code:
         if failure_code in _PERMANENT_FAILURE_CODES:
             return None
+        if failure_code == "task_failed":
+            error = str(row.get("error") or "").casefold()
+            if any(marker in error for marker in _OVERLOADED_TASK_MARKERS):
+                return "network"
         return _FAILURE_CODE_CATEGORIES.get(failure_code, "other")
     error = str(row.get("error") or "").casefold()
     if any(marker in error for marker in _PERMANENT_ERROR_MARKERS):

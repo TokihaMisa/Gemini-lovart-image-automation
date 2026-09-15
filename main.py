@@ -1192,6 +1192,12 @@ def _process_products_once(
             }
             and _status_has_live_openai_image_task(previous_status)
         )
+        resuming_live_detail_task = bool(
+            resuming_live_task
+            and str(previous_status.get("openai_image_active_stage") or "").startswith(
+                "detail_screen_"
+            )
+        )
         update_status(
             product_dir,
             "parsed",
@@ -1558,7 +1564,8 @@ def _process_products_once(
                     detail_prompt = detail_prompt_path.read_text(encoding="utf-8")
                     screens = split_detail_screens(detail_prompt, target_count)
                     gemini_chars = int(read_status(product_dir).get("gemini_chars") or 0)
-                    logger.info(f"Detail prompt resumed ({len(detail_prompt)} chars)")
+                    if not resuming_live_detail_task:
+                        logger.info(f"Detail prompt resumed ({len(detail_prompt)} chars)")
                 except (OSError, TypeError, ValueError):
                     detail_prompt = ""
                     screens = []
@@ -1632,7 +1639,8 @@ def _process_products_once(
                     "lovart_prompt_ready",
                     lovart_prompt_chars=len(detail_prompt),
                 )
-            logger.info(f"Detail prompt ready ({len(detail_prompt)} chars)")
+            if not resuming_live_detail_task:
+                logger.info(f"Detail prompt ready ({len(detail_prompt)} chars)")
 
             if os.environ.get("UI_MODE") == "1":
                 if effective_routing.detail_provider == PROVIDER_LOVART:

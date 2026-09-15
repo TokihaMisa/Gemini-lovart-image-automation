@@ -256,6 +256,60 @@ class FailedRetryQueueTests(unittest.TestCase):
         self.assertEqual(result, (3, 0, 0, 0))
         self.assertEqual([row["status"] for row in final_rows], ["success"] * 3)
 
+    def test_sub2api_scheduler_retries_overloaded_task_after_current_queue(self):
+        products = [_Product("SKU-OVERLOADED"), _Product("SKU-OTHER")]
+        calls = []
+
+        def process_once(current, _gemini, _lovart, _logger, run_dir, **_kwargs):
+            product_id = current[0].id
+            calls.append(product_id)
+            overloaded = product_id == "SKU-OVERLOADED" and calls.count(product_id) == 1
+            write_run_summary(run_dir, [{
+                "product_id": product_id,
+                "status": "failed" if overloaded else "success",
+                "failure_code": "task_failed" if overloaded else "",
+                "error": (
+                    "Our servers are currently overloaded. Please try again later."
+                    if overloaded else ""
+                ),
+            }])
+            return 0, 0, 0, 0
+
+        provider = SimpleNamespace(api=SimpleNamespace(config=SimpleNamespace(
+            profile="sub2api",
+            max_parallel_tasks=2,
+            task_recheck_interval=0,
+        )))
+        registry = SimpleNamespace(get=lambda _name: provider)
+        routing = SimpleNamespace(
+            support_provider="openai_image",
+            detail_provider="openai_image",
+            detail_page_count=4,
+        )
+        policy = FailedRetryPolicy.from_config({})
+        policy = FailedRetryPolicy(
+            mode=policy.mode,
+            rounds=policy.rounds,
+            delay=0,
+            error_types=policy.error_types,
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "main._process_products_once", side_effect=process_once
+        ), patch("main.product_output_dir", side_effect=lambda product_id: Path(tmp) / product_id):
+            result = main._process_products(
+                products,
+                object(),
+                None,
+                _Logger(),
+                Path(tmp) / "run",
+                image_registry=registry,
+                routing=routing,
+                failed_retry_policy=policy,
+            )
+
+        self.assertEqual(calls, ["SKU-OVERLOADED", "SKU-OTHER", "SKU-OVERLOADED"])
+        self.assertEqual(result, (2, 0, 0, 0))
+
     def test_sub2api_scheduler_counts_persisted_live_tasks_before_new_submissions(self):
         """Catches restart recovery temporarily exceeding the configured remote cap."""
         products = [
@@ -469,6 +523,49 @@ class FailedRetryQueueTests(unittest.TestCase):
             "failure_code": "task_failed",
             "error": "localized provider rejection",
         }), "other")
+
+    def test_final_overloaded_task_failure_uses_default_network_retry(self):
+        row = {
+            "product_id": "SKU-OVERLOADED",
+            "status": "failed",
+            "failure_code": "task_failed",
+            "error": (
+                "GPT Image task failed. Provider message: Our servers are "
+                "currently overloaded. Please try again later."
+            ),
+        }
+        self.assertEqual(classify_retry_failure(row), "network")
+        calls = []
+
+        def process_once(current, _gemini, _lovart, _logger, run_dir, **_kwargs):
+            calls.append([product.id for product in current])
+            write_run_summary(run_dir, [row if len(calls) == 1 else {
+                "product_id": "SKU-OVERLOADED",
+                "status": "success",
+                "error": "",
+            }])
+            return 0, 0, 0, 0
+
+        policy = FailedRetryPolicy.from_config({})
+        policy = FailedRetryPolicy(
+            mode=policy.mode,
+            rounds=policy.rounds,
+            delay=0,
+            error_types=policy.error_types,
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "main._process_products_once", side_effect=process_once
+        ):
+            result = main._process_products(
+                [_Product("SKU-OVERLOADED")],
+                object(),
+                _Lovart(policy),
+                _Logger(),
+                Path(tmp),
+            )
+
+        self.assertEqual(calls, [["SKU-OVERLOADED"], ["SKU-OVERLOADED"]])
+        self.assertEqual(result, (1, 0, 0, 0))
 
     def test_infinite_policy_does_not_retry_ambiguous_paid_create(self):
         calls = []

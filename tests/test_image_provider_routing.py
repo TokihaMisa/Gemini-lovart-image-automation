@@ -2118,6 +2118,34 @@ def test_unknown_paid_create_outcomes_block_pipeline_restart_without_second_post
     assert second_api.calls == []
 
 
+def test_live_detail_recheck_reuses_prompt_without_repeated_info_logs(tmp_path):
+    first_api = _ScriptedTaskAPI({
+        "white_bg": [("success", "white-done-1234")],
+        "scene": [("success", "scene-done-1234")],
+        "01": [("still_running", "detail-live-1234")],
+    })
+    first = _run_scripted_openai_pipeline(tmp_path, first_api, detail_count=1)
+    assert first.counters == (0, 0, 0, 1)
+    assert any(
+        "Detail prompt ready" in str(call.args[0])
+        for call in first.logger.info.call_args_list
+    )
+
+    second_api = _ScriptedTaskAPI({
+        "01": [("still_running", "detail-live-1234")],
+    })
+    second = _run_scripted_openai_pipeline(tmp_path, second_api, detail_count=1)
+
+    assert second.counters == (0, 0, 0, 1)
+    assert second_api.create_posts == 0
+    assert second_api.calls[0]["resume_task"].task_id == "detail-live-1234"
+    assert not any(
+        "Detail prompt resumed" in str(call.args[0])
+        or "Detail prompt ready" in str(call.args[0])
+        for call in second.logger.info.call_args_list
+    )
+
+
 def test_detail_live_task_resumes_screen_four_then_uses_snapshot_target(tmp_path):
     first_api = _ScriptedTaskAPI({
         "white_bg": [("success", "white-done-1234")],
