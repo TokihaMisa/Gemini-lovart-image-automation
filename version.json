@@ -1,7 +1,7 @@
 {
-  "version": "1.3.26",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.26/update.zip",
-  "changelog": "修复 GPT Image 过期任务反复轮询：保留已完成图片并只补做缺失页；最终文件数量不一致时仅自动整套重做一次；新任务保留 10 分钟同步宽限，防止短暂 404 导致重复扣费。",
-  "sha256": "68430a02bede2829f05f63854fd122c03351966d42c5c1cade9be66a35b9d64a",
-  "size": 133142396
+  "version": "1.3.27",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.27/update.zip",
+  "changelog": "GPT Image 服务器过载的终态失败现在进入可配置的补偿重试；恢复轮询时减少重复提示词和阶段日志，并显示原任务的累计等待时间。",
+  "sha256": "56545bfc34dce1e2e813e832641cfe7429589f3042a4c797aa1a3710d10eca15",
+  "size": 134501188
 }
