@@ -355,6 +355,36 @@ class OpenAIImageProvider:
                 used_model=str(identity["model"]),
                 completed_count=1,
             )
+        checkpoint_state = str(checkpoint.get("state") or "").strip().lower()
+        if (
+            request.resume
+            and identity_matches
+            and checkpoint_state in {"success", "completed"}
+            and checkpoint.get("is_final") is True
+            and str(checkpoint.get("task_id") or "").strip()
+            and is_valid_image_file(output_path)
+        ):
+            local_path = str(output_path)
+            repaired_checkpoint = {
+                **checkpoint,
+                **identity,
+                "state": "done",
+                "local_path": local_path,
+                "error": "",
+                "error_code": "",
+                "attempts": max(1, _checkpoint_attempt_value(checkpoint)),
+            }
+            record_support_task_checkpoint(
+                request.product_dir,
+                request.step_name,
+                repaired_checkpoint,
+            )
+            return ImageProviderResult(
+                succeeded=True,
+                local_paths=(local_path,),
+                used_model=str(identity["model"]),
+                completed_count=1,
+            )
         if saved_task is not None and saved_task.state == "failed":
             saved_task = None
         if saved_task is None:

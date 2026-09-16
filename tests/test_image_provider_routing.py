@@ -2146,6 +2146,41 @@ def test_live_detail_recheck_reuses_prompt_without_repeated_info_logs(tmp_path):
     )
 
 
+def test_completed_openai_product_repairs_support_and_clears_stale_failure(tmp_path):
+    first_api = _ScriptedTaskAPI({
+        "white_bg": [("success", "white-done-1234")],
+        "scene": [("success", "scene-done-1234")],
+        "01": [("success", "detail-done-1234")],
+    })
+    first = _run_scripted_openai_pipeline(tmp_path, first_api, detail_count=1)
+    assert first.counters == (1, 0, 0, 0)
+
+    status = read_status(first.product_dir)
+    white_checkpoint = dict(status["support_task_checkpoints"]["white_bg"])
+    white_checkpoint["state"] = "success"
+    white_checkpoint["local_path"] = ""
+    update_status(
+        first.product_dir,
+        "failed",
+        failed=True,
+        reason="Generated image URL is not safe to download.",
+        support_task_checkpoints={
+            **status["support_task_checkpoints"],
+            "white_bg": white_checkpoint,
+        },
+    )
+
+    second_api = _ScriptedTaskAPI({})
+    second = _run_scripted_openai_pipeline(tmp_path, second_api, detail_count=1)
+
+    assert second.counters == (0, 0, 1, 0)
+    assert second_api.calls == []
+    repaired = read_status(second.product_dir)
+    assert repaired["failed"] is False
+    assert repaired["reason"] == ""
+    assert repaired["support_task_checkpoints"]["white_bg"]["state"] == "done"
+
+
 def test_detail_live_task_resumes_screen_four_then_uses_snapshot_target(tmp_path):
     first_api = _ScriptedTaskAPI({
         "white_bg": [("success", "white-done-1234")],

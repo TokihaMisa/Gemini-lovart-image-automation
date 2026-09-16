@@ -1522,7 +1522,17 @@ def _process_products_once(
                 target_count,
                 completion_prompt_hashes,
             ):
-                status = read_status(product_dir)
+                status = update_status(
+                    product_dir,
+                    "completed_resume_validated",
+                    failed=False,
+                    needs_manual_action=False,
+                    reason="",
+                    openai_image_still_running=False,
+                    openai_image_active_stage="",
+                    openai_image_task_suffix="",
+                    openai_image_next_poll_at=0,
+                )
                 skipped += 1
                 project_url = status.get("project_url", "")
                 from utils import get_output_dir

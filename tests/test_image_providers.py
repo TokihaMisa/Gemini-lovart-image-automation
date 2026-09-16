@@ -911,6 +911,57 @@ def test_support_matching_running_task_resumes_without_paid_create(tmp_path: Pat
     assert result.succeeded is True
 
 
+def test_support_terminal_success_repairs_valid_canonical_without_remote_call(
+    tmp_path: Path,
+):
+    from image_providers import (
+        OpenAIImageProvider,
+        read_support_task_checkpoint,
+        record_support_task_checkpoint,
+    )
+
+    canonical = write_valid_png(
+        tmp_path / "gpt_image" / "support" / "white_bg.png"
+    )
+    completed = task_snapshot(
+        "task-completed-without-path",
+        state="success",
+        is_final=True,
+        result_url="https://expired.example/result.png",
+    )
+    record_support_task_checkpoint(
+        tmp_path,
+        "white_bg",
+        {
+            "input_fingerprint": "sha256:8f4c1d4a",
+            "prompt_hash": "sha256:13b2990aa2af8a89fac10a6f132fa246eb8485a420b56dbeb02f56fb0f044457",
+            "model": "gpt-image-2",
+            "size": "1024x1536",
+            "base_url": "https://api.lk888.ai",
+            "merge_reference_images": False,
+            "attempts": 1,
+            "local_path": "",
+            "task_id": completed.task_id,
+            "state": completed.state,
+            "is_final": completed.is_final,
+            "task_created_at": completed.task_created_at,
+            "result_url": completed.result_url,
+            "result_type": completed.result_type,
+        },
+    )
+    api = CheckpointingOpenAIAPI(())
+
+    result = OpenAIImageProvider(api).generate_support_image(support_request(tmp_path))
+
+    assert result.succeeded is True
+    assert result.local_paths == (canonical,)
+    assert api.calls == []
+    checkpoint = read_support_task_checkpoint(tmp_path, "white_bg")
+    assert checkpoint["state"] == "done"
+    assert checkpoint["local_path"] == canonical
+    assert checkpoint["task_id"] == completed.task_id
+
+
 @pytest.mark.parametrize(
     ("mismatch", "request_overrides", "api_overrides"),
     [
