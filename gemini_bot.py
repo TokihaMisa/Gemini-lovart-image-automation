@@ -51,6 +51,13 @@ EXTENDED_THINKING_TERMS = frozenset((
 ))
 UPLOAD_TERMS = frozenset(("上传", "attach", "upload", "adjuntar archivos", "adjuntar", "subir"))
 TEMPORARY_CHAT_TERMS = frozenset(("临时", "temporary", "chat temporal"))
+FLASH_MODEL_PATTERN = r"^(?:gemini\s+)?(?:\d+(?:\.\d+)*\s+)?flash(?:\s|$)"
+HIGH_THINKING_PATTERN = (
+    r"^(?:high|高|alto|alta|extended|扩展|擴展|ampliado|extendido)$"
+)
+EXTENDED_THINKING_PATTERN = (
+    r"^(?:扩展思考|擴展思考|extended\s+thinking|pensamiento\s+(?:ampliado|extendido))$"
+)
 
 GEMINI_EDITOR_SELECTOR = (
     '[contenteditable="true"][role="textbox"], '
@@ -742,7 +749,18 @@ class GeminiBot:
         return False
 
     def _select_thinking_mode(self) -> bool:
-        """Select Gemini 3 Flash and set thinking level to extended."""
+        """Select Flash with High thinking, retaining the legacy Extended UI."""
+        try:
+            return self._select_thinking_mode_controls()
+        finally:
+            # Verification may reopen both menus; release their backdrop before typing.
+            try:
+                self.page.keyboard.press("Escape")
+                self.page.keyboard.press("Escape")
+            except Exception:
+                pass
+
+    def _select_thinking_mode_controls(self) -> bool:
         if not self._open_mode_menu():
             if self._current_model_is_flash() and self._current_thinking_level_is_extended():
                 self.logger.info("Gemini: Flash extended thinking mode already selected")
@@ -752,7 +770,7 @@ class GeminiBot:
 
         self.page.wait_for_timeout(500)
         if not self._click_flash_model():
-            self.logger.warning("Gemini: 3 Flash model option not found")
+            self.logger.warning("Gemini: Flash model option is unavailable or could not be selected")
             return False
 
         self.page.wait_for_timeout(1000)
@@ -774,11 +792,11 @@ class GeminiBot:
 
         self.page.wait_for_timeout(500)
         if not self._click_extended_thinking_level():
-            self.logger.warning("Gemini: extended thinking level option not found")
+            self.logger.warning("Gemini: High/Extended thinking level could not be confirmed")
             return False
 
         self.page.wait_for_timeout(1000)
-        self.logger.info("Gemini: selected 3 Flash with extended thinking level")
+        self.logger.info("Gemini: selected Flash with High/Extended thinking level")
         return True
 
     def _select_extended_thinking_option(self, menu_is_open: bool = False) -> bool:
@@ -796,107 +814,87 @@ class GeminiBot:
 
         if self._click_extended_thinking_option():
             self.page.wait_for_timeout(800)
-            return True
+            if self._extended_thinking_option_is_checked():
+                return True
+            if self._open_mode_menu():
+                return self._extended_thinking_option_is_checked()
         return False
 
     def _extended_thinking_option_is_checked(self) -> bool:
-        if self._normalized_dom_term_is_selected(EXTENDED_THINKING_TERMS):
+        return self._mode_menu_option(
+            EXTENDED_THINKING_PATTERN, selected_only=True, allow_buttons=True
+        )
+
+    def _click_extended_thinking_option(self) -> bool:
+        if self._mode_menu_option(EXTENDED_THINKING_PATTERN, click=True, allow_buttons=True):
             return True
-        script = """
-        () => {
-            const textMatches = (text) => /\\u6269\\u5c55\\u601d\\u8003|extended\\s+thinking/i.test(text || '');
-            const visible = (el) => {
-                const rect = el.getBoundingClientRect();
-                const style = getComputedStyle(el);
-                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-            };
-            const textOf = (el) => [
-                el.innerText,
-                el.textContent,
-                el.getAttribute('aria-label'),
-                el.getAttribute('title'),
-                el.getAttribute('data-tooltip'),
-            ].filter(Boolean).join(' ');
-            const candidates = [...document.querySelectorAll('button, [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], gem-menu-item, mat-option')]
-                .filter(visible)
-                .filter((el) => textMatches(textOf(el)));
-            const hasCheck = (el) => {
-                const nodes = [el, el.parentElement, el.closest('[role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], gem-menu-item, mat-option')].filter(Boolean);
-                return nodes.some((node) => {
-                    const attrs = [
-                        node.getAttribute('aria-checked'),
-                        node.getAttribute('aria-selected'),
-                        node.getAttribute('data-selected'),
-                        node.getAttribute('selected'),
-                    ].filter(Boolean).join(' ');
-                    const classes = node.className ? String(node.className) : '';
-                    const text = textOf(node);
-                    return /true|selected|checked/i.test(attrs)
-                        || /selected|checked|active/i.test(classes)
-                        || /(^|\\s)[✓✔](\\s|$)/.test(text);
-                });
-            };
-            return candidates.some(hasCheck);
-        }
+        # Older layouts expose standalone buttons rather than menuitem elements.
+        selectors = [
+            f'{role}:text-is("{label}")'
+            for label in ("扩展思考", "擴展思考", "Extended thinking", "Pensamiento ampliado", "Pensamiento extendido")
+            for role in ('button', '[role="button"]')
+        ]
+        return self._click_gemini_control(
+            selectors,
+            r'[/^扩展思考$/, /^extended\s+thinking$/i, /^pensamiento\s+(?:ampliado|extendido)$/i]',
+            "extended thinking option",
+        )
+
+    def _mode_menu_option(
+        self, pattern: str, *, click: bool = False, selected_only: bool = False,
+        allow_buttons: bool = False
+    ) -> bool:
+        """Match an option's own label, excluding nested default-setting buttons."""
+        script = rf"""
+        () => {{
+            const pattern = new RegExp({json.dumps(pattern)}, 'i');
+            const normalize = (value) => (value || '').normalize('NFKD')
+                .replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
+            const visible = (node) => {{
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return rect.width > 0 && rect.height > 0
+                    && style.visibility !== 'hidden' && style.display !== 'none';
+            }};
+            const selected = (node) =>
+                ['aria-checked', 'aria-selected', 'data-selected'].some(
+                    name => node.getAttribute(name) === 'true')
+                || node.hasAttribute('selected')
+                || node.classList.contains('selected') || node.classList.contains('checked')
+                || !!node.querySelector('mat-icon[data-mat-icon-name="check"], mat-icon[fonticon="check"]');
+            const nodes = [...document.querySelectorAll(
+                'gem-menu-item, [role="menuitem"], [role="menuitemradio"], '
+                + '[role="menuitemcheckbox"], mat-option, [role="menu"] button'
+                + {json.dumps(', button, [role="button"]' if allow_buttons else '')}
+            )];
+            const option = nodes.filter(visible).find(node => {{
+                if (node.matches('button') && node.parentElement?.closest('gem-menu-item, [role^="menuitem"]')) return false;
+                if (node.getAttribute('aria-disabled') === 'true' || node.hasAttribute('disabled')) return false;
+                const label = node.querySelector('.label');
+                const text = normalize(label ? label.textContent : (
+                    node.getAttribute('aria-label') || node.getAttribute('title')
+                    || node.getAttribute('data-tooltip') || node.innerText));
+                return pattern.test(text) && !/flash[\s-]*lite/i.test(text)
+                    && (!{str(selected_only).lower()} || selected(node));
+            }});
+            if (!option) return false;
+            if ({str(click).lower()} && !selected(option)) option.click();
+            return true;
+        }}
         """
         try:
             return bool(self.page.evaluate(script))
         except Exception:
             return False
 
-    def _click_extended_thinking_option(self) -> bool:
-        selectors = [
-            'gem-menu-item:has-text("扩展思考")',
-            '[role="menuitem"]:has-text("扩展思考")',
-            '[role="menuitemcheckbox"]:has-text("扩展思考")',
-            '[role="menuitemradio"]:has-text("扩展思考")',
-            'button:has-text("扩展思考")',
-            '[role="button"]:has-text("扩展思考")',
-            'mat-option:has-text("扩展思考")',
-            'gem-menu-item:has-text("Extended thinking")',
-            '[role="menuitem"]:has-text("Extended thinking")',
-            '[role="menuitemcheckbox"]:has-text("Extended thinking")',
-            '[role="menuitemradio"]:has-text("Extended thinking")',
-            'button:has-text("Extended thinking")',
-            '[role="button"]:has-text("Extended thinking")',
-            'mat-option:has-text("Extended thinking")',
-            'gem-menu-item:has-text("Pensamiento ampliado")',
-            '[role="menuitem"]:has-text("Pensamiento ampliado")',
-            'button:has-text("Pensamiento ampliado")',
-            'gem-menu-item:has-text("Pensamiento extendido")',
-            '[role="menuitem"]:has-text("Pensamiento extendido")',
-            'button:has-text("Pensamiento extendido")',
-        ]
-        if self._click_normalized_dom_term(EXTENDED_THINKING_TERMS, "extended thinking option"):
-            return True
-        if self._click_gemini_control(
-            selectors,
-            r'[/\u6269\u5c55\u601d\u8003/, /extended\s+thinking/i, /pensamiento\s+(?:ampliado|extendido)/i]',
-            "extended thinking option",
-        ):
-            return True
-        return self._extended_thinking_option_is_checked()
-
     def _click_flash_model(self) -> bool:
-        selectors = [
-            'gem-menu-item:has-text("3.5 Flash")',
-            '[role="menuitem"]:has-text("3.5 Flash")',
-            'button:has-text("3.5 Flash")',
-            '[role="button"]:has-text("3.5 Flash")',
-            'gem-menu-item:has-text("3 Flash")',
-            '[role="menuitem"]:has-text("3 Flash")',
-            'button:has-text("3 Flash")',
-            '[role="button"]:has-text("3 Flash")',
-            'gem-menu-item:has-text("全方位帮助")',
-            '[role="menuitem"]:has-text("全方位帮助")',
-        ]
-        if self._click_gemini_control(
-            selectors,
-            r'[/^3(?:\.\d+)?\s*Flash\b/i, /Flash[\s\S]*全方位帮助/i]',
-            "Flash model",
-            exclude_list=r'[/Flash-Lite/i, /Lite/i, /极速回答/]',
-        ):
-            return True
+        if self._mode_menu_option(FLASH_MODEL_PATTERN, click=True):
+            for _ in range(15):
+                if self._current_model_is_flash():
+                    self.logger.info("Gemini: confirmed Flash model")
+                    return True
+                self.page.wait_for_timeout(100)
+            return False
         return self._current_model_is_flash()
 
     def _open_thinking_level_menu(self) -> bool:
@@ -918,19 +916,15 @@ class GeminiBot:
         return self._click_gemini_control(selectors, r'[/思考等级/, /thinking level/i, /nivel de pensamiento/i]', "thinking level menu")
 
     def _click_extended_thinking_level(self) -> bool:
-        selectors = [
-            'gem-menu-item:has-text("扩展")',
-            '[role="menuitem"]:has-text("扩展")',
-            'button:has-text("扩展")',
-            '[role="button"]:has-text("扩展")',
-            'gem-menu-item:has-text("Extended")',
-            '[role="menuitem"]:has-text("Extended")',
-            'button:has-text("Extended")',
-            '[role="button"]:has-text("Extended")',
-        ]
-        if self._click_normalized_dom_term(("扩展", "extended", "ampliado", "extendido"), "extended thinking level"):
+        if not self._mode_menu_option(HIGH_THINKING_PATTERN, click=True):
+            return False
+        self.page.wait_for_timeout(300)
+        if self._current_thinking_level_is_extended():
             return True
-        return self._click_gemini_control(selectors, r'[/^扩展\b/, /^Extended\b/i]', "extended thinking level")
+        # Newer Gemini closes the menu on selection: reopen it to verify the checkmark.
+        if self._open_mode_menu() and self._open_thinking_level_menu():
+            return self._current_thinking_level_is_extended()
+        return False
 
     def _click_thinking_control(self) -> bool:
         selectors = [
@@ -1027,17 +1021,25 @@ class GeminiBot:
         return False
 
     def _current_model_is_flash(self) -> bool:
-        script = """
+        script = r"""
         () => {
-            const controls = [...document.querySelectorAll('button, [role="button"], [aria-label], [title]')];
+            const controls = [...document.querySelectorAll('button, [role="button"]')];
             const visible = (el) => {
                 const rect = el.getBoundingClientRect();
                 const style = getComputedStyle(el);
                 return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
             };
-            return controls
+            const toolbar = controls
                 .filter(visible)
-                .some((el) => {
+                .filter((el) => !el.closest('[role="menu"], [role^="menuitem"], gem-menu-item'));
+            const modeControls = toolbar.filter((el) =>
+                /mode|模式|modo|模型/i.test(el.getAttribute('aria-label') || '')
+                || (el.getAttribute('aria-haspopup') === 'menu'
+                    && /^(?:Flash|Pro|Argon|Auto|Fast)\b/i.test((el.innerText || '').trim())));
+            if (!modeControls.length) {
+                return toolbar.some((el) => /^(?:Gemini\s+)?(?:\d+(?:\.\d+)*\s+)?Flash(?:\s+Extended)?$/i.test((el.innerText || '').trim()));
+            }
+            return modeControls.some((el) => {
                     const text = [
                         el.innerText,
                         el.textContent,
@@ -1057,34 +1059,7 @@ class GeminiBot:
         return False
 
     def _current_thinking_level_is_extended(self) -> bool:
-        script = """
-        () => {
-            const controls = [...document.querySelectorAll('button, [role="button"], [aria-label], [title]')];
-            const visible = (el) => {
-                const rect = el.getBoundingClientRect();
-                const style = getComputedStyle(el);
-                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-            };
-            return controls
-                .filter(visible)
-                .some((el) => {
-                    const text = [
-                        el.innerText,
-                        el.textContent,
-                        el.getAttribute('aria-label'),
-                        el.getAttribute('title'),
-                    ].filter(Boolean).join(' ');
-                    return /Extended/i.test(text) || /\\u6269\\u5c55/.test(text);
-                });
-        }
-        """
-        try:
-            if self.page.evaluate(script):
-                self.logger.info("Gemini: extended thinking level already selected")
-                return True
-        except Exception:
-            pass
-        return False
+        return self._mode_menu_option(HIGH_THINKING_PATTERN, selected_only=True)
 
     def _click_gemini_control(
         self,
@@ -1181,6 +1156,11 @@ class GeminiBot:
             try:
                 control = self.page.locator(selector).first
                 if control.is_visible(timeout=1200):
+                    try:
+                        if control.get_attribute("aria-expanded") == "true":
+                            return True
+                    except Exception:
+                        pass
                     control.click(timeout=3000)
                     self.logger.info(f"Gemini: opened mode menu via {selector}")
                     return True

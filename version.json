@@ -1,7 +1,7 @@
 {
-  "version": "1.3.28",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.28/update.zip",
-  "changelog": "修复已完成商品被旧白底图任务误报失败：本地支撑图有效且请求指纹一致时自动修复检查点并直接复用，不再访问旧结果地址；验证完成后清除陈旧失败状态。",
-  "sha256": "165c9c87666cce11e60a2fbfa78cb397b9010e5e0bf24b19f6fe97e63e99e998",
-  "size": 134500378
+  "version": "1.3.29",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.29/update.zip",
+  "changelog": "适配新版 Gemini 模型与思考等级菜单：支持版本无关的非 Lite Flash 与高强度思考，兼容旧版扩展思考和中英西界面；修复误选 Flash-Lite、选中状态误判及菜单遮挡输入框，保留 v1.3.28 已有恢复修复。",
+  "sha256": "9f86f7abbd1e89265db67b0d9a2bf697c0fc106a0e14a0a2e343e7bdfcb871c3",
+  "size": 133887379
 }

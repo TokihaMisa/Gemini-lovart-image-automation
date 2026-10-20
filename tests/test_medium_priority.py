@@ -1872,6 +1872,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             def __init__(self, *args, **kwargs):
                 super().__init__(*args, **kwargs)
                 self.check_count = 0
+                self.option_selected = False
 
             def _open_mode_menu(self):
                 events.append("open_menu")
@@ -1884,10 +1885,11 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             def _extended_thinking_option_is_checked(self):
                 self.check_count += 1
                 events.append("checked")
-                return False
+                return self.option_selected
 
             def _click_extended_thinking_option(self):
                 events.append("click_extended")
+                self.option_selected = True
                 return True
 
         logger = FakeLogger()
