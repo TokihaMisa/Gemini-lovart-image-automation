@@ -52,6 +52,7 @@ EXTENDED_THINKING_TERMS = frozenset((
 UPLOAD_TERMS = frozenset(("上传", "attach", "upload", "adjuntar archivos", "adjuntar", "subir"))
 TEMPORARY_CHAT_TERMS = frozenset(("临时", "temporary", "chat temporal"))
 FLASH_MODEL_PATTERN = r"^(?:gemini\s+)?(?:\d+(?:\.\d+)*\s+)?flash(?:\s|$)"
+AUTO_MODEL_PATTERN = r"^(?:Gemini\s+)?Auto$"
 HIGH_THINKING_PATTERN = (
     r"^(?:high|高|alto|alta|extended|扩展|擴展|ampliado|extendido)$"
 )
@@ -196,12 +197,14 @@ class GeminiBot:
         self.logger = logger
         self.run_dir = Path(run_dir) if run_dir else None
         self.prompt_settings = get_prompt_settings(config)
+        self._flash_selection_failed = False
 
     def _health_check_any_visible(
         self,
         selectors: str | tuple[str, ...],
         *,
         require_enabled: bool = False,
+        require_editable: bool = False,
     ) -> bool:
         """Inspect controls without mutating the Gemini page."""
         candidates = (selectors,) if isinstance(selectors, str) else selectors
@@ -214,16 +217,20 @@ class GeminiBot:
                         continue
                     if require_enabled and not candidate.is_enabled():
                         continue
+                    if require_editable and not candidate.is_editable():
+                        continue
                     return True
             except Exception:
                 continue
         return False
 
     def health_check_editor(self) -> bool:
-        return self._health_check_any_visible(GEMINI_EDITOR_SELECTOR)
+        return self._health_check_any_visible(GEMINI_EDITOR_SELECTOR, require_editable=True)
 
     def health_check_upload_control(self) -> bool:
-        return self._health_check_any_visible(GEMINI_UPLOAD_CONTROL_SELECTORS)
+        return self._health_check_any_visible(
+            GEMINI_UPLOAD_CONTROL_SELECTORS, require_enabled=True
+        )
 
     def health_check_send_button(self) -> bool:
         return self._health_check_any_visible(
@@ -546,6 +553,7 @@ class GeminiBot:
             }};
             const candidates = [...document.querySelectorAll('button, [role="button"], [role="menuitem"], gem-menu-item, mat-option, [aria-label], [title], [data-tooltip]')]
                 .filter(visible)
+                .filter(node => !node.matches(':disabled') && !node.closest('[disabled], [aria-disabled="true"]'))
                 .map((node) => ({{ node, text: normalize([node.innerText, node.getAttribute('aria-label'), node.getAttribute('title'), node.getAttribute('data-tooltip')].filter(Boolean).join(' ')) }}))
                 .filter((item) => terms.some((term) => item.text.includes(term)));
             if (!candidates.length) return null;
@@ -624,7 +632,7 @@ class GeminiBot:
             self.page.wait_for_timeout(250)
         return False
 
-    def _start_temporary_chat(self) -> bool:
+    def _start_temporary_chat(self, *, wait_for_active: bool = True) -> bool:
         """Open Gemini temporary chat/session when the UI exposes that control."""
         if self.health_check_temporary_chat_active():
             self.logger.info("Gemini: temporary chat is already active")
@@ -647,17 +655,19 @@ class GeminiBot:
         for selector in selectors:
             try:
                 control = self.page.locator(selector).first
-                if control.is_visible(timeout=1500):
+                if control.is_visible(timeout=1500) and control.is_enabled():
                     control.click(timeout=3000)
-                    self.page.wait_for_timeout(1500)
                     self.logger.info(f"Gemini: temporary chat clicked via {selector}")
-                    return self._wait_for_temporary_chat_active()
+                    if wait_for_active:
+                        self.page.wait_for_timeout(1500)
+                    return not wait_for_active or self._wait_for_temporary_chat_active()
             except Exception:
                 continue
 
         if self._click_normalized_dom_term(TEMPORARY_CHAT_TERMS, "temporary chat"):
-            self.page.wait_for_timeout(1500)
-            return self._wait_for_temporary_chat_active()
+            if wait_for_active:
+                self.page.wait_for_timeout(1500)
+            return not wait_for_active or self._wait_for_temporary_chat_active()
 
         script = """
         () => {
@@ -670,6 +680,7 @@ class GeminiBot:
             };
             const matches = candidates
                 .filter(visible)
+                .filter(node => !node.matches(':disabled') && !node.closest('[disabled], [aria-disabled="true"]'))
                 .map((el) => ({
                     el,
                     text: [
@@ -690,14 +701,15 @@ class GeminiBot:
         try:
             clicked = self.page.evaluate(script)
             if clicked:
-                self.page.wait_for_timeout(1500)
                 self.logger.info("Gemini: temporary chat clicked via DOM scan")
-                return self._wait_for_temporary_chat_active()
+                if wait_for_active:
+                    self.page.wait_for_timeout(1500)
+                return not wait_for_active or self._wait_for_temporary_chat_active()
         except Exception:
             self.logger.warning("Gemini: temporary chat DOM scan was unavailable")
 
         if self._click_temporary_chat_via_hover_tooltip():
-            return self._wait_for_temporary_chat_active()
+            return not wait_for_active or self._wait_for_temporary_chat_active()
 
         self.logger.warning("Gemini: temporary chat control not found")
         return False
@@ -716,7 +728,7 @@ class GeminiBot:
         for index in range(candidate_count):
             candidate = candidates.nth(index)
             try:
-                if not candidate.is_visible(timeout=300):
+                if not candidate.is_visible(timeout=300) or not candidate.is_enabled():
                     continue
                 box = candidate.bounding_box()
                 if not box:
@@ -749,7 +761,7 @@ class GeminiBot:
         return False
 
     def _select_thinking_mode(self) -> bool:
-        """Select Flash with High thinking, retaining the legacy Extended UI."""
+        """Select Flash or the Auto-only UI with verified High/Extended thinking."""
         try:
             return self._select_thinking_mode_controls()
         finally:
@@ -769,13 +781,14 @@ class GeminiBot:
             return False
 
         self.page.wait_for_timeout(500)
-        if not self._click_flash_model():
-            self.logger.warning("Gemini: Flash model option is unavailable or could not be selected")
+        model = self._select_prompt_model()
+        if not model:
+            self.logger.warning("Gemini: Flash/Auto model is unavailable or could not be confirmed")
             return False
 
         self.page.wait_for_timeout(1000)
         if self._select_extended_thinking_option():
-            self.logger.info("Gemini: selected Flash with extended thinking")
+            self.logger.info(f"Gemini: selected {model} with extended thinking")
             return True
 
         if not self._open_thinking_level_menu():
@@ -783,7 +796,7 @@ class GeminiBot:
                 self.logger.warning("Gemini: mode menu could not be reopened for thinking level")
                 return False
             if self._select_extended_thinking_option(menu_is_open=True):
-                self.logger.info("Gemini: selected Flash with extended thinking")
+                self.logger.info(f"Gemini: selected {model} with extended thinking")
                 return True
             self.page.wait_for_timeout(500)
             if not self._open_thinking_level_menu():
@@ -796,7 +809,7 @@ class GeminiBot:
             return False
 
         self.page.wait_for_timeout(1000)
-        self.logger.info("Gemini: selected Flash with High/Extended thinking level")
+        self.logger.info(f"Gemini: selected {model} with High/Extended thinking level")
         return True
 
     def _select_extended_thinking_option(self, menu_is_open: bool = False) -> bool:
@@ -873,7 +886,8 @@ class GeminiBot:
                 const label = node.querySelector('.label');
                 const text = normalize(label ? label.textContent : (
                     node.getAttribute('aria-label') || node.getAttribute('title')
-                    || node.getAttribute('data-tooltip') || node.innerText));
+                    || node.getAttribute('data-tooltip')
+                    || (node.innerText || '').split('\n').find(line => line.trim())));
                 return pattern.test(text) && !/flash[\s-]*lite/i.test(text)
                     && (!{str(selected_only).lower()} || selected(node));
             }});
@@ -896,6 +910,27 @@ class GeminiBot:
                 self.page.wait_for_timeout(100)
             return False
         return self._current_model_is_flash()
+
+    def _select_prompt_model(self) -> str | None:
+        """Prefer non-Lite Flash; use Auto only when the menu offers no usable Flash."""
+        flash_available = self._mode_menu_option(FLASH_MODEL_PATTERN)
+        if self._click_flash_model():
+            self._flash_selection_failed = False
+            return "Flash"
+        # A failed switch to an available Flash is an error, not an Auto-only UI.
+        if flash_available or self._mode_menu_option(FLASH_MODEL_PATTERN):
+            self._flash_selection_failed = True
+            return None
+        # A rerender must not turn a failed Flash switch into an Auto-only session.
+        if self._flash_selection_failed:
+            return None
+        if self._mode_menu_option(AUTO_MODEL_PATTERN, click=True):
+            for _ in range(15):
+                if self._current_model_is_auto():
+                    self.logger.info("Gemini: confirmed Auto model (no available non-Lite Flash)")
+                    return "Auto"
+                self.page.wait_for_timeout(100)
+        return None
 
     def _open_thinking_level_menu(self) -> bool:
         selectors = [
@@ -1058,6 +1093,38 @@ class GeminiBot:
             pass
         return False
 
+    def _current_model_is_auto(self) -> bool:
+        script = r"""
+        () => {
+            const toolbar = [...document.querySelectorAll('button, [role="button"]')]
+                .filter(node => {
+                    if (node.closest('[role="menu"], [role^="menuitem"], gem-menu-item')) return false;
+                    const rect = node.getBoundingClientRect();
+                    const style = getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0
+                        && style.visibility !== 'hidden' && style.display !== 'none';
+                }).map(node => {
+                    const label = node.cloneNode(true);
+                    label.querySelectorAll('mat-icon, svg, [aria-hidden="true"]').forEach(icon => icon.remove());
+                    return {node, text: (label.textContent || '').replace(/\s+/g, ' ').trim()};
+                });
+            const modeControls = toolbar.filter(({node, text}) =>
+                /mode|模式|modo|模型/i.test(node.getAttribute('aria-label') || '')
+                || ((node.getAttribute('aria-haspopup') === 'menu' || node.hasAttribute('aria-expanded'))
+                    && /^(?:Gemini\s+)?(?:Auto|Flash|Pro|Argon|Fast)\b/i.test(text)));
+            const candidates = modeControls.length ? modeControls
+                : toolbar.filter(({text}) => /^Gemini\s+Auto$/i.test(text));
+            return candidates.some(({node, text}) =>
+                /^(?:Gemini\s+)?Auto$/i.test(text)
+                || /(?:current\s+(?:mode|model)|当前(?:模式|模型))\s*[:：]\s*(?:Gemini\s+)?Auto\b/i
+                    .test(node.getAttribute('aria-label') || ''));
+        }
+        """
+        try:
+            return bool(self.page.evaluate(script))
+        except Exception:
+            return False
+
     def _current_thinking_level_is_extended(self) -> bool:
         return self._mode_menu_option(HIGH_THINKING_PATTERN, selected_only=True)
 
@@ -1151,11 +1218,15 @@ class GeminiBot:
             '[role="button"][aria-label*="mode"]',
             'button[aria-label*="模式"]',
             '[role="button"][aria-label*="模式"]',
+            'button:has-text("Gemini Auto")',
+            '[role="button"]:has-text("Gemini Auto")',
+            'button:text-is("Auto")',
+            '[role="button"]:text-is("Auto")',
         ]
         for selector in selectors:
             try:
                 control = self.page.locator(selector).first
-                if control.is_visible(timeout=1200):
+                if control.is_visible(timeout=1200) and control.is_enabled():
                     try:
                         if control.get_attribute("aria-expanded") == "true":
                             return True
@@ -1182,6 +1253,7 @@ class GeminiBot:
             };
             const matches = candidates
                 .filter(visible)
+                .filter(node => !node.matches(':disabled') && !node.closest('[disabled], [aria-disabled="true"]'))
                 .map((el) => ({
                     el,
                     text: [

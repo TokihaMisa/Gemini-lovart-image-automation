@@ -763,6 +763,9 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
             def is_visible(self, timeout=None):
                 return any(term in self.selector for term in ("Chat temporal", "Rápido", "Pensamiento extendido", "Subir"))
 
+            def is_enabled(self):
+                return True
+
             def click(self, **_kwargs):
                 self.page.clicked.append(self.selector)
                 if "Chat temporal" in self.selector:

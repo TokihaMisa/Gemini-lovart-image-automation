@@ -8,6 +8,7 @@ import logging
 import os
 from pathlib import Path
 import tempfile
+import time
 from typing import Any, Callable, Iterator, Protocol, Sequence
 
 from PIL import Image
@@ -64,7 +65,7 @@ class HealthCheckHarness(Protocol):
 
     def open_mode_menu(self) -> bool: ...
 
-    def select_flash(self) -> bool: ...
+    def select_model(self) -> bool: ...
 
     def select_extended_thinking(self) -> bool: ...
 
@@ -137,10 +138,10 @@ _CHECKS = (
         "控件不可用",
     ),
     _CheckDefinition(
-        "Flash 模型",
-        "select_flash",
-        "已选择非 Lite Flash",
-        "未找到非 Lite Flash 模型",
+        "模型选择",
+        "select_model",
+        "已选择可用模型",
+        "未找到可用的非 Lite Flash 或 Auto 模型",
         "控件不可用",
     ),
     _CheckDefinition(
@@ -215,6 +216,10 @@ def run_checks(harness: HealthCheckHarness) -> Iterator[HealthCheckResult]:
                 message = check.exception_message
             else:
                 message = check.pass_message if passed else check.fail_message
+                if passed and check.method == "select_model":
+                    model = getattr(harness, "selected_model", None)
+                    if model in ("Flash", "Auto"):
+                        message = f"已选择 {model}"
 
             state = CheckState.PASS if passed else CheckState.FAIL
             yield HealthCheckResult(check.name, state, message)
@@ -242,6 +247,7 @@ class PlaywrightGeminiHealthCheckHarness:
         self.page = None
         self.status = None
         self.bot = None
+        self.selected_model = None
         self.launch_options = None
         self._temporary_directory = tempfile.TemporaryDirectory(
             prefix="gemini-health-check-"
@@ -260,9 +266,10 @@ class PlaywrightGeminiHealthCheckHarness:
         harness.owner = None
         harness.playwright = None
         harness.context = None
-        harness.page = None
+        harness.page = getattr(bot, "page", None)
         harness.status = None
         harness.bot = bot
+        harness.selected_model = None
         harness.launch_options = {}
         harness._temporary_directory = tempfile.TemporaryDirectory(
             prefix="gemini-health-check-test-"
@@ -325,32 +332,38 @@ class PlaywrightGeminiHealthCheckHarness:
         )
         if self.status.state not in (GeminiPageState.READY, GeminiPageState.WAITING_LOGIN):
             return False
-        if self.status.state is GeminiPageState.READY:
-            policy = retry_policy_from_config(self.config)
-            self.page.wait_for_function(
-                """
-                () => {
-                    const visible = (node) => {
-                        const rect = node.getBoundingClientRect();
-                        const style = getComputedStyle(node);
-                        return rect.width > 0 && rect.height > 0
-                            && style.visibility !== 'hidden' && style.display !== 'none';
-                    };
-                    const editors = [...document.querySelectorAll(
-                        '[contenteditable="true"], textarea, [role="textbox"]'
-                    )].filter(visible);
-                    const controls = [...document.querySelectorAll(
-                        'button, [role="button"]'
-                    )].filter(visible);
-                    return editors.length > 0 && controls.length >= 3;
-                }
-                """,
-                timeout=int(policy.page_ready_timeout * 1000),
-            )
         from gemini_bot import GeminiBot
 
         self.bot = GeminiBot(self.page, self.config, self.logger)
+        if self.status.state is GeminiPageState.READY:
+            return self.check_editor()
         return True
+
+    def _wait_for_control(self, check: Callable[[], bool], label: str) -> bool:
+        """Allow SPA controls to mount or enable before declaring them missing."""
+        timeout = retry_policy_from_config(self.config).page_ready_timeout
+        deadline = time.monotonic() + timeout
+        waiting_logged = False
+        while True:
+            if self.page is not None and self.page.is_closed():
+                return False
+            try:
+                if check():
+                    return True
+            except Exception:
+                # A rerender can detach a control between finding and inspecting it.
+                pass
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.logger.warning(f"Gemini health check: timed out waiting for {label}")
+                return False
+            if not waiting_logged:
+                self.logger.info(f"Gemini health check: waiting for {label}")
+                waiting_logged = True
+            if self.page is not None:
+                self.page.wait_for_timeout(min(250, remaining * 1000))
+            else:
+                time.sleep(min(0.25, remaining))
 
     def check_logged_in(self) -> bool:
         if self._test_mode:
@@ -361,26 +374,46 @@ class PlaywrightGeminiHealthCheckHarness:
         return self.status.state is GeminiPageState.READY and self.status.ready
 
     def check_editor(self) -> bool:
-        return bool(self.bot and self.bot.health_check_editor())
+        return bool(self.bot and self._wait_for_control(
+            self.bot.health_check_editor, "prompt editor"
+        ))
 
     def enter_temporary_chat(self) -> bool:
-        return bool(
-            self.bot
-            and self.bot._start_temporary_chat()
-            and self.bot.health_check_temporary_chat_active()
+        if not self.bot or not self._wait_for_control(
+            lambda: self.bot._start_temporary_chat(wait_for_active=False),
+            "temporary chat control",
+        ):
+            return False
+        # Toggle once, then only observe: a second click can cancel slow activation.
+        return self._wait_for_control(
+            self.bot.health_check_temporary_chat_active, "temporary chat activation"
         )
 
     def open_mode_menu(self) -> bool:
-        return bool(self.bot and self.bot._open_mode_menu())
+        return bool(self.bot and self._wait_for_control(
+            self.bot._open_mode_menu, "mode menu"
+        ))
 
-    def select_flash(self) -> bool:
-        return bool(self.bot and self.bot._click_flash_model())
+    def select_model(self) -> bool:
+        self.selected_model = None
+
+        def select() -> bool:
+            self.selected_model = self.bot._select_prompt_model()
+            return self.selected_model in ("Flash", "Auto")
+
+        return bool(self.bot and self._wait_for_control(
+            select, "non-Lite Flash or Auto model"
+        ))
 
     def select_extended_thinking(self) -> bool:
-        return bool(self.bot and self.bot._select_extended_thinking_option())
+        return bool(self.bot and self._wait_for_control(
+            self.bot._select_thinking_mode, "High/Extended thinking"
+        ))
 
     def check_upload_control(self) -> bool:
-        return bool(self.bot and self.bot.health_check_upload_control())
+        return bool(self.bot and self._wait_for_control(
+            self.bot.health_check_upload_control, "upload control"
+        ))
 
     def upload_blank_image(self) -> bool:
         if not self.bot or not self.blank_image.is_file():
@@ -406,7 +439,9 @@ class PlaywrightGeminiHealthCheckHarness:
                 self.bot.cfg["upload_timeout"] = original_timeout
 
     def check_send_button(self) -> bool:
-        return bool(self.bot and self.bot.health_check_send_button())
+        return bool(self.bot and self._wait_for_control(
+            self.bot.health_check_send_button, "enabled send button"
+        ))
 
     def close(self) -> None:
         if self.context is not None:

@@ -1,9 +1,11 @@
 import json
+import time
 import unittest
 
 from playwright.sync_api import sync_playwright
 
 from gemini_bot import GeminiBot
+from gemini_health_check import CheckState, PlaywrightGeminiHealthCheckHarness, run_checks
 
 
 class QuietLogger:
@@ -33,6 +35,141 @@ class GeminiUiCompatibilityTests(unittest.TestCase):
 
     def tearDown(self):
         self.page.close()
+
+    def health_harness(self, timeout=2):
+        harness = PlaywrightGeminiHealthCheckHarness.from_test_bot(self.bot)
+        harness.config = {"browser": {"page_ready_timeout": timeout}}
+        self.addCleanup(harness.close)
+        return harness
+
+    def test_health_check_waits_for_delayed_editor(self):
+        self.page.set_content('''<script>
+            setTimeout(() => document.body.insertAdjacentHTML('beforeend',
+                '<div contenteditable="true" role="textbox">Ready</div>'), 600);
+        </script>''')
+        self.assertTrue(self.health_harness().check_editor())
+
+    def test_health_check_waits_for_upload_control_after_shell_loads(self):
+        self.page.set_content('''
+            <div contenteditable="true" role="textbox">Ready</div>
+            <button>New chat</button><button>Library</button><button>Settings</button>
+            <script>
+                window.uploadClicks = 0;
+                setTimeout(() => document.body.insertAdjacentHTML('beforeend',
+                    '<button aria-label="Upload" onclick="uploadClicks++">+</button>'), 600);
+            </script>
+        ''')
+        self.assertTrue(self.health_harness().check_upload_control())
+        self.assertEqual(self.page.evaluate('window.uploadClicks'), 0)
+
+    def test_health_check_waits_for_disabled_editor_and_upload_control(self):
+        for html, method in (
+            ('<textarea id="control" disabled></textarea>', 'check_editor'),
+            ('<button id="control" aria-label="Upload" disabled>+</button>', 'check_upload_control'),
+        ):
+            with self.subTest(method=method):
+                self.page.set_content(html + '''<script>
+                    setTimeout(() => document.querySelector('#control').disabled = false, 600);
+                </script>''')
+                self.assertTrue(getattr(self.health_harness(), method)())
+                self.assertFalse(self.page.locator('#control').is_disabled())
+
+    def test_editor_probe_rejects_readonly_editor(self):
+        self.page.set_content('<textarea readonly>Still loading</textarea>')
+        self.assertFalse(self.bot.health_check_editor())
+
+    def test_health_check_waits_for_send_button_to_become_enabled_without_sending(self):
+        self.page.set_content('''
+            <button id="send" aria-label="Send" disabled>Send</button>
+            <script>
+                window.sendClicks = 0;
+                document.querySelector('#send').onclick = () => sendClicks++;
+                setTimeout(() => document.querySelector('#send').disabled = false, 600);
+            </script>
+        ''')
+        self.assertTrue(self.health_harness().check_send_button())
+        self.assertEqual(self.page.evaluate('window.sendClicks'), 0)
+
+    def test_health_check_waits_for_mode_button_to_mount(self):
+        self.page.set_content('''<script>
+            window.modeClicks = 0;
+            setTimeout(() => document.body.insertAdjacentHTML('beforeend',
+                '<button aria-label="Open mode picker" onclick="modeClicks++">Pro</button>'), 600);
+        </script>''')
+        self.assertTrue(self.health_harness().open_mode_menu())
+        self.assertEqual(self.page.evaluate('window.modeClicks'), 1)
+
+    def test_health_check_waits_for_disabled_mode_button_without_reporting_a_noop_click(self):
+        self.page.set_content('''
+            <button id="control" aria-label="Open mode picker" disabled>Pro</button>
+            <script>
+                window.modeClicks = 0;
+                document.querySelector('#control').onclick = () => modeClicks++;
+                setTimeout(() => document.querySelector('#control').disabled = false, 600);
+            </script>
+        ''')
+        self.assertTrue(self.health_harness().open_mode_menu())
+        self.assertEqual(self.page.evaluate('window.modeClicks'), 1)
+
+    def test_health_check_rejects_permanently_disabled_mode_button_within_budget(self):
+        self.page.set_content('<button aria-label="Open mode picker" disabled>Pro</button>')
+        started = time.monotonic()
+        self.assertFalse(self.health_harness(timeout=1).open_mode_menu())
+        self.assertLess(time.monotonic() - started, 2.5)
+
+    def test_health_check_waits_for_temporary_chat_button_to_mount(self):
+        self.page.set_content('''<script>
+            window.temporaryClicks = 0;
+            setTimeout(() => document.body.insertAdjacentHTML('beforeend', `
+                <button aria-label="Temporary chat" onclick="
+                    temporaryClicks++;
+                    this.innerHTML = '&lt;mat-icon data-mat-icon-name=close&gt;x&lt;/mat-icon&gt;';
+                ">Temporary chat</button>`), 600);
+        </script>''')
+        self.assertTrue(self.health_harness().enter_temporary_chat())
+        self.assertEqual(self.page.evaluate('window.temporaryClicks'), 1)
+
+    def test_health_check_does_not_toggle_temporary_chat_twice_during_slow_activation(self):
+        self.page.set_content('''
+            <button id="temporary" aria-label="Temporary chat">Temporary chat</button>
+            <script>
+                window.temporaryClicks = 0;
+                let pending = null;
+                document.querySelector('#temporary').onclick = function () {
+                    temporaryClicks++;
+                    if (pending) { clearTimeout(pending); pending = null; return; }
+                    pending = setTimeout(() => {
+                        this.innerHTML = '<mat-icon data-mat-icon-name="close">x</mat-icon>';
+                        pending = null;
+                    }, 8200);
+                };
+            </script>
+        ''')
+        self.assertTrue(self.health_harness(timeout=12).enter_temporary_chat())
+        self.assertEqual(self.page.evaluate('window.temporaryClicks'), 1)
+
+    def test_default_temporary_chat_keeps_legacy_activation_grace_period(self):
+        self.page.set_content('''
+            <button aria-label="Temporary chat" onclick="setTimeout(() => {
+                this.innerHTML = '&lt;mat-icon data-mat-icon-name=close&gt;x&lt;/mat-icon&gt;';
+            }, 6500)">Temporary chat</button>
+        ''')
+        self.assertTrue(self.bot._start_temporary_chat())
+
+    def test_health_check_reports_missing_control_only_after_bounded_wait(self):
+        self.page.set_content('<div contenteditable="true">Ready</div>')
+        harness = self.health_harness(timeout=1)
+        started = time.monotonic()
+        self.assertFalse(harness.check_upload_control())
+        self.assertGreaterEqual(time.monotonic() - started, 0.9)
+        self.assertLess(time.monotonic() - started, 4)
+
+    def test_health_check_selects_nested_high_thinking_and_dismisses_menu(self):
+        self.load_menu()
+        self.assertTrue(self.health_harness().select_extended_thinking())
+        self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'high')
+        self.page.locator('#editor').click(timeout=1500)
+        self.assertEqual(self.page.locator(':focus').get_attribute('id'), 'editor')
 
     def load_menu(self, *, flash="3.8 Flash", language="en", current="Pro",
                   level="low", accept_level=True, accept_model=True,
@@ -130,6 +267,166 @@ class GeminiUiCompatibilityTests(unittest.TestCase):
               }});
             }})();</script>
         """)
+
+    def load_auto_menu(self, *, current="Gemini Auto", level="low", flash=False,
+                       accept_auto=True, accept_flash=True, plain_label=False):
+        self.load_menu(current=current, level=level, accept_model=accept_flash)
+        self.page.evaluate('''options => {
+            const mode = document.querySelector('#mode');
+            const models = document.querySelector('#models');
+            if (!options.flash) {
+                models.querySelectorAll('[data-mode-id]').forEach(item => item.remove());
+            }
+            const auto = document.createElement('gem-menu-item');
+            auto.setAttribute('role', 'menuitem');
+            auto.dataset.modeId = 'auto';
+            auto.innerHTML = options.plainLabel
+                ? 'Auto<br><span class="sublabel">Gemini 3 models</span>'
+                : '<span class="label">Auto</span><span class="sublabel">Gemini 3 models</span>';
+            auto.classList.toggle('selected', options.current === 'Gemini Auto');
+            auto.onclick = () => {
+                if (!options.acceptAuto) return;
+                document.body.dataset.model = 'auto';
+                mode.textContent = 'Gemini Auto';
+                if (mode.hasAttribute('aria-label')) {
+                    mode.setAttribute('aria-label', 'Open mode picker, current mode: Auto');
+                }
+                models.hidden = true;
+                mode.setAttribute('aria-expanded', 'false');
+            };
+            models.prepend(auto);
+        }''', {'current': current, 'flash': flash, 'acceptAuto': accept_auto,
+               'plainLabel': plain_label})
+
+    def test_auto_only_interface_selects_high_thinking_and_releases_editor(self):
+        self.load_auto_menu()
+        self.assertTrue(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'high')
+        self.page.locator('#editor').click(timeout=1500)
+        self.assertEqual(self.page.locator(':focus').get_attribute('id'), 'editor')
+
+    def test_auto_only_interface_accepts_already_selected_high_thinking(self):
+        self.load_auto_menu(level='high')
+        self.assertTrue(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'high')
+
+    def test_auto_only_toolbar_opens_without_aria_labels(self):
+        self.load_auto_menu()
+        self.page.locator('#mode').click()
+        self.page.locator('#mode').evaluate('''node => {
+            node.removeAttribute('aria-label');
+            node.removeAttribute('aria-haspopup');
+            node.insertAdjacentHTML('beforeend', '<mat-icon>keyboard_arrow_down</mat-icon>');
+        }''')
+        self.page.locator('main').evaluate('''node => node.insertAdjacentHTML('afterbegin',
+            '<button>Auto upload</button>')''')
+        self.assertTrue(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'high')
+
+    def test_auto_option_with_model_family_description_remains_selectable(self):
+        self.load_auto_menu(current='Pro', plain_label=True)
+        self.assertTrue(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.locator('body').get_attribute('data-model'), 'auto')
+
+    def test_auto_availability_keeps_non_lite_flash_preferred(self):
+        self.load_auto_menu(flash=True)
+        self.assertTrue(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.locator('body').get_attribute('data-model'), 'flash')
+
+    def test_auto_does_not_hide_failed_available_flash_selection(self):
+        self.load_auto_menu(flash=True, accept_flash=False)
+        self.assertFalse(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'low')
+
+    def test_auto_does_not_hide_flash_switch_failure_after_menu_rerenders(self):
+        for change in ('remove', 'disable'):
+            with self.subTest(change=change):
+                self.load_auto_menu(flash=True)
+                self.page.locator('[data-mode-id="flash"]').evaluate('''(node, change) => {
+                    node.onclick = () => change === 'remove' ? node.remove()
+                        : node.setAttribute('aria-disabled', 'true');
+                }''', change)
+                self.assertFalse(self.bot._select_thinking_mode())
+                self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'low')
+
+    def test_health_check_retry_does_not_downgrade_a_failed_flash_switch_to_auto(self):
+        self.load_auto_menu(flash=True)
+        self.page.locator('[data-mode-id="flash"]').evaluate('node => node.onclick = () => node.remove()')
+        harness = self.health_harness(timeout=3)
+        self.assertFalse(harness.select_model())
+        self.assertIsNone(harness.selected_model)
+
+    def test_repeated_thinking_selection_does_not_hide_a_failed_flash_switch(self):
+        self.load_auto_menu(flash=True)
+        self.page.locator('[data-mode-id="flash"]').evaluate('node => node.onclick = () => node.remove()')
+        self.assertFalse(self.bot._select_thinking_mode())
+        self.assertFalse(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'low')
+
+    def test_auto_fallback_never_selects_flash_lite(self):
+        self.load_auto_menu(current='Pro')
+        self.page.locator('#models').evaluate('''node => {
+            const lite = document.createElement('gem-menu-item');
+            lite.setAttribute('role', 'menuitem');
+            lite.innerHTML = '<span class="label">3.5 Flash-Lite</span>';
+            lite.onclick = () => document.body.dataset.model = 'lite';
+            node.prepend(lite);
+        }''')
+        self.assertTrue(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.locator('body').get_attribute('data-model'), 'auto')
+
+    def test_auto_click_without_model_switch_is_rejected(self):
+        self.load_auto_menu(current='Pro', accept_auto=False)
+        self.assertFalse(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.locator('body').get_attribute('data-model'), 'Pro')
+
+    def test_unrelated_auto_button_does_not_confirm_a_failed_model_switch(self):
+        self.load_auto_menu(current='Pro', accept_auto=False)
+        self.page.locator('main').evaluate('''node => node.insertAdjacentHTML('afterbegin',
+            '<button>Auto</button>')''')
+        self.assertFalse(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.locator('body').get_attribute('data-model'), 'Pro')
+
+    def test_unrelated_auto_button_does_not_override_unlabelled_pro_toolbar(self):
+        self.load_auto_menu(current='Pro', accept_auto=False)
+        self.page.locator('#mode').evaluate('''node => {
+            node.removeAttribute('aria-label'); node.removeAttribute('aria-haspopup');
+        }''')
+        self.page.locator('main').evaluate('''node => node.insertAdjacentHTML('afterbegin',
+            '<button>Auto</button>')''')
+        self.assertFalse(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.locator('body').get_attribute('data-model'), 'Pro')
+
+    def test_auto_requires_an_available_model_option_not_just_toolbar_text(self):
+        for disabled in (False, True):
+            with self.subTest(disabled=disabled):
+                self.load_auto_menu()
+                option = self.page.locator('[data-mode-id="auto"]')
+                option.evaluate("node => node.setAttribute('aria-disabled', 'true')"
+                                if disabled else "node => node.remove()")
+                self.assertFalse(self.bot._select_thinking_mode())
+                self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'low')
+
+    def test_auto_without_high_thinking_is_rejected(self):
+        self.load_auto_menu()
+        self.page.locator('[data-level="high"]').evaluate('node => node.remove()')
+        self.assertFalse(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'low')
+
+    def test_health_check_reports_selected_auto_model(self):
+        self.load_auto_menu()
+        self.page.locator('main').evaluate('''node => node.insertAdjacentHTML('afterbegin',
+            '<button aria-label="Temporary chat"><mat-icon data-mat-icon-name="close">x</mat-icon></button>')''')
+        harness = self.health_harness()
+        checks = run_checks(harness)
+        try:
+            results = [next(checks) for _ in range(9)]
+        finally:
+            checks.close()
+        self.assertTrue(all(result.state is CheckState.PASS for result in results))
+        model = next(result for result in results if result.name == '模型选择')
+        self.assertEqual(model.message, '已选择 Auto')
+        self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'high')
 
     def test_flash_selection_never_clicks_flash_lite_or_default_star(self):
         self.load_menu(flash="3.5 Flash")

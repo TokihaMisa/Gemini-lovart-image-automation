@@ -26,6 +26,9 @@ class ProbeLocator:
     def is_enabled(self):
         return self.enabled
 
+    def is_editable(self):
+        return self.enabled
+
     def click(self, **_kwargs):
         self.clicks += 1
 

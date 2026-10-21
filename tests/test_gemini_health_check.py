@@ -46,7 +46,7 @@ class FakeHealthCheckHarness:
     def open_mode_menu(self):
         return True
 
-    def select_flash(self):
+    def select_model(self):
         return True
 
     def select_extended_thinking(self):
@@ -129,7 +129,7 @@ class GeminiHealthCheckTests(unittest.TestCase):
                 "提示词编辑器",
                 "临时对话",
                 "模式菜单",
-                "Flash 模型",
+                "模型选择",
                 "扩展思考",
                 "上传控件",
                 "图片上传",
@@ -196,7 +196,7 @@ class GeminiHealthCheckTests(unittest.TestCase):
                 self.calls.append("editor")
                 return True
 
-            def _start_temporary_chat(self):
+            def _start_temporary_chat(self, *, wait_for_active=True):
                 self.calls.append("temporary_chat")
                 return True
 
@@ -207,11 +207,11 @@ class GeminiHealthCheckTests(unittest.TestCase):
                 self.calls.append("open_mode")
                 return True
 
-            def _click_flash_model(self):
+            def _select_prompt_model(self):
                 self.calls.append("flash")
-                return True
+                return "Flash"
 
-            def _select_extended_thinking_option(self):
+            def _select_thinking_mode(self):
                 self.calls.append("extended")
                 return True
 
