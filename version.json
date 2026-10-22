@@ -1,7 +1,7 @@
 {
-  "version": "1.3.30",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.30/update.zip",
-  "changelog": "兼容 Gemini 仅 Auto 模型界面与 High 思考，保留非 Lite Flash 优先；修复体检过早失败、禁用按钮误判与临时对话重复切换。",
-  "sha256": "bd8a88bb57e546044a0407095f85a43ca12e40c4eb7753bc88ca6c93602970a7",
-  "size": 133888636
+  "version": "1.3.31",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.31/update.zip",
+  "changelog": "修复原生 Gemini Auto 菜单模型选择失败，兼容字体勾选图标与副标题并确认 High；源码与 EXE 同步更新。",
+  "sha256": "0a541c154fda5986d80f7c20038c0e27ea0a18b2b2acdcf577ea6ca7b7eec926",
+  "size": 133889022
 }

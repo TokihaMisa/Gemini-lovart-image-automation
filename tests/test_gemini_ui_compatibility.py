@@ -298,6 +298,131 @@ class GeminiUiCompatibilityTests(unittest.TestCase):
         }''', {'current': current, 'flash': flash, 'acceptAuto': accept_auto,
                'plainLabel': plain_label})
 
+    def load_native_auto_menu(self, *, level='low'):
+        self.page.set_content('''
+            <style>
+                [hidden] { display: none !important; }
+                .mat-mdc-menu-item-text > span { display: block; }
+                .google-symbols { display: block; }
+            </style>
+            <div id="editor" contenteditable="true" role="textbox"></div>
+            <button id="mode" aria-label="Open mode picker" aria-expanded="true">
+                <span>Gemini</span><span>Auto</span><span class="google-symbols">keyboard_arrow_up</span>
+            </button>
+            <div id="models" role="menu">
+                <button id="auto" role="menuitemradio" aria-checked="true"
+                        aria-label="Auto Gemini 3 models" class="mat-mdc-menu-item">
+                    <span class="google-symbols">check</span>
+                    <span class="mat-mdc-menu-item-text"><span>Auto</span><span>Gemini 3 models</span></span>
+                </button>
+                <button id="thinking" role="menuitem" aria-haspopup="menu">
+                    Thinking level<span class="google-symbols">chevron_right</span>
+                </button>
+                <div id="levels" role="menu" hidden>
+                    <button role="menuitemradio" id="low" aria-checked="true">Low</button>
+                    <button role="menuitemradio" id="high" aria-label="High Extra thorough"
+                            aria-checked="false" class="mat-mdc-menu-item">
+                        <span class="mat-mdc-menu-item-text"><span>High</span><span>Extra thorough</span></span>
+                    </button>
+                </div>
+            </div>
+            <script>
+                window.autoClicks = 0;
+                document.querySelector('#auto').onclick = () => autoClicks++;
+                const mode = document.querySelector('#mode');
+                const models = document.querySelector('#models');
+                const levels = document.querySelector('#levels');
+                mode.onclick = () => {
+                    models.hidden = !models.hidden;
+                    mode.setAttribute('aria-expanded', String(!models.hidden));
+                };
+                document.querySelector('#thinking').onclick = () => levels.hidden = false;
+                document.querySelector('#high').onclick = () => {
+                    document.body.dataset.level = 'high';
+                    document.querySelector('#high').setAttribute('aria-checked', 'true');
+                    document.querySelector('#low').setAttribute('aria-checked', 'false');
+                    levels.hidden = true;
+                    models.hidden = true;
+                    mode.setAttribute('aria-expanded', 'false');
+                };
+                document.addEventListener('keydown', event => {
+                    if (event.key !== 'Escape') return;
+                    if (!levels.hidden) levels.hidden = true;
+                    else { models.hidden = true; mode.setAttribute('aria-expanded', 'false'); }
+                });
+            </script>
+        ''')
+        self.page.evaluate('''level => {
+            document.body.dataset.level = level;
+            if (level === 'high') {
+                document.querySelector('#high').setAttribute('aria-checked', 'true');
+                document.querySelector('#low').setAttribute('aria-checked', 'false');
+                document.querySelector('#high').insertAdjacentHTML('afterbegin',
+                    '<span class="google-symbols">check</span>');
+            }
+        }''', level)
+
+    def test_native_auto_model_with_check_icon_and_subtitle_passes_health_check(self):
+        self.load_native_auto_menu()
+        harness = self.health_harness()
+        self.assertTrue(harness.select_model())
+        self.assertEqual(harness.selected_model, 'Auto')
+        self.assertEqual(self.page.evaluate('autoClicks'), 0)
+
+    def test_native_auto_menu_reaches_high_thinking(self):
+        self.load_native_auto_menu()
+        self.assertTrue(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'high')
+        self.assertEqual(self.page.evaluate('autoClicks'), 0)
+
+    def test_native_auto_option_with_description_can_switch_from_pro(self):
+        self.load_native_auto_menu()
+        self.page.locator('#mode').evaluate('''node => {
+            node.textContent = 'Pro';
+            document.querySelector('#auto').setAttribute('aria-checked', 'false');
+            document.querySelector('#auto .google-symbols').remove();
+            document.querySelector('#auto').onclick = () => {
+                autoClicks++;
+                node.innerHTML = '<span>Gemini</span><span>Auto</span>'
+                    + '<span class="google-symbols">keyboard_arrow_down</span>';
+            };
+        }''')
+        self.assertTrue(self.health_harness().select_model())
+        self.assertEqual(self.page.evaluate('autoClicks'), 1)
+
+    def test_native_checked_high_label_ignores_check_icon_and_accessible_description(self):
+        self.load_native_auto_menu(level='high')
+        self.page.locator('#thinking').click()
+        self.assertTrue(self.bot._current_thinking_level_is_extended())
+
+    def test_native_high_selection_accepts_font_check_but_not_other_icons(self):
+        self.load_native_auto_menu(level='high')
+        self.page.locator('#thinking').click()
+        self.page.locator('#high').evaluate("node => node.removeAttribute('aria-checked')")
+        self.assertTrue(self.bot._current_thinking_level_is_extended())
+        self.page.locator('#high .google-symbols').evaluate("node => node.textContent = 'star'")
+        self.assertFalse(self.bot._current_thinking_level_is_extended())
+
+    def test_hidden_or_nested_default_check_does_not_confirm_high(self):
+        for icon in (
+            '<mat-icon data-mat-icon-name="check" style="display:none">check</mat-icon>',
+            '<span class="google-symbols" style="display:none">check</span>',
+            '<button title="Set default"><mat-icon data-mat-icon-name="check">check</mat-icon></button>',
+        ):
+            with self.subTest(icon=icon):
+                self.load_native_auto_menu()
+                self.page.locator('#thinking').click()
+                self.page.locator('#high').evaluate(
+                    '''(node, icon) => {
+                        const option = document.createElement('div');
+                        for (const attribute of node.attributes) {
+                            option.setAttribute(attribute.name, attribute.value);
+                        }
+                        option.innerHTML = icon + node.innerHTML;
+                        node.replaceWith(option);
+                    }''', icon)
+                self.assertFalse(self.bot._current_thinking_level_is_extended())
+
     def test_auto_only_interface_selects_high_thinking_and_releases_editor(self):
         self.load_auto_menu()
         self.assertTrue(self.bot._select_thinking_mode())
@@ -397,15 +522,21 @@ class GeminiUiCompatibilityTests(unittest.TestCase):
         self.assertFalse(self.bot._select_thinking_mode())
         self.assertEqual(self.page.locator('body').get_attribute('data-model'), 'Pro')
 
-    def test_auto_requires_an_available_model_option_not_just_toolbar_text(self):
+    def test_auto_switch_from_pro_requires_an_available_model_option(self):
         for disabled in (False, True):
             with self.subTest(disabled=disabled):
-                self.load_auto_menu()
+                self.load_auto_menu(current='Pro')
                 option = self.page.locator('[data-mode-id="auto"]')
                 option.evaluate("node => node.setAttribute('aria-disabled', 'true')"
                                 if disabled else "node => node.remove()")
                 self.assertFalse(self.bot._select_thinking_mode())
                 self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'low')
+
+    def test_current_auto_does_not_require_reselecting_a_model_menu_item(self):
+        self.load_auto_menu()
+        self.page.locator('[data-mode-id="auto"]').evaluate('node => node.remove()')
+        self.assertTrue(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'high')
 
     def test_auto_without_high_thinking_is_rejected(self):
         self.load_auto_menu()

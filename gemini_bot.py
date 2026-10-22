@@ -869,12 +869,41 @@ class GeminiBot:
                 return rect.width > 0 && rect.height > 0
                     && style.visibility !== 'hidden' && style.display !== 'none';
             }};
+            const iconSelector = 'mat-icon, svg, .google-symbols, .material-icons, '
+                + '.material-symbols-outlined, .material-symbols-rounded, .material-symbols-sharp';
             const selected = (node) =>
                 ['aria-checked', 'aria-selected', 'data-selected'].some(
                     name => node.getAttribute(name) === 'true')
                 || node.hasAttribute('selected')
                 || node.classList.contains('selected') || node.classList.contains('checked')
-                || !!node.querySelector('mat-icon[data-mat-icon-name="check"], mat-icon[fonticon="check"]');
+                || [...node.querySelectorAll(iconSelector)].some(icon => visible(icon)
+                    && (icon.matches('mat-icon[data-mat-icon-name="check"], mat-icon[fonticon="check"]')
+                        || /^(?:check|done|✓|✔)$/.test(normalize(icon.textContent)))
+                    && icon.closest('button, [role="button"], [role^="menuitem"], gem-menu-item, mat-option') === node);
+            const primaryLabel = (node) => {{
+                const label = node.querySelector('.label');
+                if (label) {{
+                    const copy = label.cloneNode(true);
+                    copy.querySelectorAll(iconSelector).forEach(icon => icon.remove());
+                    return normalize(copy.textContent);
+                }}
+                // Exact accessible labels remain useful on older icon/action controls.
+                const namedLabel = normalize(node.getAttribute('aria-label') || node.getAttribute('title')
+                    || node.getAttribute('data-tooltip'));
+                if (pattern.test(namedLabel)) return namedLabel;
+                const icons = [...node.querySelectorAll(iconSelector)]
+                    .map(icon => normalize(icon.textContent)).filter(Boolean)
+                    .sort((a, b) => b.length - a.length);
+                for (const raw of (node.innerText || '').split(/\r?\n/)) {{
+                    let line = normalize(raw);
+                    for (const icon of icons) {{
+                        if (line.startsWith(icon)) line = line.slice(icon.length).trim();
+                        if (line.endsWith(icon)) line = line.slice(0, -icon.length).trim();
+                    }}
+                    if (line) return line;
+                }}
+                return namedLabel;
+            }};
             const nodes = [...document.querySelectorAll(
                 'gem-menu-item, [role="menuitem"], [role="menuitemradio"], '
                 + '[role="menuitemcheckbox"], mat-option, [role="menu"] button'
@@ -883,11 +912,7 @@ class GeminiBot:
             const option = nodes.filter(visible).find(node => {{
                 if (node.matches('button') && node.parentElement?.closest('gem-menu-item, [role^="menuitem"]')) return false;
                 if (node.getAttribute('aria-disabled') === 'true' || node.hasAttribute('disabled')) return false;
-                const label = node.querySelector('.label');
-                const text = normalize(label ? label.textContent : (
-                    node.getAttribute('aria-label') || node.getAttribute('title')
-                    || node.getAttribute('data-tooltip')
-                    || (node.innerText || '').split('\n').find(line => line.trim())));
+                const text = primaryLabel(node);
                 return pattern.test(text) && !/flash[\s-]*lite/i.test(text)
                     && (!{str(selected_only).lower()} || selected(node));
             }});
@@ -924,6 +949,9 @@ class GeminiBot:
         # A rerender must not turn a failed Flash switch into an Auto-only session.
         if self._flash_selection_failed:
             return None
+        if self._current_model_is_auto():
+            self.logger.info("Gemini: Auto model is already selected")
+            return "Auto"
         if self._mode_menu_option(AUTO_MODEL_PATTERN, click=True):
             for _ in range(15):
                 if self._current_model_is_auto():
@@ -1105,17 +1133,19 @@ class GeminiBot:
                         && style.visibility !== 'hidden' && style.display !== 'none';
                 }).map(node => {
                     const label = node.cloneNode(true);
-                    label.querySelectorAll('mat-icon, svg, [aria-hidden="true"]').forEach(icon => icon.remove());
+                    label.querySelectorAll('mat-icon, svg, [aria-hidden="true"], .google-symbols, '
+                        + '.material-icons, .material-symbols-outlined, .material-symbols-rounded, '
+                        + '.material-symbols-sharp').forEach(icon => icon.remove());
                     return {node, text: (label.textContent || '').replace(/\s+/g, ' ').trim()};
                 });
             const modeControls = toolbar.filter(({node, text}) =>
                 /mode|模式|modo|模型/i.test(node.getAttribute('aria-label') || '')
                 || ((node.getAttribute('aria-haspopup') === 'menu' || node.hasAttribute('aria-expanded'))
-                    && /^(?:Gemini\s+)?(?:Auto|Flash|Pro|Argon|Fast)\b/i.test(text)));
+                    && /^(?:Gemini\s*)?(?:Auto|Flash|Pro|Argon|Fast)\b/i.test(text)));
             const candidates = modeControls.length ? modeControls
-                : toolbar.filter(({text}) => /^Gemini\s+Auto$/i.test(text));
+                : toolbar.filter(({text}) => /^Gemini\s*Auto$/i.test(text));
             return candidates.some(({node, text}) =>
-                /^(?:Gemini\s+)?Auto$/i.test(text)
+                /^(?:Gemini\s*)?Auto$/i.test(text)
                 || /(?:current\s+(?:mode|model)|当前(?:模式|模型))\s*[:：]\s*(?:Gemini\s+)?Auto\b/i
                     .test(node.getAttribute('aria-label') || ''));
         }
