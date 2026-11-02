@@ -52,7 +52,7 @@ EXTENDED_THINKING_TERMS = frozenset((
 UPLOAD_TERMS = frozenset(("上传", "attach", "upload", "adjuntar archivos", "adjuntar", "subir"))
 TEMPORARY_CHAT_TERMS = frozenset(("临时", "temporary", "chat temporal"))
 FLASH_MODEL_PATTERN = r"^(?:gemini\s+)?(?:\d+(?:\.\d+)*\s+)?flash(?:\s|$)"
-AUTO_MODEL_PATTERN = r"^(?:Gemini\s+)?Auto$"
+AUTO_MODEL_PATTERN = r"^(?:Gemini\s*)?(?:Auto|自动|自動)$"
 HIGH_THINKING_PATTERN = (
     r"^(?:high|高|alto|alta|extended|扩展|擴展|ampliado|extendido)$"
 )
@@ -974,7 +974,7 @@ class GeminiBot:
             '[role="menuitem"]:has-text("Nivel de pensamiento")',
             'button:has-text("Nivel de pensamiento")',
         ]
-        if self._click_normalized_dom_term(("思考等级", "thinking level", "nivel de pensamiento"), "thinking level menu"):
+        if self._click_normalized_dom_term(("思考等级", "思考等級", "thinking level", "nivel de pensamiento"), "thinking level menu"):
             return True
         return self._click_gemini_control(selectors, r'[/思考等级/, /thinking level/i, /nivel de pensamiento/i]', "thinking level menu")
 
@@ -1122,8 +1122,13 @@ class GeminiBot:
         return False
 
     def _current_model_is_auto(self) -> bool:
+        return self._auto_mode_control()
+
+    def _auto_mode_control(self, *, open_menu: bool = False) -> bool:
+        """Confirm or open the model control using the same localized Auto labels."""
         script = r"""
         () => {
+            const autoPattern = new RegExp(__AUTO_MODEL_PATTERN__, 'i');
             const toolbar = [...document.querySelectorAll('button, [role="button"]')]
                 .filter(node => {
                     if (node.closest('[role="menu"], [role^="menuitem"], gem-menu-item')) return false;
@@ -1141,16 +1146,26 @@ class GeminiBot:
             const modeControls = toolbar.filter(({node, text}) =>
                 /mode|模式|modo|模型/i.test(node.getAttribute('aria-label') || '')
                 || ((node.getAttribute('aria-haspopup') === 'menu' || node.hasAttribute('aria-expanded'))
-                    && /^(?:Gemini\s*)?(?:Auto|Flash|Pro|Argon|Fast)\b/i.test(text)));
+                    && (autoPattern.test(text) || /^(?:Gemini\s*)?(?:Flash|Pro|Argon|Fast)\b/i.test(text))));
             const candidates = modeControls.length ? modeControls
-                : toolbar.filter(({text}) => /^Gemini\s*Auto$/i.test(text));
-            return candidates.some(({node, text}) =>
-                /^(?:Gemini\s*)?Auto$/i.test(text)
-                || /(?:current\s+(?:mode|model)|当前(?:模式|模型))\s*[:：]\s*(?:Gemini\s+)?Auto\b/i
-                    .test(node.getAttribute('aria-label') || ''));
+                : toolbar.filter(({text}) => /^Gemini/i.test(text) && autoPattern.test(text));
+            const control = candidates.find(({node, text}) => {
+                const namedModel = (node.getAttribute('aria-label') || '').match(
+                    /(?:current\s+(?:mode|model)|当前(?:模式|模型))\s*[:：]\s*(.+)$/i);
+                return autoPattern.test(text) || (namedModel && autoPattern.test(namedModel[1]));
+            });
+            if (!control) return false;
+            if (__OPEN_AUTO_MENU__) {
+                const node = control.node;
+                if (node.matches(':disabled') || node.closest('[aria-disabled="true"]')) return false;
+                if (node.getAttribute('aria-expanded') !== 'true') node.click();
+            }
+            return true;
         }
         """
         try:
+            script = script.replace('__AUTO_MODEL_PATTERN__', json.dumps(AUTO_MODEL_PATTERN))
+            script = script.replace('__OPEN_AUTO_MENU__', str(open_menu).lower())
             return bool(self.page.evaluate(script))
         except Exception:
             return False
@@ -1267,6 +1282,10 @@ class GeminiBot:
                     return True
             except Exception:
                 continue
+
+        if self._auto_mode_control(open_menu=True):
+            self.logger.info("Gemini: opened localized Auto mode menu")
+            return True
 
         if self._click_normalized_dom_term(MODE_TERMS, "mode menu"):
             return True

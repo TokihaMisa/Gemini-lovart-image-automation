@@ -326,7 +326,7 @@ class GeminiUiCompatibilityTests(unittest.TestCase):
                     </button>
                 </div>
             </div>
-            <script>
+            <script>(() => {
                 window.autoClicks = 0;
                 document.querySelector('#auto').onclick = () => autoClicks++;
                 const mode = document.querySelector('#mode');
@@ -350,7 +350,7 @@ class GeminiUiCompatibilityTests(unittest.TestCase):
                     if (!levels.hidden) levels.hidden = true;
                     else { models.hidden = true; mode.setAttribute('aria-expanded', 'false'); }
                 });
-            </script>
+            })();</script>
         ''')
         self.page.evaluate('''level => {
             document.body.dataset.level = level;
@@ -361,6 +361,92 @@ class GeminiUiCompatibilityTests(unittest.TestCase):
                     '<span class="google-symbols">check</span>');
             }
         }''', level)
+
+    def load_chinese_auto_menu(self, *, traditional=False, level='low', opened=True,
+                               current_auto=True, accept_high=True):
+        self.load_native_auto_menu(level=level)
+        auto, thinking = ('自動', '思考等級') if traditional else ('自动', '思考等级')
+        self.page.evaluate('''options => {
+            const mode = document.querySelector('#mode');
+            const models = document.querySelector('#models');
+            const auto = document.querySelector('#auto');
+            const high = document.querySelector('#high');
+            const toolbar = () => '<span>Gemini</span><span>' + options.auto
+                + '</span><span class="google-symbols">keyboard_arrow_down</span>';
+            mode.innerHTML = options.currentAuto ? toolbar() : 'Pro';
+            mode.removeAttribute('aria-label');
+            mode.setAttribute('aria-expanded', String(options.opened));
+            models.hidden = !options.opened;
+            auto.setAttribute('aria-label', options.auto + ' Gemini 3 模型');
+            auto.setAttribute('aria-checked', String(options.currentAuto));
+            auto.innerHTML = (options.currentAuto ? '<span class="google-symbols">check</span>' : '')
+                + '<span class="mat-mdc-menu-item-text"><span>' + options.auto
+                + '</span><span>Gemini 3 模型</span></span>';
+            auto.onclick = () => {
+                autoClicks++;
+                mode.innerHTML = toolbar();
+                auto.setAttribute('aria-checked', 'true');
+                models.hidden = true;
+                mode.setAttribute('aria-expanded', 'false');
+            };
+            document.querySelector('#thinking').innerHTML = options.thinking
+                + '<span class="google-symbols">chevron_right</span>';
+            document.querySelector('#low').innerHTML = '<span>低</span><span>快速高效</span>';
+            high.setAttribute('aria-label', '高 超级详尽');
+            high.innerHTML = (options.level === 'high' ? '<span class="google-symbols">check</span>' : '')
+                + '<span class="mat-mdc-menu-item-text"><span>高</span><span>超级详尽</span></span>';
+            window.highClicks = 0;
+            const selectHigh = high.onclick;
+            high.onclick = () => { highClicks++; if (options.acceptHigh) selectHigh(); };
+        }''', {'auto': auto, 'thinking': thinking, 'level': level, 'opened': opened,
+               'currentAuto': current_auto, 'acceptHigh': accept_high})
+
+    def test_chinese_auto_toolbar_is_confirmed(self):
+        for traditional in (False, True):
+            with self.subTest(traditional=traditional):
+                self.load_chinese_auto_menu(traditional=traditional)
+                self.assertTrue(self.bot._current_model_is_auto())
+
+    def test_chinese_auto_health_check_opens_unlabelled_closed_mode_menu(self):
+        self.load_chinese_auto_menu(opened=False)
+        harness = self.health_harness(timeout=1)
+        self.assertTrue(harness.open_mode_menu())
+        self.assertTrue(self.page.locator('#models').is_visible())
+        self.assertTrue(harness.select_model())
+        self.assertEqual(harness.selected_model, 'Auto')
+
+    def test_chinese_auto_selects_high_and_releases_editor(self):
+        for traditional in (False, True):
+            with self.subTest(traditional=traditional):
+                self.load_chinese_auto_menu(traditional=traditional, opened=False)
+                self.assertTrue(self.bot._select_thinking_mode())
+                self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'high')
+                self.assertEqual(self.page.evaluate('highClicks'), 1)
+                self.assertEqual(self.page.evaluate('autoClicks'), 0)
+                self.page.locator('#editor').click(timeout=1500)
+
+    def test_chinese_auto_can_switch_from_pro(self):
+        self.load_chinese_auto_menu(current_auto=False)
+        self.assertEqual(self.bot._select_prompt_model(), 'Auto')
+        self.assertEqual(self.page.evaluate('autoClicks'), 1)
+
+    def test_chinese_auto_preserves_selected_high_without_reclicking(self):
+        self.load_chinese_auto_menu(level='high')
+        self.assertTrue(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.evaluate('highClicks'), 0)
+
+    def test_chinese_high_noop_does_not_report_success(self):
+        self.load_chinese_auto_menu(accept_high=False)
+        self.assertFalse(self.bot._select_thinking_mode())
+        self.assertEqual(self.page.evaluate('highClicks'), 1)
+        self.assertEqual(self.page.locator('body').get_attribute('data-level'), 'low')
+
+    def test_unrelated_chinese_auto_action_does_not_confirm_model(self):
+        self.page.set_content('''
+            <button aria-haspopup="menu" aria-label="当前模型：自动上传">Gemini 自动上传</button>
+            <button>自动</button>
+        ''')
+        self.assertFalse(self.bot._current_model_is_auto())
 
     def test_native_auto_model_with_check_icon_and_subtitle_passes_health_check(self):
         self.load_native_auto_menu()
