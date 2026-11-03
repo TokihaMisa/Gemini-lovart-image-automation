@@ -1,6 +1,7 @@
 import base64
 import json
 import mimetypes
+import os
 import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -1668,6 +1669,9 @@ class GeminiBot:
         seen_new_response = previous_response_count is None
         stable_done = 0
         progress_printed = False
+        # The WebUI reads stdout line by line, so "\r" animation frames would each become a log line.
+        ui_mode = os.environ.get("UI_MODE") == "1"
+        last_ui_report = 0
 
         while time.time() < deadline:
             self.page.wait_for_timeout(1000)
@@ -1684,8 +1688,13 @@ class GeminiBot:
                 if generating:
                     seen_generation = True
                     stable_done = 0
-                    print(f"\r  Gemini: reply generation still running{dots}   ", end="", flush=True)
-                    progress_printed = True
+                    if ui_mode:
+                        if elapsed // 15 > last_ui_report:
+                            last_ui_report = elapsed // 15
+                            print(f"  Gemini: 正在生成回复（已 {last_ui_report * 15} 秒）", flush=True)
+                    else:
+                        print(f"\r  Gemini: reply generation still running{dots}   ", end="", flush=True)
+                        progress_printed = True
                     continue
 
                 can_finish = seen_generation or seen_new_response
@@ -1699,8 +1708,9 @@ class GeminiBot:
                         print("\r  Gemini: reply complete.                 ")
                     self.logger.info("Gemini: reply complete")
                     return
-                print(f"\r  Gemini: waiting for reply{dots}   ", end="", flush=True)
-                progress_printed = True
+                if not ui_mode:
+                    print(f"\r  Gemini: waiting for reply{dots}   ", end="", flush=True)
+                    progress_printed = True
                 self.logger.debug(
                     f"Gemini: waiting reply state generating={generating}, "
                     f"seen_generation={seen_generation}, seen_new_response={seen_new_response}, "

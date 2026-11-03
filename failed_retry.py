@@ -131,6 +131,13 @@ _OVERLOADED_TASK_MARKERS = (
     "服务器过载",
 )
 
+# The provider gave up on its own side (e.g. "Request body read timed out"); no image was produced.
+_TIMED_OUT_TASK_MARKERS = (
+    "timed out",
+    "timeout",
+    "超时",
+)
+
 
 def normalize_retry_mode(value) -> str:
     mode = str(value or RETRY_MODE_FINITE).strip().lower()
@@ -207,6 +214,8 @@ def classify_retry_failure(row: dict) -> str | None:
             error = str(row.get("error") or "").casefold()
             if any(marker in error for marker in _OVERLOADED_TASK_MARKERS):
                 return "network"
+            if any(marker in error for marker in _TIMED_OUT_TASK_MARKERS):
+                return "timeout"
         return _FAILURE_CODE_CATEGORIES.get(failure_code, "other")
     error = str(row.get("error") or "").casefold()
     if any(marker in error for marker in _PERMANENT_ERROR_MARKERS):

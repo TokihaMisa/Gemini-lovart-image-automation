@@ -509,7 +509,7 @@ class OpenAIImageProvider:
                 "authentication",
                 "invalid_request",
                 "task_not_found",
-            }
+            } or _provably_not_submitted(failure)
             if (
                 _is_submission_unknown_checkpoint(current_checkpoint)
                 and not conclusive_rejection
@@ -809,7 +809,7 @@ class OpenAIImageProvider:
                         "authentication",
                         "invalid_request",
                         "task_not_found",
-                    }
+                    } or _provably_not_submitted(exc)
                     if (
                         _is_submission_unknown_checkpoint(current_checkpoint)
                         and not conclusive_rejection
@@ -1292,6 +1292,11 @@ def _sanitized_provider_error(api: object, exc: BaseException) -> str:
     message = str(exc)
     api_key = _resolved_api_key(api)
     return str(sanitize_external_value(message, api_key))
+
+
+def _provably_not_submitted(exc: BaseException) -> bool:
+    """The provider refused or never received the request, so no paid task exists."""
+    return isinstance(exc, OpenAIImageAPIError) and exc.not_submitted is True
 
 
 def _stable_provider_error_code(exc: BaseException) -> str:

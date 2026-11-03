@@ -49,6 +49,7 @@ from image_providers import (
     read_completed_detail_indexes,
 )
 from gemini_browser_session import (
+    BrowserSelectionError,
     GeminiAuthenticationError,
     GeminiLoginRequiredError,
     GeminiPageNotReadyError,
@@ -2442,9 +2443,13 @@ def _run_owned_browser_flow(
 ):
     browser_cfg = config["browser"]
     interactive_console = wait_for_ready and not _is_ui_mode()
-    chrome_exe = _resolve_browser_executable_for_run(
-        browser_cfg, interactive=interactive_console
-    )
+    try:
+        chrome_exe = _resolve_browser_executable_for_run(
+            browser_cfg, interactive=interactive_console
+        )
+    except BrowserSelectionError as exc:
+        logger.warning(f"{exc} 未开始处理商品。")
+        raise
     if chrome_exe:
         logger.info(f"Using browser executable: {chrome_exe}")
     else:

@@ -651,6 +651,44 @@ def test_sub2api_conclusive_auth_failure_can_retry_after_key_correction(tmp_path
     assert corrected.create_posts == 1
 
 
+class RefusedSubmissionAPI(CrashAfterSavedSyncAPI):
+    def generate_edit(self, **kwargs):
+        from openai_image_api import OpenAIImageAPIError
+
+        kwargs["submission_callback"]()
+        raise OpenAIImageAPIError(
+            "rate_limit",
+            "GPT Image API is rate limiting requests (HTTP 429).",
+            429,
+            True,
+            not_submitted=True,
+        )
+
+
+@pytest.mark.parametrize("kind", ["support", "detail"])
+def test_refused_submission_is_retryable_instead_of_submission_unknown(tmp_path, kind):
+    from image_providers import OpenAIImageProvider
+
+    refused_provider = OpenAIImageProvider(RefusedSubmissionAPI())
+    refused = (
+        refused_provider.generate_support_image(support_request(tmp_path))
+        if kind == "support"
+        else refused_provider.generate_detail_set(single_detail_request(tmp_path))
+    )
+    assert refused.succeeded is False
+    assert refused.raw_result == {"error_code": "rate_limit"}
+
+    later = CheckpointingOpenAIAPI((completed_image_task(),))
+    retried = OpenAIImageProvider(later)
+    result = (
+        retried.generate_support_image(support_request(tmp_path))
+        if kind == "support"
+        else retried.generate_detail_set(single_detail_request(tmp_path))
+    )
+    assert result.succeeded is True
+    assert later.create_posts == 1
+
+
 def single_detail_request(tmp_path: Path, **overrides):
     from image_providers import DetailSetRequest
 

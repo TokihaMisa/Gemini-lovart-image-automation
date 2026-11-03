@@ -744,3 +744,146 @@ def test_paid_test_explicit_clear_does_not_reuse_saved_env_key(api_cls, tmp_path
     assert "密钥" in updates[-1]
     assert saved_key not in "\n".join(updates)
     api_cls.assert_not_called()
+
+
+def _product_line(product_id, name="测试商品"):
+    return "[UI_PRODUCT] " + json.dumps({"id": product_id, "name": name, "image": ""}, ensure_ascii=False) + "\n"
+
+
+def _status_line(product_id, stage, message):
+    return "[UI_STATUS] " + json.dumps(
+        {"id": product_id, "stage": stage, "message": message}, ensure_ascii=False
+    ) + "\n"
+
+
+def test_detail_completed_status_does_not_mark_product_successful(tmp_path):
+    frames = _run_dashboard_frames(
+        [
+            _product_line("SKU-1"),
+            _status_line("SKU-1", "detail", "详情图 1 · completed · 已等待 132 秒 · 任务 …341e4e7d"),
+            "[INFO] OK-looking SKU-1 detail completed\n",
+        ],
+        tmp_path,
+    )
+
+    assert "任务执行成功" not in frames[-1]
+    assert "成功 0" in frames[-1]
+
+
+def test_skip_log_line_marks_product_skipped_not_successful(tmp_path):
+    frames = _run_dashboard_frames(
+        [
+            _product_line("SKU-1"),
+            "[INFO] SKIP [1/1] SKU-1 already completed\n",
+        ],
+        tmp_path,
+    )
+
+    assert "已跳过" in frames[-1]
+    assert "成功 0" in frames[-1]
+    assert "跳过 1" in frames[-1]
+
+
+def test_structured_success_still_marks_product_successful(tmp_path):
+    frames = _run_dashboard_frames(
+        [
+            _product_line("SKU-1"),
+            '[UI_SUCCESS] {"id": "SKU-1", "url": "", "used_model": "unknown"}\n',
+        ],
+        tmp_path,
+    )
+
+    assert "成功 1" in frames[-1]
+    assert "全部完成" in frames[-1]
+
+
+def test_in_progress_products_are_running_even_when_not_current():
+    counts = webui._dashboard_status_counts(
+        {
+            "DETAIL": {"stage": "detail", "status": "详情图 2/13，已完成 2"},
+            "SCENE": {"stage": "support_scene", "status": "场景图处理中"},
+            "WAITING": {"status": "⏳ 等待处理"},
+        },
+        current_pid=None,
+    )
+
+    assert counts["running"] == 2
+    assert counts["waiting"] == 1
+
+
+def test_finished_run_with_unfinished_products_does_not_claim_all_done(tmp_path):
+    frames = _run_dashboard_frames(
+        [
+            _product_line("SKU-1"),
+            _product_line("SKU-2"),
+            _product_line("SKU-3"),
+            '[UI_SUCCESS] {"id": "SKU-1", "url": "", "used_model": "unknown"}\n',
+            _status_line("SKU-2", "detail", "详情图 5 · processing"),
+            '[UI_FAIL] {"id": "SKU-3", "reason": "boom", "is_manual": false}\n',
+        ],
+        tmp_path,
+    )
+
+    assert "已全部结束" not in frames[-1]
+    assert "本轮已结束" in frames[-1]
+    assert "成功 1" in frames[-1] and "失败 1" in frames[-1] and "未完成 1" in frames[-1]
+
+
+def test_failed_products_are_listed_right_after_the_current_product():
+    products = {
+        "OLD-OK": {"stage": "complete"},
+        "WAITING": {"status": "⏳ 等待处理"},
+        "FAILED": {"stage": "failed"},
+        "CURRENT": {"stage": "detail"},
+    }
+
+    visible = webui._dashboard_visible_product_ids(
+        products, current_pid="CURRENT", recent_product_ids=["OLD-OK"]
+    )
+
+    assert visible[:2] == ["CURRENT", "FAILED"]
+
+
+def test_url_in_name_column_shows_link_instead_of_raw_url_title(tmp_path):
+    url = "https://detail.1688.com/offer/829489412345.html"
+    frames = _run_dashboard_frames([_product_line("SKU-1", url)], tmp_path)
+
+    assert f'title="{url}">{url}</div>' not in frames[-1]
+    assert f"href='{url}'" in frames[-1]
+    assert "名称列是链接" in frames[-1]
+
+
+def test_product_name_is_html_escaped(tmp_path):
+    frames = _run_dashboard_frames([_product_line("SKU-1", "<b>名称</b>")], tmp_path)
+
+    assert "<b>名称</b>" not in frames[-1]
+    assert "&lt;b&gt;名称&lt;/b&gt;" in frames[-1]
+
+
+def test_header_shows_progress_summary_instead_of_target_and_model(tmp_path):
+    frames = _run_dashboard_frames(
+        [
+            _product_line("SKU-1"),
+            '[UI_SUCCESS] {"id": "SKU-1", "url": "", "used_model": "unknown"}\n',
+        ],
+        tmp_path,
+    )
+
+    assert "目标:" not in frames[-1]
+    assert "模型:" not in frames[-1]
+    assert "进度 1/1" in frames[-1]
+
+
+def test_failure_card_shows_chinese_cause_and_next_step(tmp_path):
+    reason = "GPT Image task failed. Provider message: Request body read timed out"
+    frames = _run_dashboard_frames(
+        [
+            _product_line("SKU-1"),
+            "[UI_FAIL] " + json.dumps({"id": "SKU-1", "reason": reason, "is_manual": False}) + "\n",
+        ],
+        tmp_path,
+    )
+
+    assert "❌ 平台读取上传内容超时" in frames[-1]
+    assert "💡" in frames[-1]
+    assert reason in frames[-1]

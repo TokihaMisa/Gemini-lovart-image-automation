@@ -3,12 +3,15 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 import http.client
 import re
 import socket
 import ssl
 import time
 from urllib.error import HTTPError, URLError
+
+import certifi
 
 
 class RetryKind(str, Enum):
@@ -188,3 +191,21 @@ def run_with_retry(
                 on_retry(safe_retry_message(kind, attempt, policy.network_attempts, delay))
             sleeper(delay)
     raise RuntimeError("retry loop exhausted")
+
+
+def build_https_context() -> ssl.SSLContext:
+    """Trust the system roots plus certifi's public roots.
+
+    Windows fetches missing roots on demand only for its own TLS stack, so Python can
+    reject a valid chain (e.g. Cloudflare certificates issued under SSL.com roots)
+    that browsers accept. Verification stays on.
+    """
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    return context
+
+
+@lru_cache(maxsize=1)
+def https_context() -> ssl.SSLContext:
+    """Shared read-only context; callers that change verification need build_https_context()."""
+    return build_https_context()

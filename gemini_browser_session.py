@@ -6,7 +6,7 @@ import ctypes
 from ctypes import wintypes
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import sys
 import time
 from typing import Any, Mapping
@@ -527,29 +527,56 @@ def clear_stale_login_runtime(paths: LoginRuntimePaths) -> bool:
 
 
 def _default_browser_candidates() -> list[str]:
-    candidates = [
+    local_app_data = Path.home() / "AppData" / "Local"
+    return [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        str(local_app_data / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        str(local_app_data / "Google" / "Chrome" / "Application" / "chrome.exe"),
     ]
-    local_app_data = Path.home() / "AppData" / "Local"
-    candidates.extend(
-        [
-            str(local_app_data / "Google" / "Chrome" / "Application" / "chrome.exe"),
-            str(local_app_data / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
-        ]
-    )
-    return candidates
+
+
+BROWSER_CHOICES = ("auto", "edge", "chrome", "custom")
+_BROWSER_EXECUTABLES = {"edge": ("msedge.exe", "Microsoft Edge"), "chrome": ("chrome.exe", "Google Chrome")}
+
+
+class BrowserSelectionError(RuntimeError):
+    """The browser chosen in settings cannot be found; never silently switch browsers."""
+
+
+def configured_browser_choice(browser_cfg: Mapping[str, object]) -> str:
+    choice = str(browser_cfg.get("browser_choice", "") or "").strip().lower()
+    if choice in BROWSER_CHOICES:
+        return choice
+    # Older configs only had chrome_exe; show such a path as a custom choice.
+    return "custom" if str(browser_cfg.get("chrome_exe", "") or "").strip() else "auto"
 
 
 def resolve_browser_executable(
     browser_cfg: Mapping[str, object], candidate_paths: list[str] | None = None
 ) -> str | None:
+    choice = str(browser_cfg.get("browser_choice", "") or "").strip().lower()
     configured = str(browser_cfg.get("chrome_exe", "") or "").strip()
+    if choice == "custom":
+        if configured and Path(configured).is_file():
+            return configured
+        raise BrowserSelectionError(
+            f"自定义浏览器路径不存在：{configured or '未填写'}。请在「API 与模型」页重新选择浏览器。"
+        )
+    candidates = candidate_paths if candidate_paths is not None else _default_browser_candidates()
+    if choice in _BROWSER_EXECUTABLES:
+        executable_name, label = _BROWSER_EXECUTABLES[choice]
+        for candidate in candidates:
+            if candidate and PureWindowsPath(candidate).name.lower() == executable_name and Path(candidate).is_file():
+                return candidate
+        raise BrowserSelectionError(
+            f"未找到 {label}。请先安装，或在「API 与模型」页改选其他浏览器。"
+        )
     if configured and Path(configured).exists():
         return configured
-    for candidate in candidate_paths if candidate_paths is not None else _default_browser_candidates():
+    for candidate in candidates:
         if candidate and Path(candidate).exists():
             return candidate
     return None
@@ -715,6 +742,9 @@ def run_login_helper(config_path: str | Path) -> int:
 
 
 __all__ = [
+    "BROWSER_CHOICES",
+    "BrowserSelectionError",
+    "configured_browser_choice",
     "GeminiPageState",
     "GeminiLoginRequiredError",
     "GeminiPageNotReadyError",

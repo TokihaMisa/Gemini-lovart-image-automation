@@ -12,6 +12,10 @@ import main
 from failed_retry import FailedRetryPolicy
 
 from gemini_browser_session import (
+    _default_browser_candidates,
+    BrowserSelectionError,
+    configured_browser_choice,
+    resolve_browser_executable,
     GeminiPermanentTlsError,
     GeminiPageState,
     LoginStatus,
@@ -47,6 +51,67 @@ class FakePage:
 
 
 class GeminiBrowserSessionTests(unittest.TestCase):
+    def test_default_browser_candidates_prefer_edge_before_chrome(self):
+        names = [Path(candidate).name for candidate in _default_browser_candidates()]
+
+        self.assertEqual(names, ["msedge.exe"] * 3 + ["chrome.exe"] * 3)
+
+    def _installed_browsers(self, tmp, *names):
+        paths = []
+        for index, name in enumerate(names):
+            path = Path(tmp) / str(index) / name
+            path.parent.mkdir()
+            path.write_text("", encoding="utf-8")
+            paths.append(str(path))
+        return paths
+
+    def test_explicit_browser_choice_selects_that_browser(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            chrome, edge = self._installed_browsers(tmp, "chrome.exe", "msedge.exe")
+
+            self.assertEqual(
+                resolve_browser_executable({"browser_choice": "edge"}, candidate_paths=[chrome, edge]),
+                edge,
+            )
+            self.assertEqual(
+                resolve_browser_executable({"browser_choice": "chrome"}, candidate_paths=[edge, chrome]),
+                chrome,
+            )
+            self.assertEqual(
+                resolve_browser_executable({"browser_choice": "auto"}, candidate_paths=[edge, chrome]),
+                edge,
+            )
+
+    def test_missing_explicit_browser_is_reported_instead_of_switching_browser(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (edge,) = self._installed_browsers(tmp, "msedge.exe")
+
+            with self.assertRaises(BrowserSelectionError) as raised:
+                resolve_browser_executable({"browser_choice": "chrome"}, candidate_paths=[edge])
+
+        self.assertIn("Google Chrome", str(raised.exception))
+
+    def test_custom_browser_choice_requires_existing_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (custom,) = self._installed_browsers(tmp, "browser.exe")
+
+            self.assertEqual(
+                resolve_browser_executable({"browser_choice": "custom", "chrome_exe": custom}),
+                custom,
+            )
+            with self.assertRaises(BrowserSelectionError) as raised:
+                resolve_browser_executable(
+                    {"browser_choice": "custom", "chrome_exe": str(Path(tmp) / "missing.exe")}
+                )
+
+        self.assertIn("missing.exe", str(raised.exception))
+
+    def test_configured_browser_choice_maps_legacy_path_to_custom(self):
+        self.assertEqual(configured_browser_choice({}), "auto")
+        self.assertEqual(configured_browser_choice({"browser_choice": "Chrome"}), "chrome")
+        self.assertEqual(configured_browser_choice({"browser_choice": "unknown"}), "auto")
+        self.assertEqual(configured_browser_choice({"chrome_exe": r"D:\Browser\chrome.exe"}), "custom")
+
     def test_accounts_url_is_waiting_login_even_if_editor_like_node_exists(self):
         page = FakePage("https://accounts.google.com/signin", {
             "language": "es", "has_editor": True, "has_login_prompt": True,

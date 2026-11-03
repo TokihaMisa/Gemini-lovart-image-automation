@@ -18,6 +18,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import urllib.request
 
 from network_retry import (
+    https_context,
     PERMANENT_TLS_GUIDANCE,
     RetryKind,
     RetryPolicy,
@@ -298,7 +299,7 @@ def _request_json(
         request.add_header("Authorization", f"Bearer {api_key}")
 
     def request_operation() -> dict[str, Any]:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout, context=https_context()) as response:
             return json.loads(response.read().decode("utf-8"))
 
     failure: ModelProviderError | None = None

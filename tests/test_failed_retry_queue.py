@@ -524,6 +524,16 @@ class FailedRetryQueueTests(unittest.TestCase):
             "error": "localized provider rejection",
         }), "other")
 
+    def test_provider_side_timeout_task_failure_uses_default_timeout_retry(self):
+        row = {
+            "status": "failed",
+            "failure_code": "task_failed",
+            "error": "GPT Image task failed. Provider message: Request body read timed out",
+        }
+
+        self.assertEqual(classify_retry_failure(row), "timeout")
+        self.assertIn("timeout", FailedRetryPolicy.from_config({}).error_types)
+
     def test_final_overloaded_task_failure_uses_default_network_retry(self):
         row = {
             "product_id": "SKU-OVERLOADED",

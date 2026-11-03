@@ -1,6 +1,7 @@
 import os
 import json
 import html
+import re
 import subprocess
 import threading
 import time
@@ -42,7 +43,10 @@ from prompt_settings import (
     normalize_prompt_settings,
 )
 from gemini_browser_session import (
+    BrowserSelectionError,
     GeminiPageState,
+    configured_browser_choice,
+    resolve_browser_executable,
     build_login_helper_command,
     clear_stale_login_runtime,
     login_helper_is_active,
@@ -53,6 +57,8 @@ from gemini_browser_session import (
 from lovart_api import AgentSkill, AgentSkillError
 from lovart_bot import LOVART_IMAGE_MODELS, LOVART_MODEL_LABELS, unlimited_model_catalog
 from image_generation import normalize_image_provider
+from utils import col_letter_to_index
+from error_guidance import explain_failure
 from openai_image_api import (
     ImageTaskSnapshot,
     OpenAIImageAPI,
@@ -86,6 +92,8 @@ active_processes = []
 API_SETTINGS_SAVE_SUCCESS = "✅ 密钥、API 地址和模型已保存"
 _DASHBOARD_THUMBNAIL_SIZE = (96, 96)
 _DASHBOARD_CARD_LIMIT = 50
+_DASHBOARD_ACTIVE_STAGES = frozenset({"product", "prompt", "support_white", "support_scene", "detail"})
+_SKIP_LOG_PATTERN = re.compile(r"\bSKIP \[\d+/\d+\] (\S+) already completed")
 _DASHBOARD_PRODUCT_LOG_LIMIT = 20
 _DASHBOARD_OUTPUT_QUEUE_LIMIT = 128
 
@@ -217,6 +225,9 @@ def _dashboard_visible_product_ids(
             selected_set.add(product_id)
 
     add(current_pid)
+    for product_id, product in products.items():
+        if product.get("stage") in {"failed", "manual"}:
+            add(product_id)
     for product_id in reversed(tuple(recent_product_ids)):
         add(product_id)
     for product_id in products:
@@ -267,9 +278,42 @@ def _dashboard_status_counts(products: dict, current_pid: str | None) -> dict[st
             counts["running"] += 1
         elif product_id == current_pid and stage not in {"complete", "failed", "manual"}:
             counts["running"] += 1
+        elif stage in _DASHBOARD_ACTIVE_STAGES:
+            counts["running"] += 1
         else:
             counts["waiting"] += 1
     return counts
+
+
+def _dashboard_finished_banner(products: dict) -> tuple[str, str]:
+    """Summarize a finished run without claiming unfinished products are done."""
+    counts = _dashboard_status_counts(products, None)
+    platform_running = sum(1 for product in products.values() if product.get("still_running") is True)
+    unfinished = counts["running"] + counts["waiting"] - platform_running
+    parts = [f"成功 {counts['success']}"]
+    if counts["failed"]:
+        parts.append(f"失败 {counts['failed']}")
+    if counts["skipped"]:
+        parts.append(f"跳过 {counts['skipped']}")
+    if platform_running:
+        parts.append(f"平台处理中 {platform_running}")
+    if unfinished:
+        parts.append(f"未完成 {unfinished}")
+    if counts["failed"] or platform_running or unfinished:
+        banner = "🏁 本轮已结束 · " + " · ".join(parts)
+        if platform_running:
+            banner += "（再次点击开始会自动续查已提交的任务，不会重复扣费）"
+        return banner, "#f59e0b"
+    return "🏁 全部完成 · " + " · ".join(parts), "#10b981"
+
+
+def _dashboard_title_html(name: object) -> str:
+    """Show the product name; a pasted product URL becomes a link instead of the title."""
+    text = str(name or "").strip()
+    if re.match(r"https?://", text, re.IGNORECASE):
+        url = html.escape(text, quote=True)
+        return f"<a href='{url}' target='_blank' style='color: #93c5fd; text-decoration: none;'>🔗 名称列是链接，点击打开商品页</a>"
+    return html.escape(text)
 
 
 def _live_product_status(product: dict, *, now: float | None = None) -> str:
@@ -465,7 +509,33 @@ _GEMINI_LOGIN_LAUNCH_GRACE_SECONDS = 10.0
 _GEMINI_PROFILE_BUSY_MESSAGE = "Gemini 浏览器账户目录正在使用中，请等待当前浏览器任务结束后再试。"
 
 
+GEMINI_BROWSER_CHOICES = [
+    ("自动（Edge 优先，其次 Chrome）", "auto"),
+    ("Microsoft Edge", "edge"),
+    ("Google Chrome", "chrome"),
+    ("自定义路径", "custom"),
+]
+
+
+def _browser_selection_problem(config_path: str | Path) -> str | None:
+    """Report a missing selected browser before a browser window or task starts."""
+    target = Path(config_path)
+    try:
+        config = yaml.safe_load(target.read_text(encoding="utf-8")) or {} if target.exists() else {}
+    except (OSError, yaml.YAMLError):
+        return None
+    browser_cfg = config.get("browser") if isinstance(config, dict) else None
+    try:
+        resolve_browser_executable(browser_cfg if isinstance(browser_cfg, dict) else {})
+    except BrowserSelectionError as exc:
+        return str(exc)
+    return None
+
+
 def open_gemini_login_browser(config_path: str | Path = "config.yaml") -> str:
+    browser_problem = _browser_selection_problem(config_path)
+    if browser_problem:
+        return f"❌ {browser_problem}"
     paths = login_runtime_paths(config_path)
     launch_key = str(paths.owner_lock_path.resolve())
     with _gemini_login_launch_lock:
@@ -512,9 +582,77 @@ def check_gemini_login_and_close(config_path: str | Path = "config.yaml") -> str
 def guard_gemini_browser_task(
     prompt_source: str, config_path: str | Path = "config.yaml"
 ) -> str | None:
-    if prompt_source == "gemini_browser" and login_helper_is_active(login_runtime_paths(config_path)):
+    if prompt_source != "gemini_browser":
+        return None
+    if login_helper_is_active(login_runtime_paths(config_path)):
         return _GEMINI_PROFILE_BUSY_MESSAGE
-    return None
+    return _browser_selection_problem(config_path)
+
+
+def _excel_preflight_problem(config: dict) -> str | None:
+    excel_cfg = config.get("excel") if isinstance(config.get("excel"), dict) else {}
+    path = Path(str(excel_cfg.get("path") or "data/products.xlsx"))
+    if not path.is_file():
+        return f"找不到商品表格 {path}：请在工作台上传 Excel 后再开始。"
+    columns = excel_cfg.get("columns") if isinstance(excel_cfg.get("columns"), dict) else {}
+    id_index = col_letter_to_index(str(columns.get("id") or "A"))
+    name_index = col_letter_to_index(str(columns.get("name_cn") or "B"))
+    try:
+        import openpyxl
+
+        workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except Exception as exc:
+        return f"商品表格 {path.name} 打不开（{type(exc).__name__}）：请确认它是 .xlsx 文件，并且没有在 Excel 里打开着。"
+    try:
+        sheet_spec = excel_cfg.get("sheet", 0)
+        sheet = workbook.worksheets[sheet_spec] if isinstance(sheet_spec, int) else workbook[sheet_spec]
+        # Same rule as excel_reader: data starts on row 2 and needs both an ID and a name.
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            cells = list(row)
+            if max(id_index, name_index) < len(cells) and all(
+                str(cells[index] or "").strip() for index in (id_index, name_index)
+            ):
+                return None
+    except (IndexError, KeyError) as exc:
+        return f"商品表格 {path.name} 里找不到配置的工作表（{exc}）。"
+    finally:
+        workbook.close()
+    return f"商品表格 {path.name} 里没有可处理的商品：从第 2 行开始，每行都要同时填写商品 ID 和名称。"
+
+
+def _preflight_problems(
+    config: dict,
+    *,
+    prompt_source: str,
+    support_provider: str,
+    detail_provider: str,
+    gemini_key: str,
+    nvidia_key: str,
+    lovart_access: str,
+    lovart_secret: str,
+    output_dir: str,
+) -> list[str]:
+    """Cheap local checks that would otherwise fail only after the run has started."""
+    problems = []
+    excel_problem = _excel_preflight_problem(config)
+    if excel_problem:
+        problems.append(excel_problem)
+    if prompt_source == "gemini_api" and not str(gemini_key or "").strip():
+        problems.append("提示词来源是 Gemini API，但 GEMINI_API_KEY 为空：请在「API 与模型」页填写。")
+    if prompt_source == "nvidia" and not str(nvidia_key or "").strip():
+        problems.append("提示词来源是 NVIDIA，但 NVIDIA_API_KEY 为空：请在「API 与模型」页填写。")
+    providers = {normalize_image_provider(support_provider), normalize_image_provider(detail_provider)}
+    if "lovart" in providers and not (str(lovart_access or "").strip() and str(lovart_secret or "").strip()):
+        problems.append("出图来源包含 Lovart，但 LOVART_ACCESS_KEY 或 LOVART_SECRET_KEY 未填写：请在「API 与模型」页补全。")
+    target = Path(output_dir or "output")
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        probe = target / ".write-check"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError:
+        problems.append(f"输出文件夹 {target} 无法写入：请换一个文件夹，或检查它是否被占用、是否有权限。")
+    return problems
 
 
 def build_gemini_health_check_command(
@@ -1009,9 +1147,12 @@ def save_prompt_settings_from_form(*values, config_path="config.yaml") -> tuple[
 
 def save_gemini_browser_settings(
     allow_regular_chat_fallback,
+    browser_choice=None,
+    custom_browser_path="",
     config_path="config.yaml",
 ) -> str:
     target = Path(config_path)
+    browser_changed = False
     try:
         current = yaml.safe_load(target.read_text(encoding="utf-8")) or {} if target.exists() else {}
         if not isinstance(current, dict):
@@ -1020,9 +1161,25 @@ def save_gemini_browser_settings(
         updated.setdefault("gemini", {})["allow_regular_chat_fallback"] = bool(
             allow_regular_chat_fallback
         )
+        if browser_choice is not None:
+            choice = str(browser_choice or "auto").strip().lower()
+            if choice not in {value for _label, value in GEMINI_BROWSER_CHOICES}:
+                raise ValueError(f"未知的浏览器选项：{browser_choice}")
+            browser_cfg = updated.setdefault("browser", {})
+            previous = (configured_browser_choice(browser_cfg), str(browser_cfg.get("chrome_exe", "") or "").strip())
+            browser_cfg["browser_choice"] = choice
+            browser_cfg["chrome_exe"] = (
+                str(custom_browser_path or "").strip().strip("\"'") if choice == "custom" else ""
+            )
+            resolve_browser_executable(browser_cfg)
+            browser_changed = (choice, browser_cfg["chrome_exe"]) != previous
         save_config(updated, target)
+    except BrowserSelectionError as exc:
+        return f"❌ {exc} 设置未保存。"
     except (OSError, ValueError, yaml.YAMLError) as exc:
         return f"❌ Gemini 浏览器设置保存失败，原配置已保留：{exc}"
+    if browser_changed:
+        return "✅ Gemini 浏览器设置已保存。已切换浏览器，请点击「打开 Gemini 登录浏览器」重新登录一次。"
     return "✅ Gemini 浏览器设置已保存"
 
 
@@ -2067,6 +2224,21 @@ def run_process(
         import shutil
         shutil.copy(excel_file, target_excel)
 
+    preflight_problems = _preflight_problems(
+        config,
+        prompt_source=prompt_source,
+        support_provider=support_provider,
+        detail_provider=detail_provider,
+        gemini_key=gemini_key,
+        nvidia_key=nvidia_key,
+        lovart_access=lovart_access,
+        lovart_secret=lovart_secret,
+        output_dir=custom_output_dir.strip() if custom_output_dir else "output",
+    )
+    if preflight_problems:
+        yield "❌ 开始前检查未通过，任务没有启动：\n" + "\n".join(f"· {problem}" for problem in preflight_problems)
+        return
+
     yield "Starting the automation process...\n"
     
     import sys
@@ -2111,9 +2283,7 @@ def run_process(
     active_processes.append(process)
     
     logs = []
-    current_product = "初始化中..."
     current_status = "准备启动环境"
-    current_model = lovart_image_model if lovart_image_model else "auto"
     status_color = "#64748b" # slate
     current_pid = None
     
@@ -2182,7 +2352,7 @@ def run_process(
                                 <span>ID: {pid}</span>
                                 {f"<span style='color: #d8b4fe; background: rgba(168, 85, 247, 0.2); padding: 2px 8px; border-radius: 9999px; font-size: 0.85em; border: 1px solid rgba(168, 85, 247, 0.3);'>{model_display}</span>" if model_display else ""}
                             </div>
-                            <div style='font-size: 1.05em; color: #f8fafc; font-weight: 700; margin-bottom: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;' title="{pdata['name']}">{pdata['name']}</div>
+                            <div style='font-size: 1.05em; color: #f8fafc; font-weight: 700; margin-bottom: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;' title="{html.escape(str(pdata['name']), quote=True)}">{_dashboard_title_html(pdata['name'])}</div>
                             <div style='display: inline-block; background: {pdata["color"]}15; color: {pdata["color"]}; padding: 4px 12px; border-radius: 9999px; font-size: 0.8em; font-weight: 600; border: 1px solid {pdata["color"]}30;'>
                                 {live_status}
                             </div>
@@ -2206,11 +2376,8 @@ def run_process(
                     <div style='background: {status_color}; color: white; padding: 6px 16px; border-radius: 6px; font-weight: 600; font-size: 0.9em; box-shadow: 0 2px 4px {status_color}40;'>
                         {current_status}
                     </div>
-                    <div style='padding: 6px 16px; font-weight: 500; font-size: 0.9em; color: #94a3b8; background: #0f172a; border: 1px solid #334155; border-radius: 6px;'>
-                        目标: {current_product}
-                    </div>
-                    <div style='padding: 6px 16px; font-weight: 600; font-size: 0.9em; color: #d8b4fe; background: rgba(168, 85, 247, 0.2); border-radius: 6px; border: 1px solid rgba(168, 85, 247, 0.3);'>
-                        模型: {current_model}
+                    <div style='padding: 6px 16px; font-weight: 600; font-size: 0.9em; color: #e2e8f0; background: #0f172a; border: 1px solid #334155; border-radius: 6px;'>
+                        进度 {counts['success'] + counts['skipped']}/{counts['total']} · 失败 {counts['failed']} · 处理中 {counts['running']}
                     </div>
                 </div>
             </div>
@@ -2323,7 +2490,6 @@ def run_process(
                 message = _format_openai_image_ui_status(data, message)
                 if pid in products_dict:
                     current_pid = pid
-                    current_product = f"{pid} - {products_dict[pid]['name']}"
                     current_status = message
                     status_color = {
                         "product": "#8b5cf6",
@@ -2365,7 +2531,6 @@ def run_process(
         elif is_uimodel:
             try:
                 model_name = clean_line.replace("[UI_MODEL]", "").strip()
-                current_model = model_name
                 if current_pid and current_pid in products_dict:
                     products_dict[current_pid]["used_model"] = model_name
                     models_att = products_dict[current_pid].setdefault("models_attempted", [])
@@ -2415,11 +2580,14 @@ def run_process(
                     _end_product_live_status(products_dict[pid])
                     status_color = "#f59e0b" if is_manual else "#ef4444"
                     products_dict[pid]["stage"] = "manual" if is_manual else "failed"
-                    products_dict[pid]["status"] = f"{'⚠️' if is_manual else '❌'} {reason}"
+                    guidance = explain_failure(reason)
+                    products_dict[pid]["status"] = f"{'⚠️' if is_manual else '❌'} {guidance.cause if guidance else reason}"
                     products_dict[pid]["color"] = status_color
                     mark_recent_product(pid)
                     current_status = f"❌ {pid} 失败" if not is_manual else f"⚠️ {pid} 待确认"
-                    _append_product_log(products_dict[pid], f"<span style='color: {'#fbbf24' if is_manual else '#f87171'}'>[报错] {reason}</span>")
+                    _append_product_log(products_dict[pid], f"<span style='color: {'#fbbf24' if is_manual else '#f87171'}'>[报错] {html.escape(str(reason))}</span>")
+                    if guidance:
+                        _append_product_log(products_dict[pid], f"<span style='color: #fde68a;'>💡 怎么办：{html.escape(guidance.action)}</span>")
             except:
                 pass
         elif "| size=" in clean_line and "lang=" in clean_line and clean_line.startswith("["):
@@ -2439,7 +2607,6 @@ def run_process(
             if pid in products_dict:
                 current_pid = pid
                 mark_recent_product(pid)
-                current_product = f"{pid} - {products_dict[pid]['name']}"
                 current_status = "🔄 提取卖点 & 构思画面"
                 status_color = "#8b5cf6"
                 products_dict[pid]["status"] = current_status
@@ -2475,24 +2642,15 @@ def run_process(
                         product_logs[-1] = progress_line
                     else:
                         _append_product_log(products_dict[current_pid], progress_line)
-        elif clean_line.startswith("OK") or "completed" in clean_line.lower() or "SUCCESS" in clean_line:
-            current_status = "🎉 单个商品全部完成"
-            status_color = "#10b981"
-            for pid in products_dict:
-                if pid in clean_line:
-                    products_dict[pid]["status"] = "🎉 成功生成"
-                    products_dict[pid]["color"] = status_color
-                    mark_recent_product(pid)
-                    _append_product_log(products_dict[pid], "<span style='color: #4ade80;'>✅ 任务执行成功</span>")
-        elif clean_line.startswith("SKIP"):
-            for pid in products_dict:
-                if pid in clean_line:
-                    _end_product_live_status(products_dict[pid])
-                    products_dict[pid]["stage"] = "skipped"
-                    products_dict[pid]["status"] = "⏭️ 已跳过"
-                    products_dict[pid]["color"] = "#64748b"
-                    mark_recent_product(pid)
-                    _append_product_log(products_dict[pid], "⏭️ 命中缓存，任务已跳过")
+        # Success comes only from [UI_SUCCESS]; detail status lines also contain "completed".
+        elif (skip_match := _SKIP_LOG_PATTERN.search(clean_line)) and skip_match.group(1) in products_dict:
+            pid = skip_match.group(1)
+            _end_product_live_status(products_dict[pid])
+            products_dict[pid]["stage"] = "skipped"
+            products_dict[pid]["status"] = "⏭️ 已跳过"
+            products_dict[pid]["color"] = "#64748b"
+            mark_recent_product(pid)
+            _append_product_log(products_dict[pid], "⏭️ 已完成过，本次跳过")
             
         # Throttling rendering to avoid freezing UI
         if render_immediately or time.time() - last_yield_time > 0.5:
@@ -2503,9 +2661,8 @@ def run_process(
             
     rc = process.poll()
     if rc == 0:
-        current_status = "🏁 队列全自动化任务已全部结束！"
-        status_color = "#10b981"
-        current_product = "全盘扫描完毕"
+        current_pid = None
+        current_status, status_color = _dashboard_finished_banner(products_dict)
     else:
         current_status = f"⚠️ 进程异常退出 (代码: {rc})"
         status_color = "#ef4444"
@@ -3133,6 +3290,9 @@ def build_ui():
     allow_regular_chat_fallback_value = (
         config.get("gemini", {}).get("allow_regular_chat_fallback") is True
     )
+    browser_settings = config.get("browser") if isinstance(config.get("browser"), dict) else {}
+    browser_choice_value = configured_browser_choice(browser_settings)
+    custom_browser_path_value = str(browser_settings.get("chrome_exe", "") or "")
     lovart_config = config.get("lovart", {}) or {}
     failed_retry_policy = FailedRetryPolicy.from_config(lovart_config)
     saved_lovart_catalog = normalize_lovart_model_catalog(
@@ -3347,11 +3507,30 @@ def build_ui():
                         label="临时聊天不可用时，允许使用普通聊天继续",
                         value=allow_regular_chat_fallback_value,
                     )
+                    gemini_browser_choice = gr.Dropdown(
+                        label="Gemini 使用的浏览器",
+                        choices=GEMINI_BROWSER_CHOICES,
+                        value=browser_choice_value,
+                        info="登录、正式任务和完整体检都使用这里选的浏览器；切换后需要重新登录一次。",
+                    )
+                    custom_browser_path = gr.Textbox(
+                        label="自定义浏览器路径",
+                        value=custom_browser_path_value,
+                        placeholder=r"例如 C:\Program Files\Google\Chrome\Application\chrome.exe",
+                        visible=browser_choice_value == "custom",
+                    )
+                    gemini_browser_choice.change(
+                        fn=lambda choice: gr.update(visible=choice == "custom"),
+                        inputs=gemini_browser_choice,
+                        outputs=custom_browser_path,
+                        queue=False,
+                        api_name=False,
+                    )
                     save_gemini_browser_btn = gr.Button("保存 Gemini 浏览器设置")
                     gemini_browser_save_status = gr.Markdown("")
                     save_gemini_browser_btn.click(
                         fn=save_gemini_browser_settings,
-                        inputs=[allow_regular_chat_fallback],
+                        inputs=[allow_regular_chat_fallback, gemini_browser_choice, custom_browser_path],
                         outputs=gemini_browser_save_status,
                     )
 

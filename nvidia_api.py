@@ -4,7 +4,7 @@ import urllib.request
 from pathlib import Path
 
 from model_provider import safe_provider_request_error, validate_base_url, validate_model_id
-from network_retry import RetryPolicy, run_with_retry
+from network_retry import RetryPolicy, https_context, run_with_retry
 from prompt_settings import normalize_prompt_settings
 from utils import (
     build_design_prompt,
@@ -154,7 +154,7 @@ class NvidiaAPI:
         )
 
         def request_operation():
-            with urllib.request.urlopen(req, timeout=180) as resp:
+            with urllib.request.urlopen(req, timeout=180, context=https_context()) as resp:
                 return json.loads(resp.read().decode("utf-8"))
 
         failure = None

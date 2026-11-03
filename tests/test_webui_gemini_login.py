@@ -130,6 +130,30 @@ class WebUIGeminiLoginTests(unittest.TestCase):
 
         self.assertIn("登录已确认", message)
 
+    @patch("webui.subprocess.Popen")
+    @patch("webui.login_helper_is_active", return_value=False)
+    @patch("gemini_browser_session._default_browser_candidates", return_value=[])
+    def test_open_button_reports_missing_selected_browser_without_launching(self, _candidates, _active, popen):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.yaml"
+            config.write_text("browser:\n  browser_choice: chrome\n", encoding="utf-8")
+
+            message = open_gemini_login_browser(config)
+
+        popen.assert_not_called()
+        self.assertIn("Google Chrome", message)
+
+    @patch("gemini_browser_session._default_browser_candidates", return_value=[])
+    def test_browser_task_guard_reports_missing_selected_browser(self, _candidates):
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "webui.login_helper_is_active", return_value=False
+        ):
+            config = Path(tmp) / "config.yaml"
+            config.write_text("browser:\n  browser_choice: edge\n", encoding="utf-8")
+
+            self.assertIn("Microsoft Edge", guard_gemini_browser_task("gemini_browser", config))
+            self.assertIsNone(guard_gemini_browser_task("gemini_api", config))
+
     def test_browser_task_guard_blocks_active_helper_only_for_browser_source(self):
         with patch("webui.login_helper_is_active", return_value=True):
             self.assertIn("账户目录正在使用", guard_gemini_browser_task("gemini_browser"))

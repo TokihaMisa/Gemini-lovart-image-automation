@@ -17,6 +17,7 @@ from typing import Optional
 import os
 
 from network_retry import (
+    build_https_context,
     PERMANENT_TLS_GUIDANCE,
     RetryKind,
     RetryPolicy,
@@ -26,7 +27,7 @@ from network_retry import (
 
 # SSL context — verification ON by default. Opt-out via LOVART_INSECURE_SSL=1
 # for users behind corporate proxies/VPNs that do TLS interception.
-_ssl_ctx = ssl.create_default_context()
+_ssl_ctx = build_https_context()
 if os.environ.get("LOVART_INSECURE_SSL") == "1":
     _ssl_ctx.check_hostname = False
     _ssl_ctx.verify_mode = ssl.CERT_NONE

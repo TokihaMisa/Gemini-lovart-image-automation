@@ -10,6 +10,7 @@ import http.client
 import io
 import ipaddress
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -27,7 +28,13 @@ import urllib.request
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from network_retry import PERMANENT_TLS_GUIDANCE, RetryKind, classify_network_error
+from network_retry import (
+    PERMANENT_TLS_GUIDANCE,
+    RetryKind,
+    build_https_context,
+    classify_network_error,
+    https_context,
+)
 
 
 DEFAULT_OPENAI_IMAGE_BASE_URL: Final = ""
@@ -48,6 +55,11 @@ MAX_REFERENCE_IMAGES: Final = 14
 MAX_REFERENCE_BYTES: Final = 10 * 1024 * 1024
 MAX_REFERENCE_TOTAL_BYTES: Final = 30 * 1024 * 1024
 MAX_CREATE_BODY_BYTES: Final = 50 * 1024 * 1024
+# Only large opaque references are re-encoded for upload; originals on disk stay untouched.
+REFERENCE_RECOMPRESS_BYTES: Final = 1536 * 1024
+# Cap total pixels (about 2048x2048) so long detail strips keep their full width.
+REFERENCE_MAX_PIXELS: Final = 2048 * 2048
+REFERENCE_JPEG_QUALITY: Final = 90
 TASK_WAIT_LIMIT_SECONDS: Final = 600.0
 TASK_NOT_FOUND_GRACE_SECONDS: Final = 600.0
 STATUS_WORKER_CLEANUP_GRACE_SECONDS: Final = 0.05
@@ -123,11 +135,14 @@ class OpenAIImageAPIError(Exception):
         user_message: str,
         status_code: int | None = None,
         retryable: bool = False,
+        not_submitted: bool = False,
     ) -> None:
         self.code = code
         self.user_message = user_message
         self.status_code = status_code
         self.retryable = retryable
+        # True only when the provider provably created no task (refused or never reached).
+        self.not_submitted = not_submitted
         super().__init__(user_message)
 
 
@@ -728,7 +743,7 @@ class OpenAIImageAPI:
         submission_callback: Callable[[], None] | None = None,
         defer_running: bool = False,
     ) -> GeneratedImage:
-        images = _encode_reference_images(
+        images, recompressed = _prepare_reference_images(
             image_paths,
             merge=bool(self.config.merge_reference_images),
         )
@@ -736,6 +751,7 @@ class OpenAIImageAPI:
             return self._generate_sub2api_edit(
                 prompt=prompt,
                 images=images,
+                recompressed=recompressed,
                 output_path=output_path,
                 image_size=image_size,
                 status_callback=status_callback,
@@ -752,6 +768,7 @@ class OpenAIImageAPI:
             images,
         )
         if resume_task is None:
+            _log_request_size(status_callback, body, output_path, len(images), recompressed)
             if submission_callback is not None:
                 submission_callback()
             task = self._submit_task_once(body)
@@ -805,6 +822,7 @@ class OpenAIImageAPI:
         *,
         prompt: str,
         images: Sequence[str],
+        recompressed: int,
         output_path: str | Path,
         image_size: str,
         status_callback: Callable[[str], None] | None,
@@ -822,6 +840,7 @@ class OpenAIImageAPI:
             quality=_SUB2API_QUALITY_BY_RESOLUTION[self.config.resolution],
         )
         if resume_task is None:
+            _log_request_size(status_callback, body, output_path, len(images), recompressed)
             if submission_callback is not None:
                 submission_callback()
             try:
@@ -839,7 +858,7 @@ class OpenAIImageAPI:
                         display_callback=display_callback,
                         submission_callback=None,
                     )
-                if exc.code in {"authentication", "invalid_request"}:
+                if exc.code in {"authentication", "invalid_request"} or exc.not_submitted:
                     raise
                 raise OpenAIImageAPIError(
                     "submission_unknown",
@@ -922,7 +941,7 @@ class OpenAIImageAPI:
             )
             result = _sync_image_result(payload)
         except OpenAIImageAPIError as exc:
-            if exc.code in {"authentication", "invalid_request"}:
+            if exc.code in {"authentication", "invalid_request"} or exc.not_submitted:
                 raise
             raise OpenAIImageAPIError(
                 "submission_unknown",
@@ -1010,7 +1029,10 @@ class OpenAIImageAPI:
         request.add_header("Authorization", f"Bearer {self.config.api_key}")
         request.add_header("Content-Type", content_type)
         request.add_header("User-Agent", OPENAI_IMAGE_USER_AGENT)
-        opener = urllib.request.build_opener(_RejectRedirectHandler())
+        opener = urllib.request.build_opener(
+            _RejectRedirectHandler(),
+            urllib.request.HTTPSHandler(context=https_context()),
+        )
         raw_response = self._request_bytes(
             request,
             opener.open,
@@ -1130,7 +1152,9 @@ class OpenAIImageAPI:
                 max_attempts=1,
             )
             task_id = _normalize_task_id(_task_payload(payload).get("task_id"))
-        except OpenAIImageAPIError:
+        except OpenAIImageAPIError as exc:
+            if exc.not_submitted:
+                raise
             raise OpenAIImageAPIError(
                 "submission_unknown",
                 "GPT Image task submission started, but no validated task ID was persisted; automatic resubmission is disabled.",
@@ -1559,6 +1583,33 @@ def _read_validated_reference(path: str | Path) -> tuple[str, bytes]:
 
 
 def _encode_reference_images(paths: Sequence[str | Path], merge: bool) -> list[str]:
+    return _prepare_reference_images(paths, merge)[0]
+
+
+def _shrink_reference(media_type: str, raw: bytes) -> tuple[str, bytes]:
+    """Re-encode a large opaque reference as JPEG; keep it when that does not help."""
+    if len(raw) <= REFERENCE_RECOMPRESS_BYTES:
+        return media_type, raw
+    with Image.open(io.BytesIO(raw)) as source:
+        if source.mode in {"RGBA", "LA", "PA"} or "transparency" in source.info:
+            return media_type, raw
+        image = ImageOps.exif_transpose(source).convert("RGB")
+    scale = math.sqrt(REFERENCE_MAX_PIXELS / (image.width * image.height))
+    if scale < 1:
+        image = image.resize(
+            (max(1, int(image.width * scale)), max(1, int(image.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=REFERENCE_JPEG_QUALITY, optimize=True)
+    compressed = buffer.getvalue()
+    if len(compressed) >= len(raw):
+        return media_type, raw
+    return "image/jpeg", compressed
+
+
+def _prepare_reference_images(paths: Sequence[str | Path], merge: bool) -> tuple[list[str], int]:
+    """Return upload Data URLs and how many references were re-encoded."""
     source_paths = [Path(path) for path in paths]
     if not source_paths:
         raise OpenAIImageAPIError("missing_input_image", "At least one source image is required.")
@@ -1580,7 +1631,26 @@ def _encode_reference_images(paths: Sequence[str | Path], merge: bool) -> list[s
                 reference_sheet.unlink()
             except FileNotFoundError:
                 pass
-    return [f"data:{media_type};base64,{base64.b64encode(raw).decode('ascii')}" for media_type, raw in validated]
+    prepared = [_shrink_reference(media_type, raw) for media_type, raw in validated]
+    recompressed = sum(1 for (_, before), (_, after) in zip(validated, prepared) if after is not before)
+    images = [f"data:{media_type};base64,{base64.b64encode(raw).decode('ascii')}" for media_type, raw in prepared]
+    return images, recompressed
+
+
+def _log_request_size(
+    status_callback: Callable[[str], None] | None,
+    body: bytes,
+    output_path: str | Path,
+    reference_count: int,
+    recompressed: int,
+) -> None:
+    target = Path(output_path)
+    detail = f"参考图 {reference_count} 张"
+    if recompressed:
+        detail += f"，其中 {recompressed} 张已压缩"
+    message = f"GPT Image 请求大小 {len(body) / (1024 * 1024):.1f} MB（{detail}）：{"/".join(target.parts[-4:])}"
+    logging.getLogger("image_automation").info(message)
+    _notify_status(status_callback, f"📦 {message}")
 
 
 def _validate_reference_byte_limits(validated: Sequence[tuple[str, bytes]]) -> None:
@@ -1906,7 +1976,7 @@ def _download_resolved_image(
     on_retry: Callable[[int, int], None],
 ) -> bytes:
     """Retry only the GET while reusing the original validated address snapshot."""
-    tls_context = ssl.create_default_context() if resolved_url.scheme == "https" else None
+    tls_context = build_https_context() if resolved_url.scheme == "https" else None
     attempts = max(1, int(max_attempts))
     for attempt in range(1, attempts + 1):
         address = resolved_url.addresses[(attempt - 1) % len(resolved_url.addresses)]
@@ -2111,6 +2181,7 @@ def _transport_error(exc: BaseException) -> OpenAIImageAPIError:
                 "GPT Image API is rate limiting requests (HTTP 429).",
                 exc.code,
                 True,
+                not_submitted=True,
             )
         if 500 <= exc.code < 600:
             return OpenAIImageAPIError(
@@ -2118,6 +2189,8 @@ def _transport_error(exc: BaseException) -> OpenAIImageAPIError:
                 f"GPT Image API is temporarily unavailable (HTTP {exc.code}).",
                 exc.code,
                 True,
+                # 503 is an explicit refusal; other 5xx may come after the gateway forwarded the task.
+                not_submitted=exc.code == 503,
             )
         return OpenAIImageAPIError(
             "http_error",
@@ -2132,10 +2205,19 @@ def _transport_error(exc: BaseException) -> OpenAIImageAPIError:
         )
     kind = classify_network_error(exc)
     if kind is RetryKind.PERMANENT_TLS:
-        return OpenAIImageAPIError("tls_certificate", PERMANENT_TLS_GUIDANCE)
-    if kind is RetryKind.TRANSIENT:
-        return OpenAIImageAPIError("network", "Could not reach GPT Image API.", retryable=True)
+        return OpenAIImageAPIError("tls_certificate", PERMANENT_TLS_GUIDANCE, not_submitted=True)
+    never_sent = _failed_before_sending(exc)
+    if kind is RetryKind.TRANSIENT or never_sent:
+        return OpenAIImageAPIError(
+            "network", "Could not reach GPT Image API.", retryable=True, not_submitted=never_sent
+        )
     return OpenAIImageAPIError("network", "Could not reach GPT Image API.")
+
+
+def _failed_before_sending(exc: BaseException) -> bool:
+    """DNS failures and refused connections happen before any request byte is sent."""
+    reason = exc.reason if isinstance(exc, URLError) else exc
+    return isinstance(reason, (socket.gaierror, ConnectionRefusedError))
 
 
 def _retry_delay(delays: Sequence[float], failed_attempt: int) -> float:
@@ -2161,7 +2243,7 @@ class _TrackedHTTPSHandler(urllib.request.HTTPSHandler):
     """Expose the live HTTPSConnection so a hard deadline can close its socket."""
 
     def __init__(self, connection_callback: Callable[[http.client.HTTPSConnection], None]):
-        super().__init__()
+        super().__init__(context=https_context())
         self._connection_callback = connection_callback
 
     def _connection_factory(self, host: str, **kwargs: Any) -> http.client.HTTPSConnection:

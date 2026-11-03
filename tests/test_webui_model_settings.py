@@ -1075,6 +1075,39 @@ class WebUIModelSettingsTests(unittest.TestCase):
         self.assertTrue(saved["gemini"]["allow_regular_chat_fallback"])
         self.assertTrue(saved["gemini"]["thinking_mode"])
         self.assertTrue(saved["other"]["keep"])
+        self.assertNotIn("browser", saved)
+
+    def test_save_gemini_browser_choice_and_prompt_relogin_when_browser_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text(
+                "browser:\n  chrome_exe: D:/old/chrome.exe\n  user_data_dir: browser_profile\n",
+                encoding="utf-8",
+            )
+            chrome = Path(tmp) / "chrome.exe"
+            chrome.write_text("", encoding="utf-8")
+            with patch("gemini_browser_session._default_browser_candidates", return_value=[str(chrome)]):
+                status = webui.save_gemini_browser_settings(False, "chrome", "", config_path=path)
+            saved = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+        self.assertIn("已保存", status)
+        self.assertIn("重新登录", status)
+        self.assertEqual(saved["browser"]["browser_choice"], "chrome")
+        self.assertEqual(saved["browser"]["chrome_exe"], "")
+        self.assertEqual(saved["browser"]["user_data_dir"], "browser_profile")
+
+    def test_save_gemini_browser_choice_rejects_missing_browser_and_keeps_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            original = "browser:\n  browser_choice: edge\n"
+            path.write_text(original, encoding="utf-8")
+            with patch("gemini_browser_session._default_browser_candidates", return_value=[]):
+                status = webui.save_gemini_browser_settings(False, "custom", str(Path(tmp) / "nope.exe"), config_path=path)
+            content = path.read_text(encoding="utf-8")
+
+        self.assertIn("❌", status)
+        self.assertIn("nope.exe", status)
+        self.assertEqual(content, original)
 
     @patch("webui.load_config", return_value={})
     def test_gemini_regular_chat_fallback_setting_defaults_off_in_ui(self, _load_config):
@@ -1100,8 +1133,18 @@ class WebUIModelSettingsTests(unittest.TestCase):
         )
         self.assertEqual(
             [component_labels[item] for item in save_event["inputs"]],
-            ["临时聊天不可用时，允许使用普通聊天继续"],
+            [
+                "临时聊天不可用时，允许使用普通聊天继续",
+                "Gemini 使用的浏览器",
+                "自定义浏览器路径",
+            ],
         )
+        browser_dropdown = next(
+            item
+            for item in components
+            if item.get("props", {}).get("label") == "Gemini 使用的浏览器"
+        )
+        self.assertEqual(browser_dropdown["props"]["value"], "auto")
 
     def _form_values(self, page_count=14):
         return (
@@ -1576,7 +1619,8 @@ class WebUIModelSettingsTests(unittest.TestCase):
             "gemini-key", "nvidia-key", "", "",
         ))
 
-        self.assertTrue(any("SKU-1 - 测试商品" in frame for frame in frames))
+        # The header no longer repeats the product; the active card is highlighted instead.
+        self.assertTrue(any("ID: SKU-1" in frame and "pulse-glow 2s infinite" in frame for frame in frames))
         self.assertTrue(any("详情图 1/4，已完成 1" in frame for frame in frames))
         self.assertFalse(
             all("⏳ 等待处理" in frame for frame in frames if "SKU-1" in frame)

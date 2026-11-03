@@ -2,13 +2,14 @@ import base64
 import io
 import ipaddress
 import json
+import os
 import socket
 import ssl
 import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
 import pytest
@@ -140,6 +141,10 @@ class FakeDefaultSSLContext:
         self.verify_mode = ssl.CERT_REQUIRED
         self.wrap_error = wrap_error
         self.wrap_calls = []
+        self.cafiles = []
+
+    def load_verify_locations(self, *, cafile):
+        self.cafiles.append(cafile)
 
     def wrap_socket(self, connected_socket, *, server_hostname):
         self.wrap_calls.append((connected_socket, server_hostname))
@@ -504,6 +509,79 @@ def test_encode_reference_images_uses_verified_content_format(
     encoded = _encode_reference_images([source], merge=False)
 
     assert encoded[0].startswith(prefix)
+
+
+def make_noise_image(path: Path, size: tuple[int, int], mode: str = "RGB") -> Path:
+    Image.frombytes(mode, size, os.urandom(size[0] * size[1] * len(mode))).save(path, format="PNG")
+    return path
+
+
+def decode_data_url(data_url: str) -> tuple[str, Image.Image]:
+    header, encoded = data_url.split(",", 1)
+    image = Image.open(io.BytesIO(base64.b64decode(encoded)))
+    image.load()
+    return header, image
+
+
+def test_large_opaque_reference_is_reencoded_as_jpeg_without_resizing(monkeypatch, tmp_path):
+    monkeypatch.setattr("openai_image_api.REFERENCE_RECOMPRESS_BYTES", 10_000)
+    source = make_noise_image(tmp_path / "scene.png", (300, 200))
+
+    encoded = _encode_reference_images([source], merge=False)
+
+    header, image = decode_data_url(encoded[0])
+    assert header == "data:image/jpeg;base64"
+    assert image.size == (300, 200)
+    assert len(base64.b64decode(encoded[0].split(",", 1)[1])) < source.stat().st_size
+
+
+def test_large_reference_is_capped_by_total_pixels_not_long_side(monkeypatch, tmp_path):
+    monkeypatch.setattr("openai_image_api.REFERENCE_RECOMPRESS_BYTES", 10_000)
+    long_strip = make_noise_image(tmp_path / "strip.png", (2500, 400))
+
+    _header, image = decode_data_url(_encode_reference_images([long_strip], merge=False)[0])
+
+    assert image.size == (2500, 400)
+
+    monkeypatch.setattr("openai_image_api.REFERENCE_MAX_PIXELS", 250_000)
+    _header, image = decode_data_url(_encode_reference_images([long_strip], merge=False)[0])
+
+    assert image.width * image.height <= 250_000
+    assert image.size == (1250, 200)
+
+
+def test_transparent_or_small_references_are_sent_unchanged(monkeypatch, tmp_path):
+    monkeypatch.setattr("openai_image_api.REFERENCE_RECOMPRESS_BYTES", 10_000)
+    transparent = make_noise_image(tmp_path / "cutout.png", (300, 200), mode="RGBA")
+    small = make_image(tmp_path / "small.png", "PNG")
+
+    encoded = _encode_reference_images([transparent, small], merge=False)
+
+    assert base64.b64decode(encoded[0].split(",", 1)[1]) == transparent.read_bytes()
+    assert base64.b64decode(encoded[1].split(",", 1)[1]) == small.read_bytes()
+
+
+@patch("openai_image_api.urllib.request.build_opener")
+def test_generate_edit_logs_request_size_before_submission(build_opener, tmp_path, caplog):
+    build_opener.return_value.open.return_value = fake_png_response()
+    product_dir = tmp_path / "NW1"
+    product_dir.mkdir()
+    statuses = []
+
+    with caplog.at_level("INFO", logger="image_automation"):
+        make_client().generate_edit(
+            "keep the product exact",
+            [make_png(tmp_path / "source.png")],
+            product_dir / "detail_01.png",
+            status_callback=statuses.append,
+        )
+
+    size_logs = [record.getMessage() for record in caplog.records if "请求大小" in record.getMessage()]
+    assert len(size_logs) == 1
+    assert "NW1/detail_01.png" in size_logs[0]
+    assert "参考图 1 张" in size_logs[0]
+    assert "MB" in size_logs[0]
+    assert any("请求大小" in status for status in statuses)
 
 
 @patch("openai_image_api.urllib.request.build_opener")
@@ -1361,16 +1439,20 @@ def test_create_prefers_root_task_id_when_data_is_unrelated_mapping(build_opener
 
 
 @pytest.mark.parametrize(
-    ("side_effect", "expected_code"),
+    ("side_effect", "expected_code", "not_submitted"),
     [
-        (socket.timeout("submitted but response lost"), "submission_unknown"),
-        (HTTPError("https://api.lk888.ai/v1/media/generate", 400, "bad", {}, None), "submission_unknown"),
-        (HTTPError("https://api.lk888.ai/v1/media/generate", 429, "busy", {}, None), "submission_unknown"),
-        (HTTPError("https://api.lk888.ai/v1/media/generate", 503, "down", {}, None), "submission_unknown"),
+        (socket.timeout("submitted but response lost"), "submission_unknown", False),
+        (ConnectionResetError("reset after the body was sent"), "submission_unknown", False),
+        (HTTPError("https://api.lk888.ai/v1/media/generate", 400, "bad", {}, None), "submission_unknown", False),
+        (HTTPError("https://api.lk888.ai/v1/media/generate", 502, "gateway", {}, None), "submission_unknown", False),
+        (HTTPError("https://api.lk888.ai/v1/media/generate", 429, "busy", {}, None), "rate_limit", True),
+        (HTTPError("https://api.lk888.ai/v1/media/generate", 503, "down", {}, None), "server_error", True),
+        (URLError(socket.gaierror(11001, "getaddrinfo failed")), "network", True),
+        (URLError(ConnectionRefusedError(10061, "refused")), "network", True),
     ],
 )
 @patch("openai_image_api.urllib.request.build_opener")
-def test_create_failure_never_repeats_paid_post(build_opener, side_effect, expected_code, tmp_path):
+def test_create_failure_never_repeats_paid_post(build_opener, side_effect, expected_code, not_submitted, tmp_path):
     build_opener.return_value.open.side_effect = side_effect
 
     with pytest.raises(OpenAIImageAPIError) as ctx:
@@ -1378,8 +1460,9 @@ def test_create_failure_never_repeats_paid_post(build_opener, side_effect, expec
             "prompt", [make_png(tmp_path / "source.png")], tmp_path / "out.png"
         )
 
+    # A refused or never-sent request created no paid task, so a later round may resubmit it.
     assert ctx.value.code == expected_code
-    assert ctx.value.retryable is False
+    assert ctx.value.not_submitted is not_submitted
     assert build_opener.return_value.open.call_count == 1
 
 
@@ -2332,7 +2415,7 @@ def test_generate_edit_uses_redirect_rejecting_transport_for_authenticated_post(
 def test_generate_edit_does_not_retry_paid_post_for_429_or_401(build_opener, tmp_path):
     """Fails if an HTTP error can automatically resubmit a paid image task."""
     source = make_png(tmp_path / "source.png")
-    for status, expected_code in ((429, "submission_unknown"), (401, "authentication")):
+    for status, expected_code in ((429, "rate_limit"), (502, "submission_unknown"), (401, "authentication")):
         build_opener.return_value.open.reset_mock()
         build_opener.return_value.open.side_effect = HTTPError(
             "https://gateway.test/v1/images/edits/async",

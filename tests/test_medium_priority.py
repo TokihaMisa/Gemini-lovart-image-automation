@@ -1,4 +1,6 @@
+import contextlib
 import csv
+import io
 import json
 import os
 import ssl
@@ -1936,6 +1938,42 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         bot._wait_for_reply(previous_response_count=0)
 
         self.assertTrue(logger.completed)
+
+    def test_gemini_reply_wait_prints_one_timed_line_every_15_seconds_in_ui_mode(self):
+        clock = [1000.0]
+
+        class FakePage:
+            def wait_for_timeout(self, ms):
+                clock[0] += ms / 1000
+
+        class FakeLogger:
+            def info(self, message):
+                pass
+
+            def debug(self, message):
+                pass
+
+            def warning(self, message):
+                pass
+
+        class SlowGeminiBot(GeminiBot):
+            def _read_generation_state(self):
+                generating = clock[0] < 1040
+                return {"generating": generating, "response_count": 1 if not generating else 0}
+
+        bot = SlowGeminiBot(FakePage(), {"gemini": {"reply_timeout": 120}}, FakeLogger())
+        output = io.StringIO()
+        with patch("gemini_bot.time.time", side_effect=lambda: clock[0]), patch.dict(
+            os.environ, {"UI_MODE": "1"}
+        ), contextlib.redirect_stdout(output):
+            bot._wait_for_reply(previous_response_count=0)
+
+        printed = output.getvalue()
+        self.assertNotIn("\r", printed)
+        progress = [line for line in printed.splitlines() if "正在生成回复" in line]
+        self.assertEqual(len(progress), 2)
+        self.assertIn("已 15 秒", progress[0])
+        self.assertIn("已 30 秒", progress[1])
 
     def test_gemini_reply_wait_does_not_complete_from_text_alone(self):
         class FakePage:
