@@ -59,6 +59,7 @@ from lovart_bot import LOVART_IMAGE_MODELS, LOVART_MODEL_LABELS, unlimited_model
 from image_generation import normalize_image_provider
 from utils import col_letter_to_index
 from error_guidance import explain_failure
+from gpt_text_api import GPT_TEXT_KEY_ENV, GPT_TEXT_MODEL_CHOICES, resolve_gpt_text_settings
 from openai_image_api import (
     ImageTaskSnapshot,
     OpenAIImageAPI,
@@ -502,6 +503,25 @@ def _refresh_openai_image_product_statuses(
         })
 
 
+# Runs in the page before the exit request: cover the app so Gradio's
+# "connection lost / reconnecting" toast is never shown, then close the app window.
+SHUTDOWN_PAGE_JS = """
+() => {
+    const style = document.createElement('style');
+    style.textContent = '.toast-wrap, .toast-body { display: none !important; }';
+    document.head.appendChild(style);
+    const cover = document.createElement('div');
+    cover.id = 'lovart-shutdown-cover';
+    cover.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;flex-direction:column;'
+        + 'align-items:center;justify-content:center;gap:12px;background:#0f172a;color:#e2e8f0;'
+        + 'font:16px/1.6 system-ui,-apple-system,"Microsoft YaHei",sans-serif;text-align:center;padding:24px;';
+    cover.innerHTML = '<div style="font-size:22px;font-weight:600">服务已关闭</div>'
+        + '<div>后台任务已结束，可以直接关闭这个窗口。</div>';
+    document.body.appendChild(cover);
+    setTimeout(() => window.close(), 1500);
+    return [];
+}
+"""
 OPENAI_IMAGE_TEST_BUTTON_LABEL = "真实图像编辑测试（可能产生一次图片费用）"
 _gemini_login_launch_lock = threading.Lock()
 _gemini_login_launches: dict[str, float] = {}
@@ -532,7 +552,19 @@ def _browser_selection_problem(config_path: str | Path) -> str | None:
     return None
 
 
-def open_gemini_login_browser(config_path: str | Path = "config.yaml") -> str:
+_LOGIN_SITE_LABELS = {"gemini": "Gemini", "chatgpt": "ChatGPT"}
+PROMPT_SOURCE_CHOICES = [
+    ("Gemini 浏览器", "gemini_browser"),
+    ("Gemini API", "gemini_api"),
+    ("NVIDIA API（Kimi）", "nvidia"),
+    ("GPT API（Sub2API 密钥）", "gpt_api"),
+    ("ChatGPT 网页临时聊天", "chatgpt_browser"),
+]
+BROWSER_PROMPT_SOURCES = frozenset(("gemini_browser", "chatgpt_browser"))
+
+
+def open_gemini_login_browser(config_path: str | Path = "config.yaml", site: str = "gemini") -> str:
+    label = _LOGIN_SITE_LABELS[site]
     browser_problem = _browser_selection_problem(config_path)
     if browser_problem:
         return f"❌ {browser_problem}"
@@ -560,29 +592,35 @@ def open_gemini_login_browser(config_path: str | Path = "config.yaml") -> str:
         if os.name == "nt" and getattr(sys, "frozen", False):
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         try:
-            process = subprocess.Popen(build_login_helper_command(config_path), **kwargs)
+            process = subprocess.Popen(build_login_helper_command(config_path, site=site), **kwargs)
         except OSError:
-            return "无法打开 Gemini 登录浏览器，请检查本地安装后重试。"
+            return f"无法打开 {label} 登录浏览器，请检查本地安装后重试。"
         active_processes.append(process)
         _gemini_login_launches[launch_key] = now
-    return "Gemini 登录浏览器已打开，请在新窗口中完成登录后再检查。"
+    return f"{label} 登录浏览器已打开，请在新窗口中完成登录后再检查。"
 
 
-def check_gemini_login_and_close(config_path: str | Path = "config.yaml") -> str:
+def check_gemini_login_and_close(config_path: str | Path = "config.yaml", site: str = "gemini") -> str:
+    label = _LOGIN_SITE_LABELS[site]
     paths = login_runtime_paths(config_path)
     status = read_login_status(paths.status_path)
     if not login_helper_is_active(paths):
-        return "Gemini 登录助手未运行；请先打开登录浏览器。"
+        return f"{label} 登录助手未运行；请先打开登录浏览器。"
+    # Both sites share one helper slot; only confirm the site this button is about.
+    status_site = "chatgpt" if status is not None and "chatgpt" in status.url else "gemini"
+    if status is not None and status.url and status_site != site:
+        other = _LOGIN_SITE_LABELS[status_site]
+        return f"当前打开的是 {other} 登录浏览器，请用 {other} 那一行的按钮检查并关闭。"
     if status is None or status.state != GeminiPageState.READY or not status.ready:
-        return "Gemini 尚未完成登录，请继续在登录浏览器中操作。"
+        return f"{label} 尚未完成登录，请继续在登录浏览器中操作。"
     request_login_helper_close(paths.close_request_path)
-    return "Gemini 登录已确认，正在安全关闭登录浏览器。"
+    return f"{label} 登录已确认，正在安全关闭登录浏览器。"
 
 
 def guard_gemini_browser_task(
     prompt_source: str, config_path: str | Path = "config.yaml"
 ) -> str | None:
-    if prompt_source != "gemini_browser":
+    if prompt_source not in BROWSER_PROMPT_SOURCES:
         return None
     if login_helper_is_active(login_runtime_paths(config_path)):
         return _GEMINI_PROFILE_BUSY_MESSAGE
@@ -631,6 +669,7 @@ def _preflight_problems(
     lovart_access: str,
     lovart_secret: str,
     output_dir: str,
+    gpt_key_saved: bool = False,
 ) -> list[str]:
     """Cheap local checks that would otherwise fail only after the run has started."""
     problems = []
@@ -641,6 +680,11 @@ def _preflight_problems(
         problems.append("提示词来源是 Gemini API，但 GEMINI_API_KEY 为空：请在「API 与模型」页填写。")
     if prompt_source == "nvidia" and not str(nvidia_key or "").strip():
         problems.append("提示词来源是 NVIDIA，但 NVIDIA_API_KEY 为空：请在「API 与模型」页填写。")
+    if prompt_source == "gpt_api":
+        if not gpt_key_saved:
+            problems.append(f"提示词来源是 GPT API，但 Sub2API 密钥（{GPT_TEXT_KEY_ENV}）还没保存：请在「API 与模型」页的 GPT Image 区域填写并保存。")
+        if not resolve_gpt_text_settings(config)[0]:
+            problems.append("提示词来源是 GPT API，但没有配置 Sub2API 地址：请在「API 与模型」页的 GPT Image 区域填写 Sub2API 地址。")
     providers = {normalize_image_provider(support_provider), normalize_image_provider(detail_provider)}
     if "lovart" in providers and not (str(lovart_access or "").strip() and str(lovart_secret or "").strip()):
         problems.append("出图来源包含 Lovart，但 LOVART_ACCESS_KEY 或 LOVART_SECRET_KEY 未填写：请在「API 与模型」页补全。")
@@ -1290,9 +1334,15 @@ def _configured_provider_model(config, prompt_source):
 
 
 def resolve_model_dropdown(prompt_source, gemini_catalog, nvidia_catalog, config):
-    if prompt_source == "gemini_browser":
+    if prompt_source in BROWSER_PROMPT_SOURCES:
         page_managed = "由浏览器页面选择"
         return [(page_managed, page_managed)], page_managed, False
+    if prompt_source == "gpt_api":
+        configured = resolve_gpt_text_settings(config)[1]
+        models = list(GPT_TEXT_MODEL_CHOICES)
+        if configured not in models:
+            models.insert(0, configured)
+        return [(model, model) for model in models], configured, True
 
     if prompt_source == "gemini_api":
         catalog = gemini_catalog
@@ -1324,6 +1374,7 @@ def persist_selected_model(config, prompt_source, model_id):
     config_section = {
         "gemini_api": "gemini_api",
         "nvidia": "nvidia_api",
+        "gpt_api": "gpt_text_api",
     }.get(prompt_source)
     if config_section:
         updated.setdefault(config_section, {})["model"] = model_id
@@ -2234,6 +2285,7 @@ def run_process(
         lovart_access=lovart_access,
         lovart_secret=lovart_secret,
         output_dir=custom_output_dir.strip() if custom_output_dir else "output",
+        gpt_key_saved=_image_key_is_saved(GPT_TEXT_KEY_ENV, env_path),
     )
     if preflight_problems:
         yield "❌ 开始前检查未通过，任务没有启动：\n" + "\n".join(f"· {problem}" for problem in preflight_problems)
@@ -3430,7 +3482,7 @@ def build_ui():
                     
                     with gr.Row():
                         prompt_source = gr.Dropdown(
-                            choices=["gemini_api", "gemini_browser", "nvidia"], 
+                            choices=PROMPT_SOURCE_CHOICES,
                             value="gemini_browser", 
                             label="提示词引擎",
                             elem_classes=["glass-input", "pill-dropdown"]
@@ -3532,6 +3584,27 @@ def build_ui():
                         fn=save_gemini_browser_settings,
                         inputs=[allow_regular_chat_fallback, gemini_browser_choice, custom_browser_path],
                         outputs=gemini_browser_save_status,
+                    )
+
+                    gr.Markdown("### ChatGPT 浏览器账户")
+                    chatgpt_login_status = gr.Markdown(
+                        "用于「ChatGPT 网页临时聊天」提示词来源，和 Gemini 共用上面选择的浏览器。"
+                        "第一次使用前请打开登录浏览器登录 ChatGPT。"
+                        "「GPT API」提示词来源不需要登录，直接用下方 GPT Image 区域保存的 Sub2API 密钥。",
+                        elem_id="chatgpt-login-status",
+                    )
+                    with gr.Row():
+                        open_chatgpt_login_btn = gr.Button("打开 ChatGPT 登录浏览器")
+                        check_chatgpt_login_btn = gr.Button("检查 ChatGPT 登录并关闭浏览器")
+                    open_chatgpt_login_btn.click(
+                        fn=lambda: open_gemini_login_browser(site="chatgpt"),
+                        outputs=chatgpt_login_status,
+                        api_name="open_chatgpt_login_browser",
+                    )
+                    check_chatgpt_login_btn.click(
+                        fn=lambda: check_gemini_login_and_close(site="chatgpt"),
+                        outputs=chatgpt_login_status,
+                        api_name="check_chatgpt_login_and_close",
                     )
 
                     gemini_key = gr.Textbox(label="GEMINI_API_KEY", value=get_env("GEMINI_API_KEY"), type="password")
@@ -4158,7 +4231,8 @@ def build_ui():
         shutdown_btn.click(
             fn=shutdown_server,
             inputs=[],
-            outputs=[shutdown_btn]
+            outputs=[shutdown_btn],
+            js=SHUTDOWN_PAGE_JS,
         )
         
         check_update_btn.click(

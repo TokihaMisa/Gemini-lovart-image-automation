@@ -265,24 +265,89 @@ def inspect_gemini_page(page: Any) -> LoginStatus:
     )
 
 
-def _log_status(logger: Any, status: LoginStatus) -> None:
+CHATGPT_TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true"
+_CHATGPT_HOSTS = frozenset(("chatgpt.com", "chat.openai.com"))
+_OPENAI_AUTH_HOSTS = frozenset(("auth.openai.com", "auth0.openai.com", "accounts.google.com", "login.live.com"))
+
+_CHATGPT_INSPECTION_SCRIPT = r"""
+() => {
+  const visible = (node) => {
+    if (!node) return false;
+    const style = window.getComputedStyle(node);
+    const rect = node.getBoundingClientRect();
+    return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+  };
+  const hasVisible = (selector) => Array.from(document.querySelectorAll(selector)).some(visible);
+  const title = (document.title || '').toLowerCase();
+  return {
+    language: document.documentElement.lang || navigator.language || '',
+    has_composer: hasVisible('#prompt-textarea, div.ProseMirror[contenteditable=true], form textarea'),
+    has_login_button: hasVisible('[data-testid="login-button"], [data-testid="signup-button"], a[href*="/auth/login"]'),
+    // The composer renders before ChatGPT knows the session, so readiness also needs the account menu.
+    has_account: hasVisible('[data-testid="accounts-profile-button"], [data-testid="profile-button"], '
+      + 'button[aria-label*="profile" i], button[aria-label*="\u4e2a\u4eba\u8d44\u6599"], '
+      + 'button[aria-label*="\u5e33\u6236"], button[aria-label*="\u8d26\u6237"]'),
+    has_challenge: /just a moment|attention required|\u8bf7\u7a0d\u5019/.test(title)
+      || hasVisible('#challenge-form, iframe[src*="challenges.cloudflare.com"]'),
+  };
+}
+"""
+
+
+def inspect_chatgpt_page(page: Any) -> LoginStatus:
+    """Classify the visible ChatGPT page; a logged-out composer is not ready."""
+    try:
+        raw_payload = page.evaluate(_CHATGPT_INSPECTION_SCRIPT)
+    except Exception:
+        is_closed = getattr(page, "is_closed", None)
+        if callable(is_closed) and is_closed():
+            return _status_for_page(
+                GeminiPageState.ERROR, False, page, message="Unable to inspect the ChatGPT page."
+            )
+        # ChatGPT redirects and reloads on its own (sign-in, security checks), which
+        # destroys the evaluation context mid-call; that is loading, not a failure.
+        return _status_for_page(
+            GeminiPageState.PAGE_LOADING, False, page, message="ChatGPT page is navigating."
+        )
+    payload = raw_payload if isinstance(raw_payload, Mapping) else {}
+    url_parts = urlsplit(_sanitized_url(str(getattr(page, "url", ""))))
+    hostname = (url_parts.hostname or "").lower()
+    if hostname in _OPENAI_AUTH_HOSTS or url_parts.path.lower().startswith("/auth"):
+        return _status_for_page(
+            GeminiPageState.WAITING_LOGIN, False, page, payload, "Sign in to ChatGPT in the browser window."
+        )
+    if bool(payload.get("has_challenge")):
+        return _status_for_page(
+            GeminiPageState.PAGE_LOADING, False, page, payload, "ChatGPT is running a security check."
+        )
+    if bool(payload.get("has_login_button")):
+        return _status_for_page(
+            GeminiPageState.WAITING_LOGIN, False, page, payload, "Sign in to ChatGPT in the browser window."
+        )
+    if hostname in _CHATGPT_HOSTS and bool(payload.get("has_composer")) and bool(payload.get("has_account")):
+        return _status_for_page(GeminiPageState.READY, True, page, payload, "ChatGPT is ready.")
+    return _status_for_page(GeminiPageState.PAGE_LOADING, False, page, payload, "Waiting for the ChatGPT page.")
+
+
+def _log_status(logger: Any, status: LoginStatus, label: str = "Gemini") -> None:
     if logger:
-        logger.info(f"Gemini page state: {status.state.value}")
+        logger.info(f"{label} page state: {status.state.value}")
 
 
 def wait_for_gemini_ready(
-    page: Any, policy: RetryPolicy, logger: Any = None
+    page: Any, policy: RetryPolicy, logger: Any = None, *, inspect=None, label: str = "Gemini"
 ) -> LoginStatus:
+    inspect = inspect or inspect_gemini_page
     deadline = time.monotonic() + policy.page_ready_timeout
     while True:
-        status = inspect_gemini_page(page)
-        _log_status(logger, status)
+        status = inspect(page)
+        _log_status(logger, status, label)
         if status.state is GeminiPageState.ERROR:
-            raise TimeoutError("Gemini page inspection temporarily unavailable.") from None
+            raise TimeoutError(f"{label} page inspection temporarily unavailable.") from None
         if status.state in (GeminiPageState.READY, GeminiPageState.WAITING_LOGIN):
             return status
         if time.monotonic() >= deadline:
-            raise TimeoutError("Gemini did not become ready before the configured timeout.")
+            raise TimeoutError(f"{label} did not become ready before the configured timeout.")
         waiter = getattr(page, "wait_for_timeout", None)
         if callable(waiter):
             waiter(250)
@@ -291,7 +356,7 @@ def wait_for_gemini_ready(
 
 
 def navigate_gemini_with_retry(
-    page: Any, url: str, policy: RetryPolicy, logger: Any = None
+    page: Any, url: str, policy: RetryPolicy, logger: Any = None, *, inspect=None, label: str = "Gemini"
 ) -> LoginStatus:
     navigation_completed = False
 
@@ -304,7 +369,7 @@ def navigate_gemini_with_retry(
                 timeout=int(policy.page_ready_timeout * 1000),
             )
             navigation_completed = True
-        return wait_for_gemini_ready(page, policy, logger=logger)
+        return wait_for_gemini_ready(page, policy, logger=logger, inspect=inspect, label=label)
 
     def on_retry(message: str) -> None:
         if logger:
@@ -615,19 +680,26 @@ def build_browser_launch_options(
     return launch_options
 
 
+LOGIN_SITES = ("gemini", "chatgpt")
+
+
 def build_login_helper_command(
     config_path: str | Path,
     *,
     executable: str | None = None,
     frozen: bool | None = None,
+    site: str = "gemini",
 ) -> list[str]:
     """Build the source or packaged entry point for the isolated login helper."""
     config = str(Path(config_path).resolve())
     is_frozen = getattr(sys, "frozen", False) if frozen is None else frozen
     program = executable or sys.executable
+    args = ["--gemini-login-helper", "--config", config]
+    if site != "gemini":
+        args += ["--site", site]
     if is_frozen:
-        return [program, "--gemini-login-helper", "--config", config]
-    return [program, str(Path(__file__).with_name("app.py").resolve()), "--gemini-login-helper", "--config", config]
+        return [program, *args]
+    return [program, str(Path(__file__).with_name("app.py").resolve()), *args]
 
 
 def _read_helper_config(config_path: str | Path) -> dict[str, object]:
@@ -665,8 +737,8 @@ def _login_parent_pid() -> int | None:
     return pid if pid > 0 else None
 
 
-def run_login_helper(config_path: str | Path) -> int:
-    """Own one configured Gemini profile until the ready helper is asked to close."""
+def run_login_helper(config_path: str | Path, site: str = "gemini") -> int:
+    """Own one configured browser profile until the ready helper is asked to close."""
     paths = login_runtime_paths(config_path)
     owner = acquire_login_helper_owner(paths)
     if owner is None:
@@ -690,12 +762,15 @@ def run_login_helper(config_path: str | Path) -> int:
         gemini_config = config.get("gemini", {})
         gemini_config = gemini_config if isinstance(gemini_config, Mapping) else {}
         target_url = str(gemini_config.get("base_url", "https://gemini.google.com") or "https://gemini.google.com")
+        inspect, label = inspect_gemini_page, "Gemini"
+        if site == "chatgpt":
+            target_url, inspect, label = CHATGPT_TEMPORARY_CHAT_URL, inspect_chatgpt_page, "ChatGPT"
         with sync_playwright() as playwright:
             launch_options = build_browser_launch_options(config, config_path=config_path)
             context = playwright.chromium.launch_persistent_context(**launch_options)
             pages = getattr(context, "pages", [])
             page = pages[0] if pages else context.new_page()
-            status = navigate_gemini_with_retry(page, target_url, policy)
+            status = navigate_gemini_with_retry(page, target_url, policy, inspect=inspect, label=label)
             write_login_status(paths.status_path, status)
 
             while True:
@@ -724,7 +799,7 @@ def run_login_helper(config_path: str | Path) -> int:
                     _write_helper_status(paths, GeminiPageState.CLOSED, False, "Gemini browser was closed.")
                     return 0
 
-                status = inspect_gemini_page(page)
+                status = inspect(page)
                 write_login_status(paths.status_path, status)
                 if status.state == GeminiPageState.ERROR:
                     return 1
@@ -744,6 +819,9 @@ def run_login_helper(config_path: str | Path) -> int:
 __all__ = [
     "BROWSER_CHOICES",
     "BrowserSelectionError",
+    "CHATGPT_TEMPORARY_CHAT_URL",
+    "LOGIN_SITES",
+    "inspect_chatgpt_page",
     "configured_browser_choice",
     "GeminiPageState",
     "GeminiLoginRequiredError",

@@ -23,8 +23,10 @@ from rich.panel import Panel
 
 from excel_reader import read_products
 from failed_retry import FailedRetryPolicy, classify_retry_failure
+from chatgpt_bot import ChatGPTBot
 from gemini_api import GeminiAPI
 from gemini_bot import GeminiBot
+from gpt_text_api import GPT_TEXT_KEY_ENV, GPTTextAPI, resolve_gpt_text_settings
 from image_generation import (
     DetailScreen,
     DetailScreenParseError,
@@ -59,6 +61,8 @@ from gemini_browser_session import (
     acquire_login_helper_owner,
     build_browser_launch_options,
     login_runtime_paths,
+    CHATGPT_TEMPORARY_CHAT_URL,
+    inspect_chatgpt_page,
     navigate_gemini_with_retry,
     release_login_helper_owner,
     resolve_browser_executable,
@@ -118,7 +122,7 @@ def parse_args(argv=None):
     parser.add_argument("--config", default="config.yaml", help="Path to config YAML")
     parser.add_argument(
         "--prompt-source",
-        choices=["ask", "gemini_api", "gemini_browser", "nvidia"],
+        choices=["ask", "gemini_api", "gemini_browser", "nvidia", "gpt_api", "chatgpt_browser"],
         default="ask",
         help="Prompt generation source. Default asks interactively.",
     )
@@ -495,10 +499,19 @@ def _choose_prompt_source(config: dict, args) -> str:
         print("    [1] Gemini Browser  (Playwright, reuses Chrome profile)")
         print("    [2] Gemini API      (direct API)")
         print("    [3] NVIDIA API      (Kimi, supports product images)")
+        print("    [4] GPT API         (Sub2API key, supports product images)")
+        print("    [5] ChatGPT Browser (temporary chat, reuses Chrome profile)")
         print(f"{'=' * 50}")
-        selected = _ask_number("  Choose (1/2/3, default=2): ", 2, 1, 3)
+        selected = _ask_number("  Choose (1-5, default=2): ", 2, 1, 5)
         if selected == 1:
             return "gemini_browser"
+        if selected == 5:
+            return "chatgpt_browser"
+        if selected == 4:
+            if os.environ.get(GPT_TEXT_KEY_ENV, "").strip():
+                return "gpt_api"
+            print(f"\n  {GPT_TEXT_KEY_ENV} is not set. Fill .env, or choose another source.")
+            continue
         if selected == 2:
             if env_or_config(config.get("gemini_api", {}), "api_key", "GEMINI_API_KEY"):
                 return "gemini_api"
@@ -2365,6 +2378,26 @@ def _build_nvidia_api(config, logger, prompt_settings=None):
     )
 
 
+def _build_gpt_text_api(config, logger, prompt_settings=None):
+    api_key = os.environ.get(GPT_TEXT_KEY_ENV, "").strip()
+    if not api_key:
+        print(f"ERROR: {GPT_TEXT_KEY_ENV} is not set.")
+        sys.exit(1)
+    base_url, model = resolve_gpt_text_settings(config)
+    if not base_url:
+        print("ERROR: Sub2API base_url is not configured (openai_image.profiles.sub2api.base_url).")
+        sys.exit(1)
+    if logger:
+        logger.info(f"Using GPT API: {model}")
+    return GPTTextAPI(
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        logger=logger,
+        prompt_settings=prompt_settings if prompt_settings is not None else get_prompt_settings(config),
+    )
+
+
 def _resolve_browser_executable_for_run(
     browser_cfg: dict,
     interactive: bool = True,
@@ -2402,13 +2435,14 @@ def _run_browser_flow(
     config_path: str | Path = Path("config.yaml"),
     image_registry=None,
     routing=None,
+    site="gemini",
 ):
     paths = login_runtime_paths(config_path)
     owner = acquire_login_helper_owner(paths)
     if owner is None:
-        logger.warning("Gemini 浏览器账户目录正在使用中，未启动正式任务。")
+        logger.warning("浏览器账户目录正在使用中，未启动正式任务。")
         raise GeminiPageNotReadyError(
-            "Gemini 浏览器账户目录正在使用中，请等待当前浏览器任务结束后再试。"
+            "浏览器账户目录正在使用中（登录浏览器或其他任务还开着），请等它结束后再试。"
         )
     try:
         return _run_owned_browser_flow(
@@ -2423,6 +2457,7 @@ def _run_browser_flow(
             config_path=config_path,
             image_registry=image_registry,
             routing=routing,
+            site=site,
         )
     finally:
         release_login_helper_owner(paths, owner)
@@ -2440,6 +2475,7 @@ def _run_owned_browser_flow(
     config_path: str | Path = Path("config.yaml"),
     image_registry=None,
     routing=None,
+    site="gemini",
 ):
     browser_cfg = config["browser"]
     interactive_console = wait_for_ready and not _is_ui_mode()
@@ -2456,7 +2492,7 @@ def _run_owned_browser_flow(
         logger.warning("Chrome/Edge executable not found; using Playwright bundled Chromium")
 
     with sync_playwright() as pw:
-        logger.info("Launching browser for Gemini")
+        logger.info("Launching browser for ChatGPT" if site == "chatgpt" else "Launching browser for Gemini")
         launch_options = build_browser_launch_options(config, config_path=Path(config_path))
         if chrome_exe:
             launch_options["executable_path"] = chrome_exe
@@ -2464,6 +2500,37 @@ def _run_owned_browser_flow(
         try:
             page = context.pages[0] if context.pages else context.new_page()
             policy = retry_policy_from_config(config)
+            if site == "chatgpt":
+                # ChatGPTBot opens and verifies a fresh temporary chat for every product.
+                status = navigate_gemini_with_retry(
+                    page, CHATGPT_TEMPORARY_CHAT_URL, policy, logger=logger,
+                    inspect=inspect_chatgpt_page, label="ChatGPT",
+                )
+                if status.state is GeminiPageState.WAITING_LOGIN:
+                    logger.warning("ChatGPT 未登录，未开始处理商品。")
+                    raise GeminiLoginRequiredError(
+                        "ChatGPT 未登录，请先在「API 与模型」页打开 ChatGPT 登录浏览器完成登录。"
+                    )
+                if status.state is not GeminiPageState.READY or not status.ready:
+                    logger.warning("ChatGPT 页面未准备完成，未开始处理商品。")
+                    raise GeminiPageNotReadyError(
+                        "ChatGPT 页面未准备完成（可能卡在人机验证），请在登录浏览器中完成验证后重试。"
+                    )
+                logger.info("ChatGPT browser ready")
+                if interactive_console:
+                    input("\nReady. Press Enter to start...")
+                return _process_products(
+                    products,
+                    ChatGPTBot(page, config, logger, run_dir=run_dir, prompt_settings=prompt_settings),
+                    lovart,
+                    logger,
+                    run_dir,
+                    resume=resume,
+                    prompt_settings=prompt_settings,
+                    image_registry=image_registry,
+                    routing=routing,
+                    failed_retry_policy=FailedRetryPolicy.from_config(config.get("lovart")),
+                )
             try:
                 status = navigate_gemini_with_retry(
                     page, config["gemini"]["base_url"], policy, logger=logger
@@ -2620,8 +2687,12 @@ def _run_main(args):
             routing=routing,
             failed_retry_policy=FailedRetryPolicy.from_config(config.get("lovart")),
         )
-    elif prompt_source == "nvidia":
-        prompt_client = _build_nvidia_api(config, logger, prompt_settings=prompt_settings)
+    elif prompt_source in ("nvidia", "gpt_api"):
+        prompt_client = (
+            _build_nvidia_api(config, logger, prompt_settings=prompt_settings)
+            if prompt_source == "nvidia"
+            else _build_gpt_text_api(config, logger, prompt_settings=prompt_settings)
+        )
         if (
             args.prompt_source == "ask" or uses_lovart and args.lovart == "ask"
         ) and not _is_ui_mode():
@@ -2653,6 +2724,7 @@ def _run_main(args):
             config_path=args.config,
             image_registry=image_registry,
             routing=routing,
+            site="chatgpt" if prompt_source == "chatgpt_browser" else "gemini",
         )
 
     print(

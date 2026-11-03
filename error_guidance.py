@@ -53,6 +53,21 @@ _GUIDANCE: tuple[tuple[tuple[str, ...], FailureGuidance], ...] = (
         FailureGuidance("连不上出图平台", "请检查网络、代理或 VPN 后重新开始任务。"),
     ),
     (
+        ("chatgpt 未登录",),
+        FailureGuidance("ChatGPT 未登录", "请在「API 与模型」页点击「打开 ChatGPT 登录浏览器」登录后再开始。"),
+    ),
+    (
+        ("人机验证", "没有进入临时聊天"),
+        FailureGuidance(
+            "ChatGPT 页面没准备好",
+            "请在「API 与模型」页打开 ChatGPT 登录浏览器，完成验证、确认能进入临时聊天后再开始。",
+        ),
+    ),
+    (
+        ("chatgpt 回复过短", "可能拒绝了请求"),
+        FailureGuidance("ChatGPT 拒绝了这个商品", "可以把提示词来源换成「GPT API」或其他来源后重新开始。"),
+    ),
+    (
         ("gemini requires login", "未登录", "请先登录"),
         FailureGuidance("Gemini 未登录", "请在「API 与模型」页点击「打开 Gemini 登录浏览器」登录后再开始。"),
     ),

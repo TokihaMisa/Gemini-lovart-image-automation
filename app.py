@@ -73,7 +73,9 @@ if __name__ == "__main__":
             if config_index >= 0 and config_index + 1 < len(sys.argv)
             else "config.yaml"
         )
-        raise SystemExit(run_login_helper(config_path))
+        site_index = sys.argv.index("--site") if "--site" in sys.argv else -1
+        site = sys.argv[site_index + 1] if 0 <= site_index < len(sys.argv) - 1 else "gemini"
+        raise SystemExit(run_login_helper(config_path, site=site))
     if "--run-main" in sys.argv:
         sys.argv.remove("--run-main")
         sys.stdout = ResilientOutputStream(sys.stdout)

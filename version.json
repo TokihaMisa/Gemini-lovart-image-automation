@@ -1,7 +1,7 @@
 {
-  "version": "1.3.33",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.33/update.zip",
-  "changelog": "修复 TLS 证书导致 GPT Image 连接失败；可自选 Gemini 浏览器（默认 Edge 优先）；开始前检查、中文报错说明、状态面板不再误报成功；参考图保守压缩；源码与 EXE 同步更新。",
-  "sha256": "2c8e706da2a7220b37e0d0e4bc88c8106ebeb6563deea3fbb8d12cf451b9bc60",
-  "size": 132787609
+  "version": "1.3.34",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.34/update.zip",
+  "changelog": "新增 GPT API（Sub2API 密钥）和 ChatGPT 网页临时聊天提示词来源、ChatGPT 登录及中文错误引导、退出关闭提示；源码与 EXE 同步更新。",
+  "sha256": "818dc725f339ba72c4ac20e6f449eaca3955d28fd1a83c938e02a960176632bd",
+  "size": 133926080
 }

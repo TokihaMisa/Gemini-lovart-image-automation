@@ -37,6 +37,16 @@ gemini:
   upload_timeout: 120
   upload_attempts: 3
 
+chatgpt:
+  # ChatGPT web temporary chat; logs in through the same browser profile as Gemini.
+  reply_timeout: 600
+  upload_timeout: 120
+
+gpt_text_api:
+  # Uses SUB2API_IMAGE_API_KEY from .env. Empty base_url reuses openai_image.profiles.sub2api.base_url.
+  base_url: ""
+  model: gpt-6
+
 gemini_api:
   # Set GEMINI_API_KEY in your environment.
   base_url: "https://generativelanguage.googleapis.com/v1beta"
