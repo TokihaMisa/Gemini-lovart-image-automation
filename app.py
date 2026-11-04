@@ -12,6 +12,21 @@ if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 
+def use_utf8_output(streams=None) -> None:
+    """The packaged EXE ignores PYTHONIOENCODING, so on Chinese Windows its pipes default
+    to GBK and printing ❌/emoji crashes; the WebUI always reads child output as UTF-8."""
+    for stream in streams if streams is not None else (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
+use_utf8_output()
+
+
 class ResilientOutputStream:
     """Keep background work alive after its WebUI output pipe disconnects."""
 

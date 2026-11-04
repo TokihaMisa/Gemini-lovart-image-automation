@@ -32,3 +32,20 @@ class ResilientOutputTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Utf8OutputTests(unittest.TestCase):
+    def test_gbk_pipe_is_switched_to_utf8_so_fatal_error_marks_print(self):
+        import io
+
+        raw = io.BytesIO()
+        # What a packaged EXE gets on Chinese Windows: PYTHONIOENCODING is ignored.
+        stream = io.TextIOWrapper(raw, encoding="gbk", newline="\n")
+        app.use_utf8_output([stream])
+        stream.write("❌ 核心程序发生致命错误 🧠\n")
+        stream.flush()
+
+        self.assertEqual(raw.getvalue().decode("utf-8"), "❌ 核心程序发生致命错误 🧠\n")
+
+    def test_streams_without_reconfigure_are_left_alone(self):
+        app.use_utf8_output([object(), None])
