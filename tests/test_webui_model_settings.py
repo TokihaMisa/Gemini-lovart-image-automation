@@ -1137,6 +1137,7 @@ class WebUIModelSettingsTests(unittest.TestCase):
                 "临时聊天不可用时，允许使用普通聊天继续",
                 "Gemini 使用的浏览器",
                 "自定义浏览器路径",
+                "Gemini 档位",
             ],
         )
         browser_dropdown = next(

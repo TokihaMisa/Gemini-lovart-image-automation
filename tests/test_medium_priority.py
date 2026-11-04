@@ -16,6 +16,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 import main
 from excel_reader import resolve_image_scan_config
 from gemini_bot import (
+    TEMPORARY_CHAT_WAIT_SECONDS,
     EXTENDED_THINKING_TERMS,
     MODE_TERMS,
     TEMPORARY_CHAT_TERMS,
@@ -624,7 +625,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         with self.assertRaises(GeminiPageStructureError):
             bot.generate_prompt("产品", "Spanish", "卖点", [])
 
-        self.assertEqual(bot.chats, 4)
+        self.assertEqual(bot.chats, 4 * TEMPORARY_CHAT_WAIT_SECONDS)
         self.assertEqual(bot.messages, [])
         self.assertFalse(any("regular chat" in item for item in bot.test_logger.warnings))
 
@@ -684,7 +685,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
         result = bot.generate_prompt("产品", "Spanish", "卖点", [])
 
         self.assertGreaterEqual(len(result), 200)
-        self.assertEqual(bot.chats, 2)
+        self.assertEqual(bot.chats, 2 * TEMPORARY_CHAT_WAIT_SECONDS)
         self.assertEqual(len(bot.messages), 2)
         self.assertTrue(any("regular chat" in item for item in bot.test_logger.warnings))
 
@@ -746,7 +747,7 @@ class MediumPriorityBehaviorTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(result), 200)
         self.assertEqual(bot.test_page.goto_calls, 1)
-        self.assertEqual(bot.temporary_attempts, 2)
+        self.assertEqual(bot.temporary_attempts, TEMPORARY_CHAT_WAIT_SECONDS + 1)
 
     def test_spanish_structural_fallbacks_drive_temporary_mode_thinking_and_upload(self):
         class Locator:

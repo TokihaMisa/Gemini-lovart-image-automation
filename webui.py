@@ -51,6 +51,7 @@ from gemini_browser_session import (
     clear_stale_login_runtime,
     login_helper_is_active,
     login_runtime_paths,
+    mode_reading_paths,
     read_login_status,
     request_login_helper_close,
 )
@@ -537,6 +538,80 @@ GEMINI_BROWSER_CHOICES = [
 ]
 
 
+GEMINI_MODE_CHOICES = [
+    ("程序自动选择（Flash + 最高思考等级）", "auto"),
+    ("按我在 Gemini 里选好的档位", "manual"),
+]
+_MODE_READ_WAIT_SECONDS = 30.0
+
+
+def _manual_mode_problem(config: dict) -> str | None:
+    gemini_cfg = config.get("gemini") if isinstance(config.get("gemini"), dict) else {}
+    if gemini_cfg.get("mode_selection") != "manual":
+        return None
+    if isinstance(gemini_cfg.get("manual_thinking_level"), dict):
+        return None
+    return (
+        "Gemini 档位设为「按我在 Gemini 里选好的档位」，但还没有保存档位："
+        "请在「API 与模型」页打开 Gemini 登录浏览器，选好模型和思考等级后点「读取当前档位并保存」。"
+    )
+
+
+def read_and_save_gemini_mode(config_path: str | Path = "config.yaml") -> str:
+    """Ask the open Gemini login browser which thinking-level position is selected and save it."""
+    paths = login_runtime_paths(config_path)
+    if not login_helper_is_active(paths):
+        return "请先点「打开 Gemini 登录浏览器」，在页面里选好模型和思考等级，再点这个按钮。"
+    status = read_login_status(paths.status_path)
+    if status is not None and "chatgpt" in status.url:
+        return "当前打开的是 ChatGPT 登录浏览器，请先关闭它，再打开 Gemini 登录浏览器。"
+    if status is None or not status.ready:
+        return "Gemini 还没准备好（可能还没登录），请在登录浏览器里完成登录后再试。"
+    request, result = mode_reading_paths(paths)
+    try:
+        result.unlink()
+    except FileNotFoundError:
+        pass
+    request.parent.mkdir(parents=True, exist_ok=True)
+    request.write_text("read\n", encoding="utf-8")
+    deadline = time.monotonic() + _MODE_READ_WAIT_SECONDS
+    reading = None
+    while time.monotonic() < deadline:
+        try:
+            reading = json.loads(result.read_text(encoding="utf-8"))
+            break
+        except (OSError, ValueError):
+            time.sleep(0.5)
+    if not isinstance(reading, dict) or not reading.get("ok"):
+        return "❌ 没能读到当前档位：请确认登录浏览器里的 Gemini 页面能看到模型按钮，然后再试一次。"
+    level = {"index": int(reading.get("index") or 0), "count": int(reading.get("count") or 0)}
+    target = Path(config_path)
+    try:
+        current = yaml.safe_load(target.read_text(encoding="utf-8")) or {} if target.exists() else {}
+        updated = deepcopy(current) if isinstance(current, dict) else {}
+        gemini_cfg = updated.setdefault("gemini", {})
+        gemini_cfg["mode_selection"] = "manual"
+        gemini_cfg["manual_thinking_level"] = level
+        save_config(updated, target)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        return f"❌ 档位保存失败，原配置已保留：{exc}"
+    model = html.escape(str(reading.get("model") or "当前模型"))
+    if level["index"] <= 0:
+        return f"✅ 已保存：使用你选的「{model}」。这个页面没有思考等级菜单，程序不会改动档位。"
+    return (
+        f"✅ 已保存：思考等级为第 {level['index']} 档（共 {level['count']} 档）。"
+        f"每个新对话都会自动重选这一档；模型「{model}」由 Gemini 自己记住，程序不再切换。"
+    )
+
+
+def _manual_mode_saved(config_path: str | Path = "config.yaml") -> bool:
+    try:
+        gemini_cfg = load_config(config_path).get("gemini") or {}
+    except (OSError, ValueError, yaml.YAMLError):
+        return False
+    return gemini_cfg.get("mode_selection") == "manual"
+
+
 def _browser_selection_problem(config_path: str | Path) -> str | None:
     """Report a missing selected browser before a browser window or task starts."""
     target = Path(config_path)
@@ -624,6 +699,13 @@ def guard_gemini_browser_task(
         return None
     if login_helper_is_active(login_runtime_paths(config_path)):
         return _GEMINI_PROFILE_BUSY_MESSAGE
+    if prompt_source == "gemini_browser":
+        try:
+            manual_problem = _manual_mode_problem(load_config(config_path))
+        except (OSError, ValueError, yaml.YAMLError):
+            manual_problem = None
+        if manual_problem:
+            return manual_problem
     return _browser_selection_problem(config_path)
 
 
@@ -1194,6 +1276,7 @@ def save_gemini_browser_settings(
     browser_choice=None,
     custom_browser_path="",
     config_path="config.yaml",
+    mode_selection=None,
 ) -> str:
     target = Path(config_path)
     browser_changed = False
@@ -1217,6 +1300,10 @@ def save_gemini_browser_settings(
             )
             resolve_browser_executable(browser_cfg)
             browser_changed = (choice, browser_cfg["chrome_exe"]) != previous
+        if mode_selection is not None:
+            if mode_selection not in {value for _label, value in GEMINI_MODE_CHOICES}:
+                raise ValueError(f"未知的档位选项：{mode_selection}")
+            updated["gemini"]["mode_selection"] = mode_selection
         save_config(updated, target)
     except BrowserSelectionError as exc:
         return f"❌ {exc} 设置未保存。"
@@ -1224,6 +1311,9 @@ def save_gemini_browser_settings(
         return f"❌ Gemini 浏览器设置保存失败，原配置已保留：{exc}"
     if browser_changed:
         return "✅ Gemini 浏览器设置已保存。已切换浏览器，请点击「打开 Gemini 登录浏览器」重新登录一次。"
+    manual_problem = _manual_mode_problem(updated)
+    if manual_problem:
+        return "✅ Gemini 浏览器设置已保存。下一步：打开 Gemini 登录浏览器，选好模型和思考等级后点「读取当前档位并保存」。"
     return "✅ Gemini 浏览器设置已保存"
 
 
@@ -3342,6 +3432,9 @@ def build_ui():
     allow_regular_chat_fallback_value = (
         config.get("gemini", {}).get("allow_regular_chat_fallback") is True
     )
+    gemini_mode_value = (
+        "manual" if (config.get("gemini") or {}).get("mode_selection") == "manual" else "auto"
+    )
     browser_settings = config.get("browser") if isinstance(config.get("browser"), dict) else {}
     browser_choice_value = configured_browser_choice(browser_settings)
     custom_browser_path_value = str(browser_settings.get("chrome_exe", "") or "")
@@ -3578,12 +3671,33 @@ def build_ui():
                         queue=False,
                         api_name=False,
                     )
-                    save_gemini_browser_btn = gr.Button("保存 Gemini 浏览器设置")
+                    gemini_mode_selection = gr.Radio(
+                        label="Gemini 档位",
+                        choices=GEMINI_MODE_CHOICES,
+                        value=gemini_mode_value,
+                        info="选「按我选好的」：打开 Gemini 登录浏览器，在页面里选好模型和思考等级，再点下方「读取当前档位并保存」。"
+                        "程序只记思考等级在菜单里的位置，不记文字，Gemini 改名也不受影响。",
+                    )
+                    with gr.Row():
+                        save_gemini_browser_btn = gr.Button("保存 Gemini 浏览器设置")
+                        read_gemini_mode_btn = gr.Button("读取当前档位并保存")
                     gemini_browser_save_status = gr.Markdown("")
                     save_gemini_browser_btn.click(
-                        fn=save_gemini_browser_settings,
-                        inputs=[allow_regular_chat_fallback, gemini_browser_choice, custom_browser_path],
+                        fn=lambda fallback, choice, path, mode: save_gemini_browser_settings(
+                            fallback, choice, path, mode_selection=mode
+                        ),
+                        inputs=[allow_regular_chat_fallback, gemini_browser_choice, custom_browser_path, gemini_mode_selection],
                         outputs=gemini_browser_save_status,
+                        api_name="save_gemini_browser_settings",
+                    )
+                    read_gemini_mode_btn.click(
+                        fn=read_and_save_gemini_mode,
+                        outputs=gemini_browser_save_status,
+                        api_name="read_and_save_gemini_mode",
+                    ).then(
+                        fn=lambda: gr.update(value="manual" if _manual_mode_saved() else "auto"),
+                        outputs=gemini_mode_selection,
+                        api_name=False,
                     )
 
                     gr.Markdown("### ChatGPT 浏览器账户")

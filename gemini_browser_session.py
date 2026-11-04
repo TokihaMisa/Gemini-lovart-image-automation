@@ -729,6 +729,38 @@ def _write_helper_status(
     return return_status
 
 
+def mode_reading_paths(paths: LoginRuntimePaths) -> tuple[Path, Path]:
+    """Request/result files for reading the user's Gemini model and thinking-level choice."""
+    return (
+        Path(paths.status_path).with_name("mode-read.request"),
+        Path(paths.status_path).with_name("mode-reading.json"),
+    )
+
+
+def _write_mode_reading(paths: LoginRuntimePaths, config: Mapping[str, object], page: Any) -> None:
+    request, result = mode_reading_paths(paths)
+    try:
+        request.unlink()
+    except FileNotFoundError:
+        pass
+    payload: dict[str, object] = {"ok": False, "read_at": time.time()}
+    try:
+        import logging
+
+        from gemini_bot import GeminiBot  # gemini_bot imports this module at load time
+
+        bot = GeminiBot(page, dict(config), logging.getLogger("gemini-login-helper"))
+        choice = bot.read_thinking_level_choice()
+        payload.update(model=bot.current_mode_label())
+        if choice is not None:
+            payload.update(ok=True, **choice)
+    except Exception:
+        pass
+    temp = result.with_suffix(".tmp")
+    temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    os.replace(temp, result)
+
+
 def _login_parent_pid() -> int | None:
     try:
         pid = int(os.environ.get("LOVART_LOGIN_PARENT_PID", ""))
@@ -801,6 +833,8 @@ def run_login_helper(config_path: str | Path, site: str = "gemini") -> int:
 
                 status = inspect(page)
                 write_login_status(paths.status_path, status)
+                if site == "gemini" and status.ready and mode_reading_paths(paths)[0].exists():
+                    _write_mode_reading(paths, config, page)
                 if status.state == GeminiPageState.ERROR:
                     return 1
                 time.sleep(1)
@@ -822,6 +856,7 @@ __all__ = [
     "CHATGPT_TEMPORARY_CHAT_URL",
     "LOGIN_SITES",
     "inspect_chatgpt_page",
+    "mode_reading_paths",
     "configured_browser_choice",
     "GeminiPageState",
     "GeminiLoginRequiredError",

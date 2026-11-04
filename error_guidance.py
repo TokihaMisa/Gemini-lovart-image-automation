@@ -75,7 +75,8 @@ _GUIDANCE: tuple[tuple[tuple[str, ...], FailureGuidance], ...] = (
         ("thinking mode could not be selected", "mode menu", "temporary chat", "页面控件", "page structure changed"),
         FailureGuidance(
             "Gemini 页面控件没找到",
-            "请先在「API 与模型」页运行「Gemini 一键完整体检」，确认已登录、页面能正常打开。",
+            "请先在「API 与模型」页运行「Gemini 一键完整体检」；如果是选不上模型或思考等级，"
+            "可以把「Gemini 档位」改成「按我在 Gemini 里选好的档位」，在登录浏览器里亲手选好后点「读取当前档位并保存」。",
         ),
     ),
     (

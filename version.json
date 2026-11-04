@@ -1,7 +1,7 @@
 {
-  "version": "1.3.35",
-  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.35/update.zip",
-  "changelog": "修复 EXE 在中文 Windows 上遇到报错时再次崩溃并弹出“Unhandled exception”窗口的问题，报错现在会正常显示在面板里；源码与 EXE 同步更新。",
-  "sha256": "6ad298f8e6bf25bbc5c1401f41de53358e0c2f51ddf91697ba738d2ad52c2bf5",
-  "size": 132809191
+  "version": "1.3.36",
+  "url": "https://github.com/TokihaMisa/Gemini-lovart-image-automation/releases/download/v1.3.36/update.zip",
+  "changelog": "Gemini 选档位更稳：等按钮出现再操作；新增「按我在 Gemini 里选好的档位」，只记位置不记文字；源码与 EXE 同步更新。",
+  "sha256": "cdc0eed269b9ee57950e707a8269636466b3423d1fc7371c6bf124e433b4deeb",
+  "size": 132819092
 }

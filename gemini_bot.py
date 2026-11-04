@@ -61,6 +61,65 @@ EXTENDED_THINKING_PATTERN = (
     r"^(?:扩展思考|擴展思考|extended\s+thinking|pensamiento\s+(?:ampliado|extendido))$"
 )
 
+# "manual": keep the model the user chose in Gemini and re-select the thinking level
+# at the menu position they saved; nothing tied to the menu's wording is stored.
+MODE_SELECTION_MANUAL = "manual"
+# The model button can render a few seconds after a (temporary) chat opens.
+MODE_CONTROL_WAIT_SECONDS = 15
+# The temporary-chat button can also render after the editor is already usable.
+TEMPORARY_CHAT_WAIT_SECONDS = 10
+
+# Finds the thinking-level submenu by structure (a menu item that opens a submenu)
+# and reads or clicks a level by position. Text-free so Gemini renames do not matter.
+_THINKING_LEVEL_POSITION_SCRIPT = r"""
+(args) => {
+    const visible = (node) => {
+        if (!node) return false;
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return rect.width > 0 && rect.height > 0
+            && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const iconSelector = 'mat-icon, svg, gem-icon, .google-symbols, .material-icons, '
+        + '.material-symbols-outlined, .material-symbols-rounded, .material-symbols-sharp';
+    const selected = (node) =>
+        ['aria-checked', 'aria-selected', 'data-selected'].some(name => node.getAttribute(name) === 'true')
+        || node.hasAttribute('selected')
+        || node.classList.contains('selected') || node.classList.contains('checked')
+        || [...node.querySelectorAll(iconSelector)].some(icon => visible(icon)
+            && (icon.matches('mat-icon[data-mat-icon-name="check"], mat-icon[fonticon="check"]')
+                || /^(?:check|done|✓|✔)$/.test((icon.textContent || '').trim())));
+    const items = (root) => [...root.querySelectorAll(
+        'gem-menu-item, [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], mat-option'
+    )].filter(visible).filter(node =>
+        node.getAttribute('aria-disabled') !== 'true' && !node.hasAttribute('disabled'));
+    const triggers = items(document).filter(node =>
+        ['true', 'menu'].includes(node.getAttribute('aria-haspopup')));
+    if (!triggers.length) return {state: 'no_submenu'};
+    const trigger = triggers[0];
+    if (args.action === 'open') {
+        if (trigger.getAttribute('aria-expanded') !== 'true') trigger.click();
+        return {state: 'opened'};
+    }
+    const panelId = trigger.getAttribute('aria-controls');
+    let panel = panelId ? document.getElementById(panelId) : null;
+    if (!panel) {
+        const parent = trigger.closest('[role="menu"]');
+        panel = [...document.querySelectorAll('[role="menu"]')].filter(visible)
+            .filter(menu => menu !== parent && !menu.contains(trigger)).pop() || null;
+    }
+    if (!panel || !visible(panel)) return {state: 'closed'};
+    const levels = items(panel).filter(node => node !== trigger);
+    if (args.action === 'click') {
+        const target = levels[args.index - 1];
+        if (!target) return {state: 'missing', count: levels.length};
+        if (!selected(target)) target.click();
+        return {state: 'clicked', count: levels.length};
+    }
+    return {state: 'read', count: levels.length, index: levels.findIndex(selected) + 1};
+}
+"""
+
 GEMINI_EDITOR_SELECTOR = (
     '[contenteditable="true"][role="textbox"], '
     'rich-textarea [contenteditable="true"], '
@@ -199,6 +258,7 @@ class GeminiBot:
         self.run_dir = Path(run_dir) if run_dir else None
         self.prompt_settings = get_prompt_settings(config)
         self._flash_selection_failed = False
+        self._temporary_chat_clicks = 0
 
     def _health_check_any_visible(
         self,
@@ -345,7 +405,7 @@ class GeminiBot:
         if status.state is not GeminiPageState.READY or not status.ready:
             raise GeminiPageNotReadyError()
 
-        temporary_chat_started = self._start_temporary_chat()
+        temporary_chat_started = self._wait_and_start_temporary_chat()
         if (
             not temporary_chat_started
             and self.cfg.get("allow_regular_chat_fallback") is not True
@@ -432,7 +492,7 @@ class GeminiBot:
                 raise GeminiLoginRequiredError()
             if status.state is not GeminiPageState.READY or not status.ready:
                 raise GeminiPageNotReadyError()
-            temporary_chat_started = self._start_temporary_chat()
+            temporary_chat_started = self._wait_and_start_temporary_chat()
             if not temporary_chat_started:
                 self.logger.info(
                     "Gemini: reopening the new-chat page to recover the temporary chat control"
@@ -444,7 +504,7 @@ class GeminiBot:
                     raise GeminiLoginRequiredError()
                 if status.state is not GeminiPageState.READY or not status.ready:
                     raise GeminiPageNotReadyError()
-                temporary_chat_started = self._start_temporary_chat()
+                temporary_chat_started = self._wait_and_start_temporary_chat()
             if not temporary_chat_started:
                 if self.cfg.get("allow_regular_chat_fallback") is not True:
                     raise GeminiPageStructureError(
@@ -633,6 +693,29 @@ class GeminiBot:
             self.page.wait_for_timeout(250)
         return False
 
+    def _wait_and_start_temporary_chat(self) -> bool:
+        """Wait for a late-rendering temporary-chat control, but toggle it only once."""
+        clicks_before = getattr(self, "_temporary_chat_clicks", 0)
+        for attempt in range(TEMPORARY_CHAT_WAIT_SECONDS):
+            last = attempt + 1 == TEMPORARY_CHAT_WAIT_SECONDS
+            # The hover-tooltip scan is slow, so only fall back to it on the last try.
+            self._temporary_chat_hover_allowed = last
+            try:
+                started = self._start_temporary_chat()
+            finally:
+                self._temporary_chat_hover_allowed = True
+            if started:
+                return True
+            if getattr(self, "_temporary_chat_clicks", 0) != clicks_before:
+                # Clicked but not active yet: a second click could switch it back off.
+                return self._wait_for_temporary_chat_active()
+            if not last:
+                self._pause(1000)
+        return False
+
+    def _note_temporary_chat_click(self) -> None:
+        self._temporary_chat_clicks = getattr(self, "_temporary_chat_clicks", 0) + 1
+
     def _start_temporary_chat(self, *, wait_for_active: bool = True) -> bool:
         """Open Gemini temporary chat/session when the UI exposes that control."""
         if self.health_check_temporary_chat_active():
@@ -658,6 +741,7 @@ class GeminiBot:
                 control = self.page.locator(selector).first
                 if control.is_visible(timeout=1500) and control.is_enabled():
                     control.click(timeout=3000)
+                    self._note_temporary_chat_click()
                     self.logger.info(f"Gemini: temporary chat clicked via {selector}")
                     if wait_for_active:
                         self.page.wait_for_timeout(1500)
@@ -666,6 +750,7 @@ class GeminiBot:
                 continue
 
         if self._click_normalized_dom_term(TEMPORARY_CHAT_TERMS, "temporary chat"):
+            self._note_temporary_chat_click()
             if wait_for_active:
                 self.page.wait_for_timeout(1500)
             return not wait_for_active or self._wait_for_temporary_chat_active()
@@ -702,6 +787,7 @@ class GeminiBot:
         try:
             clicked = self.page.evaluate(script)
             if clicked:
+                self._note_temporary_chat_click()
                 self.logger.info("Gemini: temporary chat clicked via DOM scan")
                 if wait_for_active:
                     self.page.wait_for_timeout(1500)
@@ -709,10 +795,13 @@ class GeminiBot:
         except Exception:
             self.logger.warning("Gemini: temporary chat DOM scan was unavailable")
 
-        if self._click_temporary_chat_via_hover_tooltip():
+        if getattr(self, "_temporary_chat_hover_allowed", True) and self._click_temporary_chat_via_hover_tooltip():
+            self._note_temporary_chat_click()
             return not wait_for_active or self._wait_for_temporary_chat_active()
 
-        self.logger.warning("Gemini: temporary chat control not found")
+        if getattr(self, "_temporary_chat_hover_allowed", True):
+            # Earlier tries inside _wait_and_start_temporary_chat are expected to miss.
+            self.logger.warning("Gemini: temporary chat control not found")
         return False
 
     def _click_temporary_chat_via_hover_tooltip(self) -> bool:
@@ -764,6 +853,8 @@ class GeminiBot:
     def _select_thinking_mode(self) -> bool:
         """Select Flash or the Auto-only UI with verified High/Extended thinking."""
         try:
+            if self.cfg.get("mode_selection") == MODE_SELECTION_MANUAL:
+                return self._apply_manual_thinking_level()
             return self._select_thinking_mode_controls()
         finally:
             # Verification may reopen both menus; release their backdrop before typing.
@@ -773,8 +864,119 @@ class GeminiBot:
             except Exception:
                 pass
 
+    def _pause(self, milliseconds: int) -> None:
+        waiter = getattr(self.page, "wait_for_timeout", None)
+        if callable(waiter):
+            waiter(milliseconds)
+
+    def _wait_for_mode_menu(self) -> bool:
+        """Open the model menu, waiting for a button that renders after the chat opens."""
+        for attempt in range(MODE_CONTROL_WAIT_SECONDS):
+            if self._open_mode_menu():
+                return True
+            if attempt + 1 < MODE_CONTROL_WAIT_SECONDS:
+                self._pause(1000)
+        return False
+
+    def _thinking_level_position(self, action: str, index: int = 0) -> dict:
+        try:
+            result = self.page.evaluate(_THINKING_LEVEL_POSITION_SCRIPT, {"action": action, "index": index})
+        except Exception:
+            return {}
+        return result if isinstance(result, dict) else {}
+
+    def _read_thinking_level_position(self) -> dict:
+        """Open the level submenu (model menu must be open) and read the selected position."""
+        if self._thinking_level_position("open").get("state") == "no_submenu":
+            return {"state": "no_submenu"}
+        for _ in range(10):
+            self.page.wait_for_timeout(300)
+            state = self._thinking_level_position("read")
+            if state.get("state") == "read" and state.get("count"):
+                return state
+        return {}
+
+    def read_thinking_level_choice(self) -> dict | None:
+        """What the user picked: {"index", "count"} by position; index 0 = no level control."""
+        try:
+            if not self._wait_for_mode_menu():
+                return None
+            self.page.wait_for_timeout(500)
+            state = self._read_thinking_level_position()
+            if state.get("state") == "no_submenu":
+                return {"index": 0, "count": 0}
+            if state.get("index", 0) > 0:
+                return {"index": int(state["index"]), "count": int(state["count"])}
+            return None
+        finally:
+            try:
+                self.page.keyboard.press("Escape")
+                self.page.keyboard.press("Escape")
+            except Exception:
+                pass
+
+    def current_mode_label(self) -> str:
+        """Display-only text of the model button, e.g. for logs and the settings page."""
+        script = r"""
+        () => {
+            const visible = (node) => { const rect = node.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0; };
+            const toolbar = [...document.querySelectorAll('button, [role="button"]')].filter(visible)
+                .filter(node => !node.closest('[role="menu"], [role^="menuitem"], gem-menu-item'));
+            // Prefer the control labelled as the mode picker; generic menu buttons ("More") come last.
+            const button = toolbar.find(node => /mode|模式|modo/i.test(node.getAttribute('aria-label') || ''))
+                || toolbar.filter(node => (node.innerText || '').trim())
+                    .find(node => ['menu', 'true'].includes(node.getAttribute('aria-haspopup'))
+                        && node.closest('form, [class*="input"], [class*="composer"]'));
+            return button ? (button.innerText || '').replace(/\s+/g, ' ').trim() : '';
+        }
+        """
+        try:
+            return str(self.page.evaluate(script) or "")
+        except Exception:
+            return ""
+
+    def _apply_manual_thinking_level(self) -> bool:
+        saved = self.cfg.get("manual_thinking_level")
+        saved = saved if isinstance(saved, dict) else {}
+        index, count = int(saved.get("index") or 0), int(saved.get("count") or 0)
+        if not self._wait_for_mode_menu():
+            self.logger.warning("Gemini: mode menu control not found")
+            return False
+        model = self.current_mode_label() or "unknown"
+        if index <= 0:
+            self.logger.info(f"Gemini: using the model chosen in the browser ({model}); no thinking level saved")
+            return True
+        self.page.wait_for_timeout(500)
+        state = self._read_thinking_level_position()
+        if not state.get("count"):
+            self.logger.warning("Gemini: thinking level menu not found")
+            return False
+        target = index
+        if state["count"] != count:
+            # A saved "last option" means "highest"; otherwise keep the same position if it exists.
+            target = state["count"] if index == count else min(index, state["count"])
+            self.logger.warning(
+                f"Gemini: thinking level options changed ({count} -> {state['count']}); using position {target}"
+            )
+        if state.get("index") != target:
+            self._thinking_level_position("click", target)
+            self.page.wait_for_timeout(800)
+            state = self._thinking_level_position("read")
+            if state.get("state") != "read":
+                # Gemini closes the menu on selection: reopen it to verify the checkmark.
+                if not self._wait_for_mode_menu():
+                    return False
+                self.page.wait_for_timeout(500)
+                state = self._read_thinking_level_position()
+        if state.get("index") != target:
+            self.logger.warning(f"Gemini: saved thinking level position {target} could not be confirmed")
+            return False
+        self.logger.info(f"Gemini: using {model} with saved thinking level position {target}/{state['count']}")
+        return True
+
     def _select_thinking_mode_controls(self) -> bool:
-        if not self._open_mode_menu():
+        if not self._wait_for_mode_menu():
             if self._current_model_is_flash() and self._current_thinking_level_is_extended():
                 self.logger.info("Gemini: Flash extended thinking mode already selected")
                 return True
@@ -980,8 +1182,13 @@ class GeminiBot:
         return self._click_gemini_control(selectors, r'[/思考等级/, /thinking level/i, /nivel de pensamiento/i]', "thinking level menu")
 
     def _click_extended_thinking_level(self) -> bool:
-        if not self._mode_menu_option(HIGH_THINKING_PATTERN, click=True):
-            return False
+        # The submenu slides in after the click that opened it.
+        for attempt in range(10):
+            if self._mode_menu_option(HIGH_THINKING_PATTERN, click=True):
+                break
+            if attempt == 9:
+                return False
+            self._pause(500)
         self.page.wait_for_timeout(300)
         if self._current_thinking_level_is_extended():
             return True

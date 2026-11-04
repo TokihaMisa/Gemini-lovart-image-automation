@@ -220,6 +220,8 @@ def run_checks(harness: HealthCheckHarness) -> Iterator[HealthCheckResult]:
                     model = getattr(harness, "selected_model", None)
                     if model in ("Flash", "Auto"):
                         message = f"已选择 {model}"
+                    elif model:
+                        message = f"使用你在 Gemini 里选的「{model}」"
 
             state = CheckState.PASS if passed else CheckState.FAIL
             yield HealthCheckResult(check.name, state, message)
@@ -396,6 +398,11 @@ class PlaywrightGeminiHealthCheckHarness:
 
     def select_model(self) -> bool:
         self.selected_model = None
+
+        if self.bot and self.bot.cfg.get("mode_selection") == "manual":
+            # Manual mode keeps the user's model; only confirm the model button is there.
+            self.selected_model = self.bot.current_mode_label() or "当前模型"
+            return True
 
         def select() -> bool:
             self.selected_model = self.bot._select_prompt_model()
